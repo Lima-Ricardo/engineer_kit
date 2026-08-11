@@ -1,0 +1,7 @@
+engineer_kit_example:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('ENGINEER_KIT_DUCKDB_PATH') }}"
+      threads: 4

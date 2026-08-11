@@ -1,0 +1,19 @@
+name: 'engineer_kit_example'
+version: '1.0.0'
+config-version: 2
+profile: 'engineer_kit_example'
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  engineer_kit_example:
+    staging:
+      +materialized: view
+    silver:
+      +materialized: table
+    gold:
+      +materialized: table
