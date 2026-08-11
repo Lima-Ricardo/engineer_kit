@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "engineer_kit"
+version = "0.1.0"
+description = "Biblioteca de ingestao de APIs: conectores -> DuckDB -> dbt"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "duckdb>=1.0.0",
+    "dbt-duckdb>=1.8.0",
+    "apscheduler>=3.10",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+engineer_kit = "engineer_kit.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/engineer_kit"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
