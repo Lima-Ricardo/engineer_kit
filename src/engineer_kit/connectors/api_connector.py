@@ -8,7 +8,12 @@ from typing import Any, Iterator, Optional, Union
 
 import requests
 
-from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
+from engineer_kit.connectors.date_field import DateFieldSpec
+from engineer_kit.connectors.extraction import (
+    DEFAULT_EXTRACTION_BATCH_SIZE,
+    ExtractionSession,
+    validate_extraction_batch_size,
+)
 from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
@@ -26,7 +31,13 @@ class MissingDateFieldError(ValueError):
 
 
 class APIConnector(ABC):
-    """Base for API connectors with reusable pagination and incremental state."""
+    """Base for API connectors with reusable pagination and incremental state.
+
+    The preferred public API is :meth:`extract_incremental`, which returns a
+    single-pass :class:`ExtractionSession`. Iterating that session yields bounded
+    batches (25,000 records by default). The legacy :meth:`extract` record stream
+    remains available for compatibility and for low-level consumers.
+    """
 
     def __init__(
         self,
@@ -39,6 +50,7 @@ class APIConnector(ABC):
         initial_start: Optional[date] = None,
         date_field: Optional[DateFieldSpec] = None,
         incremental: Optional[IncrementalStrategy] = None,
+        extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -51,8 +63,8 @@ class APIConnector(ABC):
         self._pagination = pagination
         self._method = method
         self._date_field = date_field
-        self._current_window: Optional[IncrementalWindow] = None
-        self._max_data_date_seen: Optional[date] = None
+        self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
+        self._legacy_session: ExtractionSession | None = None
 
         if incremental is not None:
             self._incremental = incremental
@@ -74,14 +86,21 @@ class APIConnector(ABC):
             )
 
     @property
+    def extraction_batch_size(self) -> int:
+        """Default batch size used by new ExtractionSession objects."""
+        return self._extraction_batch_size
+
+    @property
     def current_window(self) -> IncrementalWindow | None:
-        """Incremental window prepared for the current extraction attempt."""
-        return self._current_window
+        """Incremental window prepared by the latest legacy extraction attempt."""
+        return self._legacy_session.window if self._legacy_session is not None else None
 
     @property
     def max_data_date_seen(self) -> date | None:
-        """Largest record date observed in the current extraction stream."""
-        return self._max_data_date_seen
+        """Largest record date observed by the latest legacy extraction stream."""
+        if self._legacy_session is None:
+            return None
+        return self._legacy_session.max_data_date_seen
 
     @abstractmethod
     def build_request(
@@ -93,11 +112,41 @@ class APIConnector(ABC):
     def parse_response(self, response: requests.Response) -> ParsedPage:
         """Extract records, raw response and headers."""
 
+    def extract_incremental(
+        self,
+        end: Union[date, str] = "today",
+        *,
+        batch_size: int | None = None,
+    ) -> ExtractionSession:
+        """Create one streaming-first incremental extraction session.
+
+        Normal iteration yields batches. The checkpoint is not persisted until
+        ``session.commit()`` is called after complete consumption and successful
+        downstream processing.
+        """
+        window = self._incremental.resolve_window(end)
+        resolved_batch_size = (
+            self._extraction_batch_size
+            if batch_size is None
+            else validate_extraction_batch_size(batch_size)
+        )
+        return ExtractionSession(
+            window=window,
+            records=self._iter_records(window),
+            incremental=self._incremental,
+            date_field=self._date_field,
+            batch_size=resolved_batch_size,
+        )
+
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
-        """Prepare the incremental window and return a lazy record stream."""
-        self._current_window = self._incremental.resolve_window(end)
-        self._max_data_date_seen = None
-        return self._iter_records(self._current_window)
+        """Return the legacy lazy record stream.
+
+        New code should prefer ``extract_incremental()`` and normal session
+        iteration so bounded batches are the default user experience.
+        """
+        session = self.extract_incremental(end)
+        self._legacy_session = session
+        return session.iter_records()
 
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
         page_params = self._pagination.initial_params()
@@ -112,9 +161,7 @@ class APIConnector(ABC):
             response = self._http.request(self._method, **request_kwargs)
             page = self.parse_response(response)
 
-            for record in page.records:
-                self._track_max_data_date(record)
-                yield record
+            yield from page.records
 
             next_params = self._pagination.next_params(page, page_params)
             if next_params is None:
@@ -125,23 +172,8 @@ class APIConnector(ABC):
                 next_url = None
                 page_params = next_params
 
-    def _track_max_data_date(self, record: dict[str, Any]) -> None:
-        if self._date_field is None:
-            return
-        seen = extract_date_value(record, self._date_field)
-        if seen is None:
-            return
-        if self._max_data_date_seen is None or seen > self._max_data_date_seen:
-            self._max_data_date_seen = seen
-
     def commit_watermark(self, max_data_date: Optional[date] = None) -> Watermark:
-        """Confirm and return the checkpoint after the destination confirms the load."""
-        if self._current_window is None:
+        """Compatibility wrapper for code that uses ``extract()`` directly."""
+        if self._legacy_session is None:
             raise RuntimeError("commit_watermark() chamado antes de extract() rodar.")
-        effective_max_date = (
-            max_data_date if max_data_date is not None else self._max_data_date_seen
-        )
-        return self._incremental.commit(
-            self._current_window,
-            max_data_date=effective_max_date,
-        )
+        return self._legacy_session.commit(max_data_date=max_data_date)
