@@ -21,6 +21,12 @@ _RUN_LOG_SCHEMA = pa.schema(
         pa.field("rows_loaded", pa.int64()),
         pa.field("extra_fields_seen", pa.string()),
         pa.field("error_message", pa.string()),
+        pa.field("run_id", pa.string()),
+        pa.field("destination", pa.string()),
+        pa.field("window_start", pa.date32()),
+        pa.field("window_end", pa.date32()),
+        pa.field("watermark_before", pa.string()),
+        pa.field("watermark_after", pa.string()),
     ]
 )
 
@@ -53,6 +59,12 @@ class DeltaRunLogStore(RunLogBackend):
                         entry.extra_fields_seen, ensure_ascii=False
                     ),
                     "error_message": entry.error_message,
+                    "run_id": entry.run_id,
+                    "destination": entry.destination,
+                    "window_start": entry.window_start,
+                    "window_end": entry.window_end,
+                    "watermark_before": entry.watermark_before,
+                    "watermark_after": entry.watermark_after,
                 }
             ],
             schema=_RUN_LOG_SCHEMA,
@@ -61,6 +73,7 @@ class DeltaRunLogStore(RunLogBackend):
             self._table_uri,
             table,
             mode="append",
+            schema_mode="merge",
             storage_options=self._storage_options or None,
         )
 
