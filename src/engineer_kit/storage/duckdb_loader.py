@@ -1,15 +1,8 @@
-"""Grava lotes de registros extraidos por um conector na camada bronze
-do DuckDB, seguindo um schema declarado explicitamente (ver schema.py).
+"""Grava lotes de registros extraidos por um conector na camada Bronze do DuckDB.
 
-Nao ha inferencia dinamica de colunas nem ALTER TABLE automatico: a
-tabela e criada uma vez a partir do schema declarado, e so muda quando
-o dev muda o schema. Campo que a API manda fora do schema vai para
-`_extra` (JSON) com um aviso simples no log — nunca quebra a carga.
-
-Os registros sao consumidos e gravados em blocos (`batch_size`), nao
-tudo de uma vez: para uma extracao grande, isso limita quanto fica na
-memoria a qualquer momento, em vez de acumular tudo antes de escrever
-a primeira linha no DuckDB.
+DuckDB e uma implementacao local/zero-infra de :class:`Destination`.
+O core do engineer_kit nao depende dele: outros adapters podem persistir
+a mesma carga em Parquet, Delta/Lakehouse ou backends customizados.
 """
 
 from __future__ import annotations
@@ -27,6 +20,7 @@ from tqdm import tqdm
 from engineer_kit.storage.destination import Destination, LoadResult
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import validate_identifier
+from engineer_kit.storage.run_log import DuckDBRunLogStore, RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
 
@@ -34,9 +28,6 @@ logger = logging.getLogger("engineer_kit.storage")
 
 _METADATA_COLUMNS = ["_source", "_endpoint", "_ingested_at", "_raw", "_extra"]
 
-# limites globais para o tamanho do bloco de gravacao -- protege contra
-# um valor absurdamente pequeno (grava linha a linha, lento) ou grande
-# (materializa demais de uma vez, volta o problema que isso resolve).
 MIN_BATCH_SIZE = 100
 MAX_BATCH_SIZE = 100_000
 DEFAULT_BATCH_SIZE = 5000
@@ -56,8 +47,7 @@ def _validate_batch_size(batch_size: int) -> int:
 
 
 def _iter_in_batches(records: Iterator[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
-    """Consome o iterator em fatias de `batch_size`, sem materializar o
-    restante -- cada fatia e descartada da memoria assim que gravada."""
+    """Consome o iterator em fatias sem materializar a extracao inteira."""
     while True:
         batch = list(itertools.islice(records, batch_size))
         if not batch:
@@ -66,6 +56,8 @@ def _iter_in_batches(records: Iterator[dict[str, Any]], batch_size: int) -> Iter
 
 
 class DuckDBLoader(Destination):
+    """Destination local que materializa a Bronze no DuckDB."""
+
     def __init__(
         self,
         conn: duckdb.DuckDBPyConnection,
@@ -80,11 +72,12 @@ class DuckDBLoader(Destination):
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
-        """Expoe a conexao ja recebida no construtor -- quem criou o
-        loader ja tinha essa conexao; isso so permite que outras partes
-        da lib (ex.: Pipeline montando um RunLogStore) a reaproveitem
-        sem precisar guardar uma referencia separada."""
+        """Compatibilidade: expoe a conexao recebida pelo adapter."""
         return self._conn
+
+    def default_run_log_backend(self) -> RunLogBackend:
+        """Usa a mesma conexao local para auditoria sem o Pipeline conhecer DuckDB."""
+        return DuckDBRunLogStore(self._conn)
 
     def load(
         self,
