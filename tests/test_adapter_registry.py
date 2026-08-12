@@ -3,7 +3,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from engineer_kit.adapters.registry import available_adapters
+from engineer_kit.adapters.registry import (
+    AdapterContext,
+    available_adapters,
+    register_destination,
+    resolve_auto,
+)
 from engineer_kit.config.pipeline_config import (
     ColumnConfig,
     ConnectorConfig,
@@ -29,11 +34,24 @@ def _config(destination: DestinationConfig) -> PipelineConfig:
     )
 
 
-def test_builtin_registry_lists_portable_adapters():
+def test_builtin_registry_lists_real_backend_names():
     adapters = available_adapters()
     assert {"duckdb", "parquet", "delta"}.issubset(adapters["destination"])
-    assert {"duckdb", "parquet", "delta", "file"}.issubset(adapters["state_store"])
-    assert {"duckdb", "parquet", "delta", "file"}.issubset(adapters["run_log"])
+    assert {"duckdb", "delta", "file"}.issubset(adapters["state_store"])
+    assert "parquet" not in adapters["state_store"]
+    assert {"duckdb", "delta", "file"}.issubset(adapters["run_log"])
+    assert "parquet" not in adapters["run_log"]
+
+
+def test_parquet_auto_metadata_resolves_to_file_backend():
+    assert resolve_auto("auto", destination_type="parquet", kind="state") == "file"
+    assert resolve_auto("auto", destination_type="parquet", kind="run_log") == "file"
+
+
+def test_custom_destination_does_not_silently_fall_back_to_local_files():
+    register_destination("test_custom_without_metadata", lambda config, context: object())
+    with pytest.raises(ValueError, match="Nao existe adapter automatico"):
+        resolve_auto("auto", destination_type="test_custom_without_metadata", kind="state")
 
 
 def test_duckdb_builder_uses_runtime_connection_and_auto_metadata():
