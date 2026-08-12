@@ -11,7 +11,7 @@ independent from API pagination and from destination write batching.
 from __future__ import annotations
 
 from datetime import date
-from typing import Callable, Iterator, Optional
+from typing import Iterator, Optional
 
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
 from engineer_kit.connectors.incremental import IncrementalStrategy, IncrementalWindow
