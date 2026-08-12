@@ -153,7 +153,7 @@ class DestinationConfig:
     """Physical Bronze destination selected through the adapter registry."""
 
     type: str = "duckdb"
-    path: Optional[str] = "warehouse.duckdb"
+    path: Optional[str] = None
     schema: str = "bronze"
     batch_size: int = 1000
     write_mode: str = "append"
