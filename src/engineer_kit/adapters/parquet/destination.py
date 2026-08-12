@@ -1,8 +1,9 @@
-"""Streaming Parquet destination for the Bronze layer."""
+"""Streaming Parquet destination for the portable Bronze layer."""
 
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -12,7 +13,7 @@ import pyarrow.parquet as pq
 from engineer_kit.adapters._arrow import bronze_arrow_schema, rows_to_table
 from engineer_kit.storage.batching import DEFAULT_BATCH_SIZE, iter_in_batches, validate_batch_size
 from engineer_kit.storage.bronze import build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult
+from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
@@ -21,12 +22,12 @@ logger = logging.getLogger("engineer_kit.storage.parquet")
 
 
 class ParquetDestination(Destination):
-    """Append each successful ingestion run as one immutable Parquet file.
+    """Write one immutable Parquet file per successful append run.
 
-    Batches are streamed as row groups into a temporary file. The final file
-    becomes visible only after the writer closes successfully and ``replace``
-    promotes it into the endpoint directory. This keeps memory bounded and
-    prevents a normal Python exception mid-load from exposing a partial run.
+    Batches are streamed as row groups into a temporary file. The file becomes
+    visible only after the writer closes successfully. ``overwrite`` stages a
+    complete replacement directory first and swaps it into place only after
+    the source iterator has been fully consumed.
     """
 
     def __init__(
@@ -34,10 +35,16 @@ class ParquetDestination(Destination):
         base_path: str | Path,
         batch_size: int = DEFAULT_BATCH_SIZE,
         compression: str = "snappy",
+        write_mode: WriteMode | str = WriteMode.APPEND,
     ) -> None:
         self._base_path = Path(base_path)
         self._batch_size = validate_batch_size(batch_size)
         self._compression = compression
+        self._write_mode = WriteMode.parse(write_mode)
+
+    @property
+    def write_mode(self) -> WriteMode:
+        return self._write_mode
 
     def load(
         self,
@@ -48,18 +55,25 @@ class ParquetDestination(Destination):
     ) -> LoadResult:
         endpoint_name = validate_identifier(endpoint, "endpoint")
         endpoint_dir = self._base_path / endpoint_name
-        staging_dir = self._base_path / ".engineer_kit_staging" / endpoint_name
-        endpoint_dir.mkdir(parents=True, exist_ok=True)
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_root = self._base_path / ".engineer_kit_staging" / endpoint_name
+        staging_root.mkdir(parents=True, exist_ok=True)
 
         run_id = uuid4().hex
-        temp_path = staging_dir / f"{run_id}.parquet.tmp"
-        final_path = endpoint_dir / f"part-{run_id}.parquet"
         arrow_schema = bronze_arrow_schema(schema)
         total_rows = 0
         all_extra_fields: set[str] = set()
-        writer: pq.ParquetWriter | None = None
 
+        if self._write_mode is WriteMode.OVERWRITE:
+            staged_dir = staging_root / f"replace-{run_id}"
+            staged_dir.mkdir(parents=True, exist_ok=False)
+            temp_path = staged_dir / f"part-{run_id}.parquet"
+            final_path = temp_path
+        else:
+            endpoint_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = staging_root / f"{run_id}.parquet.tmp"
+            final_path = endpoint_dir / f"part-{run_id}.parquet"
+
+        writer: pq.ParquetWriter | None = None
         try:
             for batch in iter_in_batches(records, self._batch_size):
                 rows, extra_fields = build_bronze_rows(
@@ -67,7 +81,6 @@ class ParquetDestination(Destination):
                 )
                 all_extra_fields.update(extra_fields)
                 table = rows_to_table(rows, schema)
-
                 if writer is None:
                     writer = pq.ParquetWriter(
                         temp_path,
@@ -81,26 +94,23 @@ class ParquetDestination(Destination):
             if writer is not None:
                 writer.close()
                 writer = None
+
+            if self._write_mode is WriteMode.OVERWRITE:
+                # Empty overwrite intentionally replaces the endpoint with an
+                # empty directory rather than leaving stale files visible.
+                self._promote_overwrite(staged_dir, endpoint_dir, run_id)
+            elif total_rows:
                 temp_path.replace(final_path)
         except Exception:
             if writer is not None:
                 writer.close()
-            temp_path.unlink(missing_ok=True)
+            if self._write_mode is WriteMode.OVERWRITE:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+            else:
+                temp_path.unlink(missing_ok=True)
             raise
 
-        if all_extra_fields:
-            logger.warning(
-                "Endpoint '%s': campos fora do schema preservados em _extra: %s",
-                endpoint_name,
-                sorted(all_extra_fields),
-            )
-            visual_logger.warning(
-                "'{}': {} coluna(s) nova(s) preservada(s) em _extra: {}",
-                connector_name,
-                len(all_extra_fields),
-                sorted(all_extra_fields),
-            )
-
+        self._report_extra_fields(connector_name, endpoint_name, all_extra_fields)
         visual_logger.success(
             "'{}': {} registros gravados em Parquet: {}",
             connector_name,
@@ -111,6 +121,40 @@ class ParquetDestination(Destination):
             table=str(endpoint_dir),
             rows_loaded=total_rows,
             extra_fields_seen=sorted(all_extra_fields),
+        )
+
+    @staticmethod
+    def _promote_overwrite(staged_dir: Path, endpoint_dir: Path, run_id: str) -> None:
+        backup = endpoint_dir.with_name(f".{endpoint_dir.name}.backup-{run_id}")
+        had_previous = endpoint_dir.exists()
+        try:
+            if had_previous:
+                endpoint_dir.replace(backup)
+            staged_dir.replace(endpoint_dir)
+        except Exception:
+            if not endpoint_dir.exists() and backup.exists():
+                backup.replace(endpoint_dir)
+            raise
+        else:
+            if backup.exists():
+                shutil.rmtree(backup)
+
+    @staticmethod
+    def _report_extra_fields(
+        connector_name: str, endpoint_name: str, extra_fields: set[str]
+    ) -> None:
+        if not extra_fields:
+            return
+        logger.warning(
+            "Endpoint '%s': campos fora do schema preservados em _extra: %s",
+            endpoint_name,
+            sorted(extra_fields),
+        )
+        visual_logger.warning(
+            "'{}': {} coluna(s) nova(s) preservada(s) em _extra: {}",
+            connector_name,
+            len(extra_fields),
+            sorted(extra_fields),
         )
 
 
