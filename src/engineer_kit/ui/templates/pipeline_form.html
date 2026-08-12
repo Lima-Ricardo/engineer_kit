@@ -2,12 +2,14 @@
 {% block title %}{{ "Editar" if config else "Novo" }} pipeline - engineer_kit{% endblock %}
 {% block content %}
 <h1>{{ "Editar pipeline" if config else "Novo pipeline" }}</h1>
-<p class="subtitle">Monte o fluxo por contratos: API → checkpoint → Bronze → transformação opcional.</p>
+<p class="subtitle">Monte o fluxo por contratos: API → extraction batches → checkpoint → Bronze → transformação opcional.</p>
 
 {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
 
 <div class="flow-strip compact-flow">
     <div class="flow-node"><strong>Source</strong><span>RestConnector</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node"><strong>Extraction</strong><span>ExtractionSession</span></div>
     <div class="flow-arrow">→</div>
     <div class="flow-node"><strong>State</strong><span>StateStore</span></div>
     <div class="flow-arrow">→</div>
@@ -42,6 +44,11 @@
             <input type="text" name="records_path" value="{{ config.connector.records_path if config and config.connector.records_path else '' }}" placeholder="results">
             <div class="field-hint">Deixe vazio quando a resposta da API já for uma lista.</div>
         </div>
+        <div class="field">
+            <label>Extraction batch size</label>
+            <input type="number" min="1" name="extraction_batch_size" value="{{ config.connector.extraction_batch_size if config else 25000 }}" required>
+            <div class="field-hint">Default: <code>25.000</code> registros. Limita a quantidade entregue ao consumidor por vez. É independente do tamanho da página da API e do write batch do destino.</div>
+        </div>
     </fieldset>
 
     <fieldset>
@@ -66,11 +73,12 @@
         <legend>Paginação</legend>
         <div class="field"><label>Estratégia</label><select name="pagination_type" id="pagination_type">{% for ptype in pagination_types %}<option value="{{ ptype }}" {{ "selected" if config and config.connector.pagination.type == ptype else "" }}>{{ ptype }}</option>{% endfor %}</select></div>
         {% set p = config.connector.pagination.params if config else {} %}
-        <div class="pagination-fields" data-type="page"><div class="field-row"><div class="field"><label>Parâmetro página</label><input type="text" name="page_param" value="{{ p.get('page_param', 'page') }}"></div><div class="field"><label>Parâmetro tamanho</label><input type="text" name="page_size_param" value="{{ p.get('page_size_param', 'per_page') }}"></div><div class="field"><label>Tamanho</label><input type="number" name="page_size" value="{{ p.get('page_size', 100) }}"></div></div></div>
+        <div class="pagination-fields" data-type="page"><div class="field-row"><div class="field"><label>Parâmetro página</label><input type="text" name="page_param" value="{{ p.get('page_param', 'page') }}"></div><div class="field"><label>Parâmetro tamanho</label><input type="text" name="page_size_param" value="{{ p.get('page_size_param', 'per_page') }}"></div><div class="field"><label>Tamanho da página da API</label><input type="number" name="page_size" value="{{ p.get('page_size', 100) }}"></div></div></div>
         <div class="pagination-fields" data-type="offset"><div class="field-row"><div class="field"><label>Parâmetro offset</label><input type="text" name="offset_param" value="{{ p.get('offset_param', 'offset') }}"></div><div class="field"><label>Parâmetro limite</label><input type="text" name="limit_param" value="{{ p.get('limit_param', 'limit') }}"></div><div class="field"><label>Limite</label><input type="number" name="limit" value="{{ p.get('limit', 100) }}"></div></div></div>
         <div class="pagination-fields" data-type="cursor"><div class="field-row"><div class="field"><label>Parâmetro cursor</label><input type="text" name="cursor_param" value="{{ p.get('cursor_param', 'cursor') }}"></div><div class="field"><label>Campo cursor na resposta</label><input type="text" name="cursor_field" value="{{ p.get('cursor_field', 'next_cursor') }}"></div></div></div>
         <div class="pagination-fields" data-type="link_header"><div class="field"><label>Header</label><input type="text" name="header_name" value="{{ p.get('header_name', 'Link') }}"></div></div>
         <div class="pagination-fields" data-type="next_url"><div class="field"><label>Campo da próxima URL</label><input type="text" name="next_url_field" value="{{ p.get('next_url_field', 'next') }}"></div></div>
+        <div class="field-hint">Exemplo: uma API com página de 1.000 registros pode preencher aproximadamente 25 páginas antes de formar o extraction batch padrão de 25.000. Os controles permanecem independentes.</div>
     </fieldset>
 
     <fieldset>
@@ -105,7 +113,7 @@
         <div class="field-row">
             <div class="field"><label>Adapter</label><select name="destination_type"><option value="duckdb" selected>DuckDBDestination (local lab)</option></select><div class="field-hint">O editor visual é DuckDB porque o browser de dados é local. Em Python/YAML existem também ParquetDestination e DeltaDestination.</div></div>
             <div class="field"><label>Schema Bronze</label><input type="text" name="destination_schema" value="{{ config.destination.schema if config else 'bronze' }}"></div>
-            <div class="field"><label>Registros por bloco</label><input type="number" name="batch_size" value="{{ config.destination.batch_size if config else 1000 }}"></div>
+            <div class="field"><label>Write batch do destino</label><input type="number" name="batch_size" value="{{ config.destination.batch_size if config else 1000 }}"><div class="field-hint">O adapter pode subdividir cada extraction batch em blocos físicos menores para escrita.</div></div>
         </div>
         <div class="field"><label>Write mode</label><select name="write_mode"><option value="append" {{ "selected" if not config or config.destination.write_mode == "append" else "" }}>append — manter janelas e tornar retry idempotente</option><option value="overwrite" {{ "selected" if config and config.destination.write_mode == "overwrite" else "" }}>overwrite — substituir toda a tabela</option></select></div>
     </fieldset>
