@@ -2,7 +2,7 @@
 
 *[Português abaixo](#engineer_kit-pt-br) / Portuguese version below.*
 
-Python library for API ingestion: **Python (extraction) + dbt (transformation)**, both executed on top of DuckDB — you write connector config and dbt models, never raw DuckDB SQL yourself.
+Python library for API ingestion: **Python (extraction) + dbt (transformation)**, both executed on top of DuckDB — you write connector config and dbt models, never raw DuckDB SQL yourself. Comes with an optional **local web UI** to configure and run pipelines with zero code (see [Web UI](#web-ui-optional) below).
 
 The goal is to be the easy-to-use bridge between a REST API and an analytics pipeline, without hiding what's happening underneath: explicitly declared schema, watermark-based incremental loading, batched writes, everything auditable in bronze.
 
@@ -27,6 +27,19 @@ pip install -e ".[dev]"
 License: MIT (see [`LICENSE`](LICENSE)).
 
 ## Quickstart
+
+There are two ways to use this: through the **web UI** (no code) or through the **Python API** directly. Both build the same `RestConnector`/`Pipeline` underneath.
+
+### Option A — Web UI, no code
+
+```bash
+pip install "engineer_kit[ui]"
+engineer_kit ui --workspace .
+```
+
+Opens `http://127.0.0.1:8000` (login `admin`/`admin` by default). Create a connector through a form, click **Run now**, watch the log live, browse the data it loaded. See [Web UI](#web-ui-optional) below for the full walkthrough.
+
+### Option B — Python API
 
 Import directly from the package — no need to know which submodule each class lives in, `import pandas as pd`-style:
 
@@ -204,7 +217,7 @@ Focused on **API ingestion**. Database sources and cloud warehouse destinations 
 
 *[English version above](#engineer_kit).*
 
-Biblioteca Python para ingestão de APIs: **Python (extração) + dbt (transformação)**, os dois executando em cima do DuckDB — você escreve configuração de conector e modelo dbt, nunca SQL de DuckDB direto.
+Biblioteca Python para ingestão de APIs: **Python (extração) + dbt (transformação)**, os dois executando em cima do DuckDB — você escreve configuração de conector e modelo dbt, nunca SQL de DuckDB direto. Vem com uma **interface web local opcional** pra configurar e rodar pipelines sem escrever código (ver [Interface web](#interface-web-opcional) abaixo).
 
 O objetivo é ser a ponte fácil de usar entre uma API REST e um pipeline analítico, sem esconder o que está acontecendo por baixo: schema declarado explicitamente, incremental por watermark, gravação em blocos, tudo auditável no bronze.
 
@@ -229,6 +242,19 @@ pip install -e ".[dev]"
 Licença: MIT (ver [`LICENSE`](LICENSE)).
 
 ## Quickstart
+
+Tem dois jeitos de usar: pela **interface web** (sem código) ou direto pela **API Python**. Os dois montam o mesmo `RestConnector`/`Pipeline` por baixo.
+
+### Opção A — Interface web, sem código
+
+```bash
+pip install "engineer_kit[ui]"
+engineer_kit ui --workspace .
+```
+
+Abre em `http://127.0.0.1:8000` (login `admin`/`admin` por padrão). Cria um conector pelo formulário, clica em **Rodar agora**, acompanha o log ao vivo, navega os dados carregados. Ver [Interface web](#interface-web-opcional) abaixo pro passo a passo completo.
+
+### Opção B — API Python
 
 Import direto do pacote — sem precisar saber em qual submódulo cada classe mora, no estilo `import pandas as pd`:
 
