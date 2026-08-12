@@ -1,11 +1,9 @@
-"""Executa pipelines em background (thread separada, a UI nao pode
-travar esperando uma extracao terminar) e expoe o log visual de cada
-execucao como um stream, pra a pagina mostrar em tempo real.
+"""Executa pipelines locais sem bloquear a interface web.
 
-Usa `visual_logger.contextualize(run_id=...)` pra marcar todo log
-emitido durante aquela execucao especifica, e um sink temporario com
-filtro por esse run_id -- assim duas execucoes ao mesmo tempo (ex: dois
-cliques em pipelines diferentes) nao misturam o log uma da outra.
+A UI e uma experiencia de desenvolvimento/treino. Ela usa o builder
+local (DuckDB) e, quando configurado, executa dbt somente depois da
+ingestao ter concluido com sucesso. O Pipeline de ingestao continua
+independente da transformacao.
 """
 
 from __future__ import annotations
@@ -15,14 +13,15 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import duckdb
 
 from engineer_kit.config.pipeline_config import PipelineConfig, build_pipeline
 from engineer_kit.terminal_log import visual_logger
+from engineer_kit.transform.dbt_runner import DbtRunner
 
-# sentinela que marca o fim do stream de log de uma execucao
 _STREAM_END = None
 
 
@@ -31,15 +30,17 @@ class RunState:
     run_id: str
     pipeline_name: str
     started_at: datetime
-    status: str = "running"  # running | success | error
+    status: str = "running"
     error: Optional[str] = None
     rows_loaded: int = 0
+    transform_status: str = "not_selected"  # not_selected | running | success | error
     log_queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
 class RunManager:
-    def __init__(self, warehouse_path: str) -> None:
+    def __init__(self, warehouse_path: str, dbt_project_dir: Optional[str] = None) -> None:
         self._warehouse_path = warehouse_path
+        self._dbt_project_dir = Path(dbt_project_dir).resolve() if dbt_project_dir else None
         self._runs: dict[str, RunState] = {}
         self._lock = threading.Lock()
 
@@ -69,12 +70,20 @@ class RunManager:
                 finally:
                     conn.close()
 
-            if result.success:
-                state.status = "success"
+                if not result.success:
+                    state.status = "error"
+                    state.error = "; ".join(step.error for step in result.steps if step.error)
+                    return
+
                 state.rows_loaded = sum(step.rows_loaded for step in result.steps)
-            else:
-                state.status = "error"
-                state.error = "; ".join(step.error for step in result.steps if step.error)
+
+                if config.transform.type == "dbt":
+                    self._run_dbt(config, state)
+                    if state.transform_status == "error":
+                        state.status = "error"
+                        return
+
+                state.status = "success"
         except Exception as exc:
             state.status = "error"
             state.error = str(exc)
@@ -82,12 +91,40 @@ class RunManager:
             visual_logger.remove(sink_id)
             state.log_queue.put(_STREAM_END)
 
+    def _run_dbt(self, config: PipelineConfig, state: RunState) -> None:
+        if self._dbt_project_dir is None or not self._dbt_project_dir.exists():
+            state.transform_status = "error"
+            state.error = "dbt foi selecionado, mas o projeto dbt local nao foi encontrado."
+            visual_logger.error(state.error)
+            return
+
+        state.transform_status = "running"
+        visual_logger.info(
+            "'{}': Bronze concluida; iniciando transformacao dbt{}.",
+            config.name,
+            f" (select={config.transform.select})" if config.transform.select else "",
+        )
+        dbt_result = DbtRunner(
+            project_dir=str(self._dbt_project_dir),
+            env={"ENGINEER_KIT_WAREHOUSE_PATH": self._warehouse_path},
+        ).run(select=config.transform.select)
+
+        for line in dbt_result.output.splitlines():
+            if line.strip():
+                visual_logger.info("dbt | {}", line)
+
+        if dbt_result.success:
+            state.transform_status = "success"
+            visual_logger.success("'{}': transformacao dbt concluida.", config.name)
+        else:
+            state.transform_status = "error"
+            state.error = "A ingestao terminou, mas o dbt falhou. Consulte o log da execucao."
+            visual_logger.error("'{}': {}", config.name, state.error)
+
     def get_state(self, run_id: str) -> Optional[RunState]:
         return self._runs.get(run_id)
 
     def stream_log(self, run_id: str, timeout: float = 60.0):
-        """Generator sincrono: itera as linhas de log conforme chegam,
-        para quando a execucao termina (ou apos `timeout` sem eventos)."""
         state = self._runs.get(run_id)
         if state is None:
             return
