@@ -56,8 +56,10 @@ def generate_staging_model(
         '    "_ingested_at" as _ingested_at',
     ]
     columns_sql = ",\n".join(select_lines)
+    # This function emits a dbt model as text; it does not execute SQL. Source
+    # and endpoint identifiers are validated above before template generation.
     return (
-        f"-- generated from the declared engineer_kit schema for '{endpoint}'.\n"
+        f"-- generated from the declared engineer_kit schema for '{endpoint}'.\n"  # nosec B608
         f"-- business rules belong in silver/gold; this layer only casts Bronze strings.\n"
         f"select\n{columns_sql}\n"
         f"from {{{{ source('{source_name}', '{endpoint}') }}}}\n"
