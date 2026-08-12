@@ -73,7 +73,7 @@ class DuckDBLoader(Destination):
         self._write_mode = WriteMode.parse(write_mode)
         # DuckDB cannot bind identifiers. _db_schema is validated above against
         # the strict identifier contract before interpolation.
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")  # nosec B608
+        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")
         self._ensured_tables: set[str] = set()
 
     @property
@@ -205,16 +205,16 @@ class DuckDBLoader(Destination):
         all_defs = ", ".join(part for part in (column_defs, metadata_defs) if part)
         # full_table and declared column identifiers are validated by the public
         # schema/identifier contracts before they reach this adapter.
-        self._conn.execute(  # nosec B608
-            f"CREATE TABLE IF NOT EXISTS {full_table} ({all_defs})"
+        self._conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {full_table} ({all_defs})"  # nosec B608
         )
 
         # Internal metadata is library-owned and may evolve safely between
         # engineer_kit versions. Declared API columns are still never ALTERed
         # automatically, preserving the explicit source-schema contract.
         for name, dtype in _INTERNAL_METADATA_TYPES.items():
-            self._conn.execute(  # nosec B608
-                f'ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS "{name}" {dtype}'
+            self._conn.execute(
+                f'ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS "{name}" {dtype}'  # nosec B608
             )
         self._ensured_tables.add(full_table)
 
@@ -224,8 +224,8 @@ class DuckDBLoader(Destination):
         column_list = ", ".join(f'"{column}"' for column in columns)
         # Only validated identifiers are interpolated. Row data is bound through
         # $1 and cannot alter the SQL statement.
-        self._conn.execute(  # nosec B608
-            f"INSERT INTO {full_table} ({column_list}) "
+        self._conn.execute(
+            f"INSERT INTO {full_table} ({column_list}) "  # nosec B608
             f"SELECT unnest(row, recursive := true) "
             f"FROM (SELECT unnest($1) AS row FROM range(1))",
             [rows],
