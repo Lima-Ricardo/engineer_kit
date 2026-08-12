@@ -1,8 +1,8 @@
 # engineer_kit
 
-**Reliable REST API ingestion for analytical destinations.**
+**Reliable, streaming-first REST API ingestion for analytical destinations.**
 
-`engineer_kit` handles the repetitive ingestion mechanics — HTTP, auth, pagination, incremental windows, schema drift, batching, checkpoints and audit — while letting the data platform remain the data platform.
+`engineer_kit` handles repetitive ingestion mechanics — HTTP, auth, pagination, incremental windows, bounded-memory batching, checkpoints, schema drift and audit — while letting the data platform remain the data platform.
 
 ```text
 REST API
@@ -10,29 +10,35 @@ REST API
    ▼
 RestConnector
    │
-   ├──────────► StateStore
    ▼
-Destination
+ExtractionSession  ─────► batches (default 25,000)
+   │
+   ├──────────► StateStore / checkpoint
    │
    ▼
-Bronze
+Destination (managed mode)  OR  user code (embedded mode)
    │
-   ├──────────► RunLogBackend
+   ▼
+Bronze / Spark / Pandas / Polars / Arrow
+   │
+   ├──────────► RunLogBackend (managed mode)
    ▼
 optional transform
 ```
 
 The core is backend-agnostic. **DuckDB, Parquet, Delta Lake, dbt and the localhost UI are optional integrations.**
 
-> Portuguese documentation starts at [PT-BR](#pt-br). Detailed architecture: [`docs/architecture.md`](docs/architecture.md). Platform guidance: [`docs/platforms.md`](docs/platforms.md).
+> Portuguese documentation starts at [PT-BR](#pt-br). Detailed architecture: [`docs/architecture.md`](docs/architecture.md). Streaming/batching: [`docs/streaming.md`](docs/streaming.md). Platform guidance: [`docs/platforms.md`](docs/platforms.md).
 
 ## What the library owns
 
+- platform-neutral `Connector` source contract;
 - REST extraction through `RestConnector` / `APIConnector`;
 - explicit pagination strategies;
+- streaming-first `ExtractionSession`;
+- default extraction batches of **25,000 records**;
 - watermark-based incremental loading;
 - stable Bronze contract with `_raw` and `_extra`;
-- bounded-memory batch writes;
 - backend-independent `StateStore`, `Destination` and `RunLogBackend` contracts;
 - deterministic checkpoint-transition identity for idempotent retries in official destinations;
 - declarative YAML pipelines;
@@ -40,7 +46,9 @@ The core is backend-agnostic. **DuckDB, Parquet, Delta Lake, dbt and the localho
 
 ## What it does not try to replace
 
-Spark, Databricks, Microsoft Fabric, Airflow, Dagster, dbt, a Lakehouse, a warehouse, a catalog or a distributed worker system.
+Spark, Databricks, Microsoft Fabric, AWS, Google Cloud, Airflow, Dagster, dbt, a Lakehouse, a warehouse, a catalog or a distributed worker system.
+
+Cloud/runtime is intentionally separate from source protocol. A REST API remains a `RestConnector` whether the code runs locally, on Databricks, Microsoft Fabric, AWS or Google Cloud.
 
 ## Built-in adapters
 
@@ -77,6 +85,98 @@ pip install -e ".[dev,all]"
 pytest -q
 ```
 
+## Streaming-first extraction
+
+The recommended extraction API does **not** materialize the complete API response by default:
+
+```python
+run = connector.extract_incremental()
+
+for batch in run:
+    process(batch)
+
+run.commit()
+```
+
+Normal iteration yields `list[dict]` batches. The official default is:
+
+```python
+DEFAULT_EXTRACTION_BATCH_SIZE = 25_000
+```
+
+`collect()` is deliberately explicit:
+
+```python
+records = run.collect()  # complete extraction in RAM; use for small datasets
+```
+
+The session is single-pass and the checkpoint cannot be committed until the stream has been consumed completely.
+
+### Three independent sizes
+
+```text
+API pagination size
+        ↓
+Extraction batch size        default 25,000
+        ↓
+Destination write batch size adapter-specific
+```
+
+For example, an API that returns 1,000 records per page may fill one default extraction batch after roughly 25 pages. This is an illustration, not a coupling: pagination follows the API contract while extraction batching limits the consumer-facing in-memory unit.
+
+Rate limits (`429`, `Retry-After`, backoff, requests/minute) belong to the HTTP/retry layer, not to `ExtractionSession`.
+
+See [`docs/streaming.md`](docs/streaming.md).
+
+## Managed mode
+
+Use `Pipeline` when `engineer_kit` should own Bronze persistence:
+
+```text
+API
+ ↓
+ExtractionSession record stream
+ ↓
+Destination transaction
+ ↓
+StateStore checkpoint
+ ↓
+RunLogBackend audit
+```
+
+The destination may internally split the stream into smaller write batches. For example, a 25,000-record extraction batch and a 5,000-record destination batch are separate concerns.
+
+## Embedded mode
+
+Inside Databricks, Microsoft Fabric or any Python runtime, you can use only extraction + pagination + incremental state and keep Spark/persistence under application control:
+
+```python
+run = connector.extract_incremental()
+
+for batch in run:
+    df = spark.createDataFrame(batch)
+    # project-specific transformations and persistence
+    persist(df)
+
+run.commit()
+```
+
+The safe order is:
+
+```text
+read checkpoint
+      ↓
+extract batches
+      ↓
+user processing / persistence
+      ↓
+success
+      ↓
+run.commit()
+```
+
+If downstream processing fails, do not commit; the watermark remains unchanged. For very large Spark workloads, staging batches to Parquet/Delta and then letting Spark read them natively may be more efficient than creating many small DataFrames from Python objects.
+
 ## Declarative pipeline
 
 ```yaml
@@ -85,10 +185,11 @@ name: orders
 connector:
   base_url: https://api.example.com/orders
   method: GET
+  extraction_batch_size: 25000
   pagination:
     type: page
     params:
-      page_size: 100
+      page_size: 1000
   incremental:
     mode: ingestion_date
 
@@ -177,6 +278,8 @@ Unexpected API fields are preserved in `_extra` and reported; they do not trigge
 
 ## Incremental reliability
 
+Managed mode:
+
 ```text
 extract
   ↓
@@ -187,7 +290,17 @@ StateStore checkpoint
 RunLogBackend audit
 ```
 
-If destination persistence fails, the checkpoint does not advance. If destination persistence succeeds but the state checkpoint fails, the same checkpoint transition is retried.
+Embedded mode:
+
+```text
+extract batches
+  ↓
+user processing/persistence
+  ↓
+ExtractionSession.commit()
+```
+
+If destination/downstream persistence fails, the checkpoint does not advance. If managed destination persistence succeeds but the state checkpoint fails, the same checkpoint transition is retried.
 
 Official destinations receive a deterministic `ingestion_key` derived from **connector + incremental window + checkpoint-before**. A retry after a state failure therefore gets the same key and replaces the previous representation instead of duplicating it. Once the checkpoint succeeds, the checkpoint-before changes, so a later successful run receives another key even if it occurs on the same calendar day.
 
@@ -244,25 +357,32 @@ engineer_kit ui --workspace .
 It provides:
 
 - pipeline form;
+- API page-size, extraction-batch and destination-write-batch controls;
 - live execution logs;
 - DuckDB data browser;
 - dbt model view;
-- visual Source → State → Destination → Transform flow;
-- architecture/documentation pages explaining the same core contracts.
+- visual Source → Extraction → State → Destination → Transform flow;
+- architecture/documentation pages explaining managed and embedded modes.
 
-The visual editor deliberately targets the DuckDB local runtime. Parquet/Delta pipelines use the same Python/YAML contracts and are documented inside the UI.
+The visual editor deliberately targets the DuckDB local runtime. Parquet/Delta pipelines and platform embedded mode use the same Python/YAML contracts and are documented inside the UI.
 
-## Databricks / Microsoft Fabric / Lakehouse
+## Databricks / Microsoft Fabric / AWS / Google Cloud
 
-The intended platform boundary is:
+Managed platform boundary:
 
 ```text
 API → engineer_kit → Delta/Parquet Bronze → platform Spark/dbt/SQL
 ```
 
-The library does not start or replace Spark. Run the Python ingestion from the platform's job/notebook/orchestrator and point the destination to a path available to that runtime.
+Embedded platform boundary:
 
-See [`docs/platforms.md`](docs/platforms.md) for Databricks/Fabric patterns, storage options, state/audit layout and current test boundaries.
+```text
+API → engineer_kit batches → user/platform code → persistence → checkpoint
+```
+
+The library does not start or replace Spark and does not create one REST connector subclass per cloud. Run the Python extraction from the platform's job/notebook/orchestrator and use paths/storage options available to that runtime.
+
+See [`docs/platforms.md`](docs/platforms.md) for Databricks/Fabric patterns, AWS/GCP/Azure storage boundaries, storage options, state/audit layout and current test boundaries.
 
 ## Extending adapters
 
@@ -276,13 +396,16 @@ register_destination("company_lake", "company_ingestion.runtime:build_destinatio
 
 Equivalent functions exist for state and audit backends. `auto` only resolves known natural relationships (DuckDB→DuckDB, Parquet→file metadata, Delta→Delta); a custom destination must register or explicitly select compatible state/audit backends.
 
+Custom source protocols can derive from the platform-neutral `Connector` contract without knowing the runtime or storage backend.
+
 ## Security
 
 - HTTPS is enforced by the HTTP client unless explicitly configured otherwise;
 - API credentials are resolved through `SecretProvider` implementations;
 - the UI never asks users to paste secret values into pipeline YAML;
 - use managed/workload identity, environment variables or the platform's secret manager for Lakehouse credentials;
-- SQL identifiers are validated before use.
+- SQL identifiers are validated/quoted before dynamic identifier use;
+- data values are parameterized rather than interpolated into SQL.
 
 ## Tests and CI
 
@@ -290,15 +413,18 @@ CI validates:
 
 - core import with no DuckDB/PyArrow/Delta installed;
 - Python 3.10 / 3.11 / 3.12;
+- `ExtractionSession` 25k default, overrides, single-pass behavior and partial-checkpoint protection;
 - DuckDB, Parquet and Delta adapters;
 - checkpoint failure and retry idempotency;
 - successful same-day runs after checkpoint advancement;
 - schema drift and batch behavior;
 - local UI and declarative CLI;
+- dbt optional-extra smoke test;
+- synthetic streaming stress tests;
 - Ruff, Bandit and dependency audit;
 - wheel/sdist build validation.
 
-Local Delta tests validate the Delta format and adapter contract. Cloud-specific authentication, catalog registration and workspace paths must still be verified in the target Databricks/Fabric environment.
+Local Delta tests validate the Delta format and adapter contract. Cloud-specific authentication, catalog registration and workspace paths must still be verified in the target cloud workspace.
 
 ## License
 
@@ -310,20 +436,20 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## O que é o engineer_kit
 
-`engineer_kit` é uma biblioteca Python para transformar APIs REST em uma **camada de ingestão confiável e portátil**.
+`engineer_kit` é uma biblioteca Python para transformar APIs REST em uma **camada de ingestão confiável, portátil e streaming-first**.
 
 O objetivo não é criar um novo Airflow, Databricks ou Fabric. O objetivo é remover o código repetitivo que aparece antes da Bronze:
 
 - requests/auth;
 - paginação;
 - incremental;
-- watermark;
+- watermark/checkpoint;
 - retry;
 - flattening;
 - schema drift;
 - batches;
 - auditoria;
-- persistência da Bronze.
+- persistência da Bronze quando desejada.
 
 A plataforma continua cuidando daquilo que ela já faz bem: Spark, catálogo, transformação, governança, jobs e consumo.
 
@@ -332,24 +458,65 @@ A plataforma continua cuidando daquilo que ela já faz bem: Spark, catálogo, tr
 ```text
                          engineer_kit core
                                │
-          ┌────────────────────┼────────────────────┐
-          │                    │                    │
-     RestConnector         StateStore          Destination
-          │                    │                    │
-          │              ┌─────┼─────┐       ┌─────┼─────┐
-          │              │     │     │       │     │     │
-          │           DuckDB  File  Delta  DuckDB Parquet Delta
-          │                    │                    │
-          └────────────────────┴────────────────────┘
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+    Connector          ExtractionSession         StateStore
+        │                      │                      │
+ RestConnector          batches 25k default      checkpoint
+        │                      │                      │
+        └──────────────────────┼──────────────────────┘
                                │
+               ┌───────────────┴───────────────┐
+               │                               │
+          managed mode                    embedded mode
+               │                               │
+         Destination                      código do usuário
+      ┌────┼─────┐                   Spark/Pandas/Polars
+   DuckDB Parquet Delta                        │
+               │                               │
+               └───────────────┬───────────────┘
                                ▼
-                             Bronze
-                               │
-                         transformação
-                            opcional
+                          dados persistidos
 ```
 
-Detalhes: [`docs/architecture.md`](docs/architecture.md).
+Detalhes: [`docs/architecture.md`](docs/architecture.md), [`docs/streaming.md`](docs/streaming.md) e [`docs/platforms.md`](docs/platforms.md).
+
+## Streaming-first e default de 25.000
+
+O caminho padrão recomendado é:
+
+```python
+run = connector.extract_incremental()
+
+for batch in run:
+    processar(batch)
+
+run.commit()
+```
+
+Cada iteração entrega até **25.000 registros por padrão**. Isso evita transformar a memória do processo Python no buffer de toda a API.
+
+Para datasets pequenos, existe materialização explícita:
+
+```python
+records = run.collect()
+```
+
+`collect()` traz a extração completa para RAM; por isso não é o comportamento padrão.
+
+### Página da API, batch de extração e batch de escrita são diferentes
+
+```text
+API page size             1.000  (exemplo)
+        ↓
+Extraction batch         25.000  (default)
+        ↓
+Destination write batch   5.000  (exemplo)
+```
+
+Uma API que devolve 1.000 registros por página pode preencher aproximadamente 25 páginas para formar um batch de 25.000, mas esses valores não são acoplados. A paginação respeita a documentação da API; o extraction batch controla memória/entrega; o write batch otimiza o adapter físico.
+
+Rate limit, `429`, `Retry-After` e backoff pertencem ao cliente HTTP/retry.
 
 ## Instalação por capacidade
 
@@ -374,7 +541,7 @@ API → engineer_kit → DuckDB → dbt
 
 É ótimo para desenvolvimento, aprendizado, CI e projetos locais. Ele deixou de ser uma premissa arquitetural.
 
-## Em plataforma
+## Managed mode em plataforma
 
 ```text
 API → engineer_kit → Delta Bronze → Databricks/Fabric/Spark/dbt/SQL
@@ -387,6 +554,44 @@ API → engineer_kit → Parquet Bronze → lake/filesystem montado
 ```
 
 O mesmo `RestConnector` e `Pipeline` continuam válidos. O que muda é o adapter.
+
+## Embedded mode em Fabric/Databricks
+
+O usuário pode instalar a biblioteca e usar apenas extração + paginação + incremental:
+
+```python
+run = connector.extract_incremental()
+
+for batch in run:
+    df = spark.createDataFrame(batch)
+    # lógica do projeto
+    persistir(df)
+
+run.commit()
+```
+
+Assim `engineer_kit` não precisa controlar o Spark nem a escrita final. O checkpoint só avança depois que o usuário confirmar que o downstream terminou com sucesso.
+
+Para volumes muito grandes, staging em Parquet/Delta seguido de `spark.read` pode ser mais eficiente do que criar muitos DataFrames a partir de objetos Python.
+
+## AWS e Google Cloud
+
+Não existe necessidade de `AWSRestConnector` ou `GoogleRestConnector` quando a fonte continua sendo REST.
+
+```text
+Connector / origem
+└── RestConnector
+
+Runtime / storage
+├── local
+├── Databricks
+├── Microsoft Fabric
+├── AWS / S3
+├── Google Cloud / GCS
+└── Azure / ADLS / OneLake
+```
+
+Cloud-specific credentials, URIs e `storage_options` pertencem ao adapter/runtime, não ao protocolo de origem.
 
 Veja [`docs/platforms.md`](docs/platforms.md).
 
@@ -435,7 +640,9 @@ O staging/dbt pode transformar isso no tipo físico apropriado. Se a API adicion
 
 ## Confiabilidade
 
-O watermark só avança depois da transação da Bronze.
+No managed mode, o watermark só avança depois da transação da Bronze.
+
+No embedded mode, `ExtractionSession.commit()` exige que o stream tenha sido consumido completamente e deve ser chamado somente depois da persistência downstream.
 
 Os adapters oficiais também tornam o retry idempotente usando `_ingestion_key`. A chave identifica a transição de checkpoint (connector + janela + checkpoint anterior): uma falha de state reutiliza a mesma chave; depois de um checkpoint bem-sucedido, uma nova execução recebe outra chave mesmo no mesmo dia.
 
@@ -459,7 +666,7 @@ pip install "engineer_kit[local]"
 engineer_kit ui --workspace .
 ```
 
-Ela serve para aprender, montar e observar pipelines. A tela de arquitetura mostra `RestConnector`, `StateStore`, `Destination`, `RunLogBackend`, tipos lógicos, retry e dbt.
+Ela serve para aprender, montar e observar pipelines. A tela de arquitetura mostra `Connector`, `RestConnector`, `ExtractionSession`, `StateStore`, `Destination`, `RunLogBackend`, os três níveis de batching, tipos lógicos, retry, embedded mode e dbt.
 
 ## Transformação
 
@@ -475,6 +682,7 @@ O foco continua sendo **API ingestion**. A biblioteca não quer se transformar e
 pip install -e ".[dev,all]"
 pytest -q
 ruff check src tests
+bandit -q -r src/engineer_kit -ll
 ```
 
-O CI também verifica que o core continua importável sem os backends opcionais.
+O CI também verifica o core sem backends opcionais, Python 3.10–3.12, adapters, `ExtractionSession`, UI, dbt extra, stress sintético, segurança e build do pacote.
