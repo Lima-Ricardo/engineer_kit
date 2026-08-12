@@ -2,16 +2,18 @@
 
 *[Português abaixo](#engineer_kit-pt-br) / Portuguese version below.*
 
-Python library for API ingestion: **connectors → DuckDB (bronze) → dbt (silver/gold)**.
+Python library for API ingestion: **Python (extraction) + dbt (transformation)**, both executed on top of DuckDB — you write connector config and dbt models, never raw DuckDB SQL yourself.
 
 The goal is to be the easy-to-use bridge between a REST API and an analytics pipeline, without hiding what's happening underneath: explicitly declared schema, watermark-based incremental loading, batched writes, everything auditable in bronze.
 
 ## Why it exists
 
 - **Connectors** (`APIConnector`/`RestConnector`) abstract `requests`, pagination, HTTP method and the incremental window — you only write what changes from one API to another (endpoint, auth, date format).
-- **DuckDB** holds the raw load (bronze) already flattened, with everything as `VARCHAR` by default. It never breaks on schema drift: any new field the API sends goes into an `_extra` column, with a log warning — the load never fails because of it. Writes happen in batches, not all at once.
-- **dbt** does the real transformation (staging → silver → gold). Staging (type casting) is generated automatically from the declared schema; business rules are still written by hand.
+- **Python writes the raw load (bronze)**, already flattened, with everything as `VARCHAR` by default, using DuckDB as the execution engine underneath (never exposed directly — you configure `DuckDBLoader`, not raw SQL). It never breaks on schema drift: any new field the API sends goes into an `_extra` column, with a log warning — the load never fails because of it. Writes happen in batches, not all at once.
+- **dbt does the real transformation** (staging → silver → gold), also running on DuckDB via the `dbt-duckdb` adapter. Staging (type casting) is generated automatically from the declared schema; business rules are still written by hand — dbt is the only place transformation logic lives.
 - **Visual log + run table**: every load shows a terminal progress bar and records start/end/status/row count in `_meta.run_log` inside DuckDB itself — queryable from dbt like any other source.
+
+DuckDB itself is never a third thing you manage — it's the engine both Python and dbt run on, invisible the same way `libpq` is invisible when you say "I use Postgres."
 
 ## Installation
 
@@ -110,6 +112,8 @@ You no longer need to build a separate `IncrementalStrategy`: `RestConnector` ta
 
 ## Architecture
 
+Two things you write — a connector (Python) and dbt models — both executing on DuckDB, which you never touch directly:
+
 ```
 Connector (RestConnector : APIConnector)
   ├─ PaginationStrategy   (page/offset/cursor/link_header/next_url/none)
@@ -182,16 +186,18 @@ Focused on **API ingestion**. Database sources and cloud warehouse destinations 
 
 *[English version above](#engineer_kit).*
 
-Biblioteca Python para ingestão de APIs: **conectores → DuckDB (bronze) → dbt (silver/gold)**.
+Biblioteca Python para ingestão de APIs: **Python (extração) + dbt (transformação)**, os dois executando em cima do DuckDB — você escreve configuração de conector e modelo dbt, nunca SQL de DuckDB direto.
 
 O objetivo é ser a ponte fácil de usar entre uma API REST e um pipeline analítico, sem esconder o que está acontecendo por baixo: schema declarado explicitamente, incremental por watermark, gravação em blocos, tudo auditável no bronze.
 
 ## Por que existe
 
 - **Conectores** (`APIConnector`/`RestConnector`) abstraem `requests`, paginação, método HTTP e janela incremental — você só escreve o que muda de uma API pra outra (endpoint, auth, formato de data).
-- **DuckDB** guarda a carga bruta (bronze) já desaninhada, com tudo como `VARCHAR` por padrão. Nunca quebra por schema drift: campo novo que a API mandar vai para uma coluna `_extra`, com aviso no log — a carga nunca falha por isso. A gravação acontece em blocos, não tudo de uma vez.
-- **dbt** faz a transformação de verdade (staging → silver → gold). O staging (cast de tipo) é gerado automaticamente a partir do schema declarado; as regras de negócio continuam sendo escritas à mão.
+- **O Python grava a carga bruta (bronze)**, já desaninhada, com tudo como `VARCHAR` por padrão, usando o DuckDB como motor de execução por baixo (nunca exposto direto — você configura o `DuckDBLoader`, não escreve SQL). Nunca quebra por schema drift: campo novo que a API mandar vai para uma coluna `_extra`, com aviso no log — a carga nunca falha por isso. A gravação acontece em blocos, não tudo de uma vez.
+- **O dbt faz a transformação de verdade** (staging → silver → gold), também rodando em cima do DuckDB via o adapter `dbt-duckdb`. O staging (cast de tipo) é gerado automaticamente a partir do schema declarado; as regras de negócio continuam sendo escritas à mão — o dbt é o único lugar onde mora lógica de transformação.
 - **Log visual + tabela de execução**: cada carga mostra uma barra de progresso no terminal e registra início/fim/status/quantidade em `_meta.run_log` no próprio DuckDB — consultável pelo dbt como qualquer outra fonte.
+
+O DuckDB nunca é uma terceira coisa que você gerencia — é o motor sobre o qual Python e dbt rodam, invisível do mesmo jeito que o `libpq` é invisível quando você diz "eu uso Postgres".
 
 ## Instalação
 
@@ -289,6 +295,8 @@ Para casos fora do padrão, `date_field` também aceita uma função: `date_fiel
 Não precisa mais montar um `IncrementalStrategy` separado: `RestConnector` recebe `state_store`/`incremental_mode`/`initial_start`/`date_field` diretamente e monta o incremental internamente, usando o próprio `name` do conector — sem duplicar esse identificador em dois lugares. Quem precisar de um `IncrementalStrategy` customizado ainda pode passar um pronto via `incremental=`.
 
 ## Arquitetura
+
+Duas coisas que você escreve — um conector (Python) e modelos dbt — os dois executando em cima do DuckDB, que você nunca toca direto:
 
 ```
 Connector (RestConnector : APIConnector)
