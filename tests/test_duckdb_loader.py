@@ -109,6 +109,21 @@ def test_second_load_reuses_table_without_altering_schema(conn, schema):
     assert "new_field" not in columns
 
 
+def test_failed_later_batch_rolls_back_earlier_batches(conn):
+    schema = EndpointSchema.from_names(["id"])
+    loader = DuckDBLoader(conn, schema="bronze", batch_size=MIN_BATCH_SIZE)
+
+    def broken_records():
+        for index in range(MIN_BATCH_SIZE):
+            yield {"id": str(index)}
+        raise RuntimeError("source failed after first batch")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        loader.load("events", "events", schema, broken_records())
+
+    assert conn.execute("SELECT count(*) FROM bronze.events").fetchone()[0] == 0
+
+
 def test_empty_batch_is_a_noop(conn, schema):
     loader = DuckDBLoader(conn, schema="bronze")
     result = loader.load("github_commits", "commits", schema, [])
