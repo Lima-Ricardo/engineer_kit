@@ -24,25 +24,21 @@ from engineer_kit.storage.batching import (
     validate_batch_size,
 )
 from engineer_kit.storage.bronze import METADATA_COLUMNS, build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult
+from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
 
-logger = logging.getLogger("engineer_kit.storage")
+logger = logging.getLogger("engineer_kit.storage.duckdb")
 
 
 class DuckDBLoader(Destination):
-    """Destination that materializes Bronze tables in DuckDB.
+    """Materialize the portable Bronze contract in DuckDB.
 
-    Declared API fields are always stored as ``VARCHAR`` in Bronze. The
-    ``ColumnSpec.dtype`` value is the analytical target type used by the dbt
-    staging scaffold, not a source-ingestion type.
-
-    A complete ``load`` call is one DuckDB transaction. If record generation
-    or a later batch fails, earlier batches from the same run are rolled back,
-    so the unchanged watermark can safely retry the same extraction window.
+    A complete ``load`` is one DuckDB transaction. If record generation or a
+    later batch fails, earlier batches from the same run are rolled back, so an
+    unchanged watermark can retry the same extraction window safely.
     """
 
     def __init__(
@@ -50,10 +46,12 @@ class DuckDBLoader(Destination):
         conn: duckdb.DuckDBPyConnection,
         schema: str = "bronze",
         batch_size: int = DEFAULT_BATCH_SIZE,
+        write_mode: WriteMode | str = WriteMode.APPEND,
     ) -> None:
         self._conn = conn
         self._db_schema = validate_identifier(schema, "schema")
         self._batch_size = validate_batch_size(batch_size)
+        self._write_mode = WriteMode.parse(write_mode)
         self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")
         self._ensured_tables: set[str] = set()
 
@@ -62,8 +60,11 @@ class DuckDBLoader(Destination):
         """Compatibility accessor for callers that already use the connection."""
         return self._conn
 
+    @property
+    def write_mode(self) -> WriteMode:
+        return self._write_mode
+
     def default_run_log_backend(self) -> RunLogBackend:
-        """Persist audit events in the same local DuckDB connection."""
         return DuckDBRunLogStore(self._conn)
 
     def load(
@@ -84,13 +85,15 @@ class DuckDBLoader(Destination):
 
         self._conn.execute("BEGIN TRANSACTION")
         try:
+            if self._write_mode is WriteMode.OVERWRITE:
+                self._conn.execute(f"DELETE FROM {full_table}")
+
             with tqdm(desc=full_table, unit=" registros", bar_format=bar_format) as progress:
                 for batch in iter_in_batches(records, self._batch_size):
                     rows, extra_fields = build_bronze_rows(
                         connector_name, endpoint, schema, batch
                     )
                     all_extra_fields.update(extra_fields)
-
                     columns = schema.column_names() + METADATA_COLUMNS
                     self._insert_rows(full_table, columns, rows)
                     total_rows += len(rows)
@@ -101,23 +104,7 @@ class DuckDBLoader(Destination):
             raise
 
         elapsed = time.monotonic() - started_at
-
-        if all_extra_fields:
-            logger.warning(
-                "Endpoint '%s' (conector '%s'): %d campo(s) fora do schema declarado, "
-                "capturados em _extra: %s. Atualize o schema quando for tipar corretamente.",
-                endpoint,
-                connector_name,
-                len(all_extra_fields),
-                sorted(all_extra_fields),
-            )
-            visual_logger.warning(
-                "'{}': {} coluna(s) nova(s) na API, fora do schema declarado: {}",
-                connector_name,
-                len(all_extra_fields),
-                sorted(all_extra_fields),
-            )
-
+        self._report_extra_fields(connector_name, endpoint, all_extra_fields)
         visual_logger.success(
             "'{}': {} registros gravados em {} em {:.1f}s",
             connector_name,
@@ -131,13 +118,33 @@ class DuckDBLoader(Destination):
             extra_fields_seen=sorted(all_extra_fields),
         )
 
+    def _report_extra_fields(
+        self, connector_name: str, endpoint: str, extra_fields: set[str]
+    ) -> None:
+        if not extra_fields:
+            return
+        logger.warning(
+            "Endpoint '%s' (conector '%s'): campos fora do schema preservados em _extra: %s",
+            endpoint,
+            connector_name,
+            sorted(extra_fields),
+        )
+        visual_logger.warning(
+            "'{}': {} coluna(s) nova(s) preservada(s) em _extra: {}",
+            connector_name,
+            len(extra_fields),
+            sorted(extra_fields),
+        )
+
     def _ensure_table(self, full_table: str, schema: EndpointSchema) -> None:
         if full_table in self._ensured_tables:
             return
         column_defs = ", ".join(f'"{column.name}" VARCHAR' for column in schema.columns)
+        if column_defs:
+            column_defs += ", "
         self._conn.execute(
             f"CREATE TABLE IF NOT EXISTS {full_table} ("
-            f"{column_defs}, "
+            f"{column_defs}"
             f'"_source" VARCHAR, "_endpoint" VARCHAR, "_ingested_at" TIMESTAMP, '
             f'"_raw" VARCHAR, "_extra" VARCHAR)'
         )
