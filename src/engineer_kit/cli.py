@@ -5,10 +5,12 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
+from pathlib import Path
 
 import typer
 
-from engineer_kit.orchestration.pipeline import Pipeline
+from engineer_kit.adapters.registry import available_adapters
+from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger
 
@@ -30,6 +32,21 @@ def _load_pipeline(target: str) -> Pipeline:
     if not isinstance(pipeline, Pipeline):
         raise typer.BadParameter(f"'{target}' nao e uma instancia de Pipeline.")
     return pipeline
+
+
+def _print_result(result: PipelineResult) -> None:
+    typer.echo(f"run_id={result.run_id} | rows={result.rows_loaded} | success={result.success}")
+    for step in result.steps:
+        status = "OK" if step.success else f"ERRO ({step.status}): {step.error}"
+        window = (
+            f" | window={step.window_start}..{step.window_end}"
+            if step.window_start or step.window_end
+            else ""
+        )
+        destination = f" | destination={step.destination}" if step.destination else ""
+        typer.echo(
+            f"{step.connector_name}: {step.rows_loaded} linha(s) -- {status}{window}{destination}"
+        )
 
 
 def _validate_ui_exposure(
@@ -56,14 +73,52 @@ def _validate_ui_exposure(
 
 @app.command()
 def run(target: str) -> None:
-    """Roda uma Pipeline uma unica vez. TARGET: modulo.caminho:atributo."""
-    pipeline = _load_pipeline(target)
-    result = pipeline.run()
-    for step in result.steps:
-        status = "OK" if step.success else f"ERRO ({step.status}): {step.error}"
-        typer.echo(f"{step.connector_name}: {step.rows_loaded} linha(s) -- {status}")
+    """Roda uma Pipeline Python uma unica vez. TARGET: modulo.caminho:atributo."""
+    result = _load_pipeline(target).run()
+    _print_result(result)
     if not result.success:
         raise typer.Exit(code=1)
+
+
+@app.command("run-config")
+def run_config(path: Path) -> None:
+    """Roda diretamente um pipeline YAML, sem exigir um modulo Python intermediario."""
+    from engineer_kit.config.pipeline_config import build_pipeline, load_pipeline_config
+
+    try:
+        config = load_pipeline_config(path)
+        if config.destination.type == "duckdb":
+            try:
+                import duckdb
+            except ImportError:
+                typer.echo('DuckDB e opcional: pip install "engineer_kit[duckdb]"')
+                raise typer.Exit(code=1) from None
+
+            warehouse_path = config.destination.path or "warehouse.duckdb"
+            conn = duckdb.connect(warehouse_path)
+            try:
+                result = build_pipeline(config, conn).run()
+            finally:
+                conn.close()
+        else:
+            result = build_pipeline(config).run()
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"Falha ao executar configuracao: {exc}")
+        raise typer.Exit(code=1) from None
+
+    _print_result(result)
+    if not result.success:
+        raise typer.Exit(code=1)
+
+
+@app.command("adapters")
+def adapters_command() -> None:
+    """Lista os adapters declarativos registrados no processo atual."""
+    adapters = available_adapters()
+    for kind, names in adapters.items():
+        typer.echo(f"{kind}: {', '.join(names) if names else '-'}")
 
 
 @app.command()
@@ -71,7 +126,7 @@ def schedule(
     target: str,
     cron: str = typer.Option(..., help="Expressao cron, ex: '0 3 * * *'"),
 ) -> None:
-    """Agenda uma Pipeline para rodar recorrentemente. Bloqueia o processo."""
+    """Agenda uma Pipeline Python para rodar recorrentemente. Bloqueia o processo."""
     pipeline = _load_pipeline(target)
     scheduler = Scheduler()
     scheduler.schedule(pipeline, CronTrigger(cron), job_id=target)
