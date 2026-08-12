@@ -9,18 +9,10 @@ from typing import Any, Iterator, Optional, Union
 import requests
 
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
-from engineer_kit.connectors.incremental import (
-    IncrementalMode,
-    IncrementalStrategy,
-    IncrementalWindow,
-)
-from engineer_kit.connectors.pagination import (
-    NEXT_URL_KEY,
-    PaginationStrategy,
-    ParsedPage,
-)
+from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
+from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
-from engineer_kit.storage.state_store import StateStore
+from engineer_kit.storage.state_store import StateStore, Watermark
 
 VALID_HTTP_METHODS = ("GET", "POST")
 
@@ -67,15 +59,12 @@ class APIConnector(ABC):
         else:
             if state_store is None:
                 raise ValueError(
-                    "Passe state_store (caso comum, o incremental e montado automaticamente) "
-                    "ou incremental=IncrementalStrategy(...) pronto (caso avancado)."
+                    "Passe state_store ou incremental=IncrementalStrategy(...) pronto."
                 )
             if incremental_mode is IncrementalMode.DATA_DATE and date_field is None:
                 raise MissingDateFieldError(
-                    "incremental_mode=DATA_DATE precisa de date_field (o campo de data do "
-                    "proprio registro, ex: 'commit.author.date') -- sem isso, o incremental "
-                    "nao tem como saber ate onde os dados da API foram atualizados. Use "
-                    "IncrementalMode.INGESTION_DATE se so quiser a data da propria execucao."
+                    "incremental_mode=DATA_DATE precisa de date_field. Use "
+                    "IncrementalMode.INGESTION_DATE quando o checkpoint for a data da execucao."
                 )
             self._incremental = IncrementalStrategy(
                 connector_name=name,
@@ -89,6 +78,11 @@ class APIConnector(ABC):
         """Incremental window prepared for the current extraction attempt."""
         return self._current_window
 
+    @property
+    def max_data_date_seen(self) -> date | None:
+        """Largest record date observed in the current extraction stream."""
+        return self._max_data_date_seen
+
     @abstractmethod
     def build_request(
         self, window: IncrementalWindow, page_params: dict[str, Any]
@@ -100,12 +94,7 @@ class APIConnector(ABC):
         """Extract records, raw response and headers."""
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
-        """Prepare the incremental window immediately and return a lazy record stream.
-
-        Preparing before returning the iterator lets the Pipeline derive a
-        stable ingestion identity before a destination starts consuming data,
-        while HTTP requests remain lazy and streaming.
-        """
+        """Prepare the incremental window and return a lazy record stream."""
         self._current_window = self._incremental.resolve_window(end)
         self._max_data_date_seen = None
         return self._iter_records(self._current_window)
@@ -145,14 +134,14 @@ class APIConnector(ABC):
         if self._max_data_date_seen is None or seen > self._max_data_date_seen:
             self._max_data_date_seen = seen
 
-    def commit_watermark(self, max_data_date: Optional[date] = None) -> None:
-        """Confirm the checkpoint only after the destination confirms the load."""
+    def commit_watermark(self, max_data_date: Optional[date] = None) -> Watermark:
+        """Confirm and return the checkpoint after the destination confirms the load."""
         if self._current_window is None:
             raise RuntimeError("commit_watermark() chamado antes de extract() rodar.")
         effective_max_date = (
             max_data_date if max_data_date is not None else self._max_data_date_seen
         )
-        self._incremental.commit(
+        return self._incremental.commit(
             self._current_window,
             max_data_date=effective_max_date,
         )
