@@ -51,7 +51,7 @@ def test_form_persists_transform_and_run_log(client, tmp_path):
             "dbt_select": "tag:daily",
             "run_log": "on",
             "column_name": ["id"],
-            "column_dtype": ["VARCHAR"],
+            "column_dtype": ["string"],
         },
         headers=AUTH_HEADER,
         follow_redirects=False,
@@ -61,7 +61,7 @@ def test_form_persists_transform_and_run_log(client, tmp_path):
     config = load_pipeline_config(tmp_path / "pipelines" / "with_dbt.yaml")
     assert config.transform.type == "dbt"
     assert config.transform.select == "tag:daily"
-    assert config.run_log is True
+    assert config.run_log.enabled is True
 
 
 def test_form_can_disable_run_log(client, tmp_path):
@@ -80,4 +80,4 @@ def test_form_can_disable_run_log(client, tmp_path):
     )
     assert response.status_code == 303
     config = load_pipeline_config(tmp_path / "pipelines" / "no_log.yaml")
-    assert config.run_log is False
+    assert config.run_log.enabled is False
