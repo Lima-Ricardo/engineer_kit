@@ -10,7 +10,7 @@
 <div class="flow-strip">
     <div class="flow-node active"><strong>REST API</strong><span>RestConnector</span><small>{{ config.connector.pagination.type }} pagination</small></div>
     <div class="flow-arrow">→</div>
-    <div class="flow-node active"><strong>Watermark</strong><span>StateStore</span><small>DuckDBStateStore local</small></div>
+    <div class="flow-node active"><strong>Watermark</strong><span>StateStore</span><small>{{ config.state.type if config.state.type != 'auto' else config.destination.type ~ ' (auto)' }}</small></div>
     <div class="flow-arrow">→</div>
     <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>{{ config.destination.type }} / {{ config.destination.schema }}</small></div>
     {% if config.transform.type == 'dbt' %}
@@ -18,7 +18,7 @@
     <div class="flow-node active"><strong>dbt</strong><span>Transform</span><small>staging → silver → gold</small></div>
     {% endif %}
 </div>
-<div class="architecture-note">O fluxo visual mostra contratos, não dependências internas. Neste laboratório local, <code>StateStore</code>, <code>Destination</code> e <code>RunLogBackend</code> usam adapters DuckDB; em Lakehouse os mesmos contratos podem apontar para outros backends.</div>
+<div class="architecture-note">O Pipeline trabalha com contratos. O adapter determina onde dados, estado e auditoria vivem. Retries de uma mesma janela usam uma <code>ingestion_key</code> determinística nos destinations oficiais.</div>
 
 <div class="grid-2">
     <div class="card">
@@ -27,20 +27,30 @@
             <dt>Paginação</dt><dd>{{ config.connector.pagination.type }}</dd>
             <dt>Incremental</dt><dd>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %}<br><code>{{ config.connector.incremental.date_field }}</code>{% endif %}</dd>
             <dt>Autenticação</dt><dd>{{ config.connector.auth.type }}</dd>
+            <dt>Destination</dt><dd>{{ config.destination.type }}</dd>
             <dt>Schema Bronze</dt><dd>{{ config.destination.schema }}</dd>
+            <dt>Write mode</dt><dd>{{ config.destination.write_mode }}</dd>
             <dt>Batch</dt><dd>{{ config.destination.batch_size }}</dd>
+            {% if config.destination.partition_by %}<dt>Partições</dt><dd>{{ config.destination.partition_by | join(', ') }}</dd>{% endif %}
         </dl>
     </div>
     <div class="card">
-        <h3>Pós-ingestão</h3>
+        <h3>Estado e pós-ingestão</h3>
         <dl class="facts">
-            <dt>Run log</dt><dd>{{ "RunLogBackend ativo" if config.run_log else "desligado" }}</dd>
+            <dt>StateStore</dt><dd>{{ config.state.type if config.state.type != 'auto' else 'auto → ' ~ config.destination.type }}</dd>
+            <dt>Run log</dt><dd>{% if config.run_log %}{{ config.run_log.type if config.run_log.type != 'auto' else 'auto → ' ~ config.destination.type }}{% else %}desligado{% endif %}</dd>
             <dt>Transformação</dt><dd>{{ config.transform.type }}</dd>
             {% if config.transform.type == 'dbt' %}<dt>dbt select</dt><dd>{{ config.transform.select or "todos os modelos" }}</dd><dt>Projeto local</dt><dd>{{ "encontrado" if dbt_available else "não encontrado" }}</dd>{% endif %}
         </dl>
         {% if config.transform.type == 'dbt' %}<a href="/dbt" class="btn">Ver modelos dbt</a>{% endif %}
         <a href="/architecture" class="btn">Entender abstrações</a>
     </div>
+</div>
+
+<h2>Contrato de schema</h2>
+<div class="card">
+    <p>Bronze persiste os campos declarados como strings e preserva campos inesperados em <code>_extra</code>. Os tipos abaixo são o contrato lógico usado por staging/transformação.</p>
+    {% if config.columns %}<table><thead><tr><th>Coluna</th><th>Tipo lógico</th></tr></thead><tbody>{% for col in config.columns %}<tr><td>{{ col.name }}</td><td><code>{{ col.dtype }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty">Nenhuma coluna declarada.</div>{% endif %}
 </div>
 
 <h2>Histórico de execuções</h2>
