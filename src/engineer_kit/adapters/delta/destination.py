@@ -14,7 +14,7 @@ from engineer_kit.adapters.delta._paths import join_table_uri
 from engineer_kit.adapters.delta.run_log import DeltaRunLogStore
 from engineer_kit.storage.batching import DEFAULT_BATCH_SIZE, iter_in_batches, validate_batch_size
 from engineer_kit.storage.bronze import build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult
+from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
@@ -27,9 +27,8 @@ class DeltaDestination(Destination):
     """Stream one ingestion run into one atomic Delta Lake transaction.
 
     ``base_uri`` may be a local directory or an object-store URI supported by
-    delta-rs. Each endpoint becomes one Delta table below that root. Record
-    batches remain bounded in memory, while the Arrow stream is committed by
-    Delta as one append transaction only after the full stream succeeds.
+    delta-rs. A RecordBatchReader keeps memory bounded while Delta commits the
+    whole stream transactionally. Partitioning is explicit and never inferred.
     """
 
     def __init__(
@@ -37,13 +36,29 @@ class DeltaDestination(Destination):
         base_uri: str | Path,
         batch_size: int = DEFAULT_BATCH_SIZE,
         storage_options: dict[str, str] | None = None,
+        partition_by: list[str] | None = None,
+        write_mode: WriteMode | str = WriteMode.APPEND,
+        target_file_size: int | None = None,
+        metadata_base_uri: str | Path | None = None,
     ) -> None:
         self._base_uri = str(base_uri)
+        self._metadata_base_uri = str(metadata_base_uri or base_uri)
         self._batch_size = validate_batch_size(batch_size)
         self._storage_options = dict(storage_options or {})
+        self._partition_by = list(partition_by or [])
+        self._write_mode = WriteMode.parse(write_mode)
+        self._target_file_size = target_file_size
+        for field_name in self._partition_by:
+            validate_identifier(field_name, "partition_by")
+
+    @property
+    def write_mode(self) -> WriteMode:
+        return self._write_mode
 
     def default_run_log_backend(self) -> RunLogBackend:
-        return DeltaRunLogStore(self._base_uri, storage_options=self._storage_options)
+        return DeltaRunLogStore(
+            self._metadata_base_uri, storage_options=self._storage_options
+        )
 
     def load(
         self,
@@ -56,13 +71,16 @@ class DeltaDestination(Destination):
         table_uri = join_table_uri(self._base_uri, endpoint_name)
         batches = iter(iter_in_batches(records, self._batch_size))
         first_batch = next(batches, None)
+        arrow_schema = bronze_arrow_schema(schema)
 
         if first_batch is None:
+            if self._write_mode is WriteMode.OVERWRITE:
+                empty = pa.Table.from_batches([], schema=arrow_schema)
+                self._write(table_uri, empty)
             return LoadResult(table=table_uri, rows_loaded=0, extra_fields_seen=[])
 
         total_rows = 0
         all_extra_fields: set[str] = set()
-        arrow_schema = bronze_arrow_schema(schema)
 
         def record_batches() -> Iterator[pa.RecordBatch]:
             nonlocal total_rows
@@ -76,28 +94,11 @@ class DeltaDestination(Destination):
 
         reader = pa.RecordBatchReader.from_batches(arrow_schema, record_batches())
         try:
-            write_deltalake(
-                table_uri,
-                reader,
-                mode="append",
-                storage_options=self._storage_options or None,
-            )
+            self._write(table_uri, reader)
         finally:
             reader.close()
 
-        if all_extra_fields:
-            logger.warning(
-                "Endpoint '%s': campos fora do schema preservados em _extra: %s",
-                endpoint_name,
-                sorted(all_extra_fields),
-            )
-            visual_logger.warning(
-                "'{}': {} coluna(s) nova(s) preservada(s) em _extra: {}",
-                connector_name,
-                len(all_extra_fields),
-                sorted(all_extra_fields),
-            )
-
+        self._report_extra_fields(connector_name, endpoint_name, all_extra_fields)
         visual_logger.success(
             "'{}': {} registros gravados em Delta: {}",
             connector_name,
@@ -108,6 +109,35 @@ class DeltaDestination(Destination):
             table=table_uri,
             rows_loaded=total_rows,
             extra_fields_seen=sorted(all_extra_fields),
+        )
+
+    def _write(self, table_uri: str, data: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "mode": self._write_mode.value,
+            "storage_options": self._storage_options or None,
+        }
+        if self._partition_by:
+            kwargs["partition_by"] = self._partition_by
+        if self._target_file_size is not None:
+            kwargs["target_file_size"] = self._target_file_size
+        write_deltalake(table_uri, data, **kwargs)
+
+    @staticmethod
+    def _report_extra_fields(
+        connector_name: str, endpoint_name: str, extra_fields: set[str]
+    ) -> None:
+        if not extra_fields:
+            return
+        logger.warning(
+            "Endpoint '%s': campos fora do schema preservados em _extra: %s",
+            endpoint_name,
+            sorted(extra_fields),
+        )
+        visual_logger.warning(
+            "'{}': {} coluna(s) nova(s) preservada(s) em _extra: {}",
+            connector_name,
+            len(extra_fields),
+            sorted(extra_fields),
         )
 
 
