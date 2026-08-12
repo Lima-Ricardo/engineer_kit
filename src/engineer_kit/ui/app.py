@@ -94,15 +94,23 @@ def create_app(
         finally:
             conn.close()
         return {
-            r[0]: {"status": r[1], "started_at": r[2], "finished_at": r[3], "rows_loaded": r[4]}
-            for r in rows
+            row[0]: {
+                "status": row[1],
+                "started_at": row[2],
+                "finished_at": row[3],
+                "rows_loaded": row[4],
+            }
+            for row in rows
         }
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, _: None = Depends(check_auth)):
         configs = list_pipeline_configs(pipelines_dir)
         last_runs = _last_run_by_pipeline()
-        pipelines = [{"config": config, "last_run": last_runs.get(config.name)} for _, config in configs]
+        pipelines = [
+            {"config": config, "last_run": last_runs.get(config.name)}
+            for _, config in configs
+        ]
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -222,27 +230,42 @@ def create_app(
             ).fetchall()
             rows = []
             for schema, table in tables:
-                count = conn.execute(f'SELECT count(*) FROM "{schema}"."{table}"').fetchone()[0]
+                count = conn.execute(
+                    f'SELECT count(*) FROM "{schema}"."{table}"'
+                ).fetchone()[0]
                 rows.append({"schema": schema, "table": table, "rows": count})
         finally:
             conn.close()
         return templates.TemplateResponse(request, "data_browser.html", {"tables": rows})
 
     @app.get("/data/{schema}/{table}", response_class=HTMLResponse)
-    def table_preview(request: Request, schema: str, table: str, _: None = Depends(check_auth)):
+    def table_preview(
+        request: Request,
+        schema: str,
+        table: str,
+        _: None = Depends(check_auth),
+    ):
         _validate_identifier(schema)
         _validate_identifier(table)
         conn = _warehouse_conn()
         try:
-            result = conn.execute(f'SELECT * FROM "{schema}"."{table}" LIMIT {PREVIEW_ROW_LIMIT}')
-            columns = [d[0] for d in result.description]
+            result = conn.execute(
+                f'SELECT * FROM "{schema}"."{table}" LIMIT {PREVIEW_ROW_LIMIT}'
+            )
+            columns = [description[0] for description in result.description]
             rows = result.fetchall()
         finally:
             conn.close()
         return templates.TemplateResponse(
             request,
             "table_preview.html",
-            {"schema": schema, "table": table, "columns": columns, "rows": rows, "limit": PREVIEW_ROW_LIMIT},
+            {
+                "schema": schema,
+                "table": table,
+                "columns": columns,
+                "rows": rows,
+                "limit": PREVIEW_ROW_LIMIT,
+            },
         )
 
     @app.get("/dbt", response_class=HTMLResponse)
@@ -250,7 +273,7 @@ def create_app(
         layers = {"staging": [], "silver": [], "gold": []}
         for layer in layers:
             pattern = str(dbt_project_dir / "models" / layer / "*.sql")
-            layers[layer] = sorted(Path(p).stem for p in glob.glob(pattern))
+            layers[layer] = sorted(Path(path).stem for path in glob.glob(pattern))
         return templates.TemplateResponse(
             request,
             "dbt_models.html",
@@ -268,7 +291,10 @@ def create_app(
         try:
             return load_pipeline_config(path)
         except PipelineConfigError as exc:
-            raise HTTPException(status_code=500, detail=f"Configuracao invalida: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=f"Configuracao invalida: {exc}",
+            ) from exc
 
     def _run_history(name: str) -> list[dict]:
         try:
@@ -278,7 +304,8 @@ def create_app(
         try:
             rows = conn.execute(
                 "SELECT started_at, finished_at, status, rows_loaded, error_message "
-                "FROM _meta.run_log WHERE connector_name = ? ORDER BY finished_at DESC LIMIT 20",
+                "FROM _meta.run_log WHERE connector_name = ? "
+                "ORDER BY finished_at DESC LIMIT 20",
                 [name],
             ).fetchall()
         except duckdb.CatalogException:
@@ -286,8 +313,14 @@ def create_app(
         finally:
             conn.close()
         return [
-            {"started_at": r[0], "finished_at": r[1], "status": r[2], "rows_loaded": r[3], "error_message": r[4]}
-            for r in rows
+            {
+                "started_at": row[0],
+                "finished_at": row[1],
+                "status": row[2],
+                "rows_loaded": row[3],
+                "error_message": row[4],
+            }
+            for row in rows
         ]
 
     def _config_from_form(form) -> PipelineConfig:
@@ -327,7 +360,12 @@ def create_app(
         col_dtypes = form.getlist("column_dtype") if hasattr(form, "getlist") else []
         for col_name, col_dtype in zip(col_names, col_dtypes):
             if col_name.strip():
-                columns.append(ColumnConfig(name=col_name.strip(), dtype=col_dtype.strip() or "VARCHAR"))
+                columns.append(
+                    ColumnConfig(
+                        name=col_name.strip(),
+                        dtype=col_dtype.strip() or "string",
+                    )
+                )
 
         connector = ConnectorConfig(
             base_url=base_url,
@@ -355,6 +393,7 @@ def create_app(
             type=form.get("destination_type") or "duckdb",
             schema=form.get("destination_schema") or "bronze",
             batch_size=int(form.get("batch_size") or 1000),
+            write_mode=form.get("write_mode") or "append",
         )
         transform = TransformConfig(
             type=form.get("transform_type") or "none",
