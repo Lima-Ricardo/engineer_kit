@@ -21,6 +21,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from engineer_kit.connectors.api_connector import APIConnector
+from engineer_kit.security.redaction import redact_text
 from engineer_kit.storage.destination import Destination, LoadContext
 from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
 from engineer_kit.storage.schema import EndpointSchema
@@ -156,9 +157,6 @@ class Pipeline:
             started_at=started_at,
         )
 
-        # Phase 1: extraction + destination transaction. Official connectors use
-        # ExtractionSession internally, while legacy/third-party connector doubles
-        # can keep exposing extract()+commit_watermark().
         try:
             session_factory = getattr(connector, "extract_incremental", None)
             if callable(session_factory):
@@ -190,13 +188,16 @@ class Pipeline:
                 try:
                     extraction_session.abort()
                 except Exception:
-                    logger.debug("Falha ao abortar ExtractionSession", exc_info=True)
+                    logger.debug("Falha ao abortar ExtractionSession")
             finished_at = datetime.now(timezone.utc)
-            logger.exception(
-                "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado.",
+            safe_error = redact_text(exc)
+            logger.error(
+                "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado. "
+                "erro=%s",
                 connector.name,
+                type(exc).__name__,
             )
-            visual_logger.error("'{}': carga falhou. Motivo: {}", connector.name, exc)
+            visual_logger.error("'{}': carga falhou. Motivo: {}", connector.name, safe_error)
             self._record_run_safely(
                 self._run_log_entry(
                     connector_name=connector.name,
@@ -206,7 +207,7 @@ class Pipeline:
                     status="error",
                     rows_loaded=0,
                     extra_fields_seen=[],
-                    error_message=str(exc),
+                    error_message=safe_error,
                     destination=None,
                     window=window,
                     watermark_after=None,
@@ -215,7 +216,7 @@ class Pipeline:
             return StepResult(
                 connector_name=connector.name,
                 rows_loaded=0,
-                error=str(exc),
+                error=safe_error,
                 status="error",
                 started_at=started_at,
                 finished_at=finished_at,
@@ -229,7 +230,6 @@ class Pipeline:
         extra_fields_seen = list(getattr(result, "extra_fields_seen", []) or [])
         destination_label = getattr(result, "table", None)
 
-        # Phase 2: state checkpoint. Data is already committed here.
         try:
             if extraction_session is not None:
                 watermark_after = extraction_session.commit()
@@ -237,16 +237,18 @@ class Pipeline:
                 watermark_after = connector.commit_watermark()
         except Exception as exc:
             finished_at = datetime.now(timezone.utc)
-            error_message = f"checkpoint falhou apos a carga: {exc}"
-            logger.exception(
-                "Conector '%s': destino confirmado, mas checkpoint falhou. "
+            safe_cause = redact_text(exc)
+            error_message = f"checkpoint falhou apos a carga: {safe_cause}"
+            logger.error(
+                "Conector '%s': destino confirmado, mas checkpoint falhou; erro=%s. "
                 "A mesma janela sera tentada novamente.",
                 connector.name,
+                type(exc).__name__,
             )
             visual_logger.error(
                 "'{}': dados gravados, mas checkpoint falhou; retry reutilizara a mesma janela. Motivo: {}",
                 connector.name,
-                exc,
+                safe_cause,
             )
             self._record_run_safely(
                 self._run_log_entry(
@@ -279,7 +281,6 @@ class Pipeline:
                 ingestion_key=context.ingestion_key,
             )
 
-        # Phase 3: audit is best-effort and cannot invalidate committed data/state.
         finished_at = datetime.now(timezone.utc)
         logger.info("Conector '%s': %d linha(s) carregada(s).", connector.name, rows_loaded)
         visual_logger.success(
@@ -365,7 +366,7 @@ class Pipeline:
             status=status,
             rows_loaded=rows_loaded,
             extra_fields_seen=extra_fields_seen,
-            error_message=error_message,
+            error_message=redact_text(error_message) if error_message else None,
             run_id=context.run_id,
             ingestion_key=context.ingestion_key,
             destination=destination,
@@ -381,11 +382,15 @@ class Pipeline:
         try:
             self._run_log_store.record(entry)
         except Exception as exc:
-            logger.exception("Falha ao persistir auditoria da execucao %s", entry.run_id)
+            logger.error(
+                "Falha ao persistir auditoria da execucao %s; erro=%s",
+                entry.run_id,
+                type(exc).__name__,
+            )
             visual_logger.warning(
                 "Auditoria da execucao '{}' nao foi persistida: {}",
                 entry.run_id or "sem-id",
-                exc,
+                redact_text(exc),
             )
 
 
