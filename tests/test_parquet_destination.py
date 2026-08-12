@@ -42,7 +42,7 @@ def test_parquet_destination_writes_stable_bronze_dataset(tmp_path):
     assert table.column("_source").to_pylist() == ["orders_api", "orders_api"]
 
 
-def test_parquet_destination_streams_multiple_files_in_bounded_batches(tmp_path):
+def test_parquet_destination_streams_batches_as_row_groups(tmp_path):
     schema = EndpointSchema.from_names(["id"])
     destination = ParquetDestination(tmp_path, batch_size=MIN_BATCH_SIZE)
     records = ({"id": str(index)} for index in range(MIN_BATCH_SIZE * 2 + 7))
@@ -50,7 +50,9 @@ def test_parquet_destination_streams_multiple_files_in_bounded_batches(tmp_path)
     result = destination.load("events_api", "events", schema, records)
 
     files = sorted((tmp_path / "events").glob("*.parquet"))
-    assert len(files) == 3
+    assert len(files) == 1
+    metadata = pq.read_metadata(files[0])
+    assert metadata.num_row_groups == 3
     assert result.rows_loaded == MIN_BATCH_SIZE * 2 + 7
     assert pq.read_table(tmp_path / "events").num_rows == result.rows_loaded
 
@@ -65,6 +67,22 @@ def test_parquet_destination_appends_new_run_instead_of_overwriting(tmp_path):
     table = pq.read_table(tmp_path / "events")
     assert sorted(table.column("id").to_pylist()) == ["first", "second"]
     assert len(list((tmp_path / "events").glob("*.parquet"))) == 2
+
+
+def test_failed_parquet_run_never_becomes_visible(tmp_path):
+    schema = EndpointSchema.from_names(["id"])
+    destination = ParquetDestination(tmp_path, batch_size=MIN_BATCH_SIZE)
+
+    def broken_records():
+        for index in range(MIN_BATCH_SIZE):
+            yield {"id": str(index)}
+        raise RuntimeError("source failed after first batch")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        destination.load("events_api", "events", schema, broken_records())
+
+    assert list((tmp_path / "events").glob("*.parquet")) == []
+    assert list((tmp_path / ".engineer_kit_staging" / "events").glob("*.tmp")) == []
 
 
 def test_parquet_destination_rejects_endpoint_path_traversal(tmp_path):
