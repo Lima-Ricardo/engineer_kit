@@ -16,6 +16,7 @@ import requests
 
 from engineer_kit.connectors.api_connector import APIConnector
 from engineer_kit.connectors.date_field import DateFieldSpec
+from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import PaginationStrategy, ParsedPage
@@ -50,6 +51,7 @@ class RestConnector(APIConnector):
         static_params: Optional[dict[str, Any]] = None,
         records_path: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         http_client: Optional[HttpClient] = None,
+        extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
     ) -> None:
         self._base_url = base_url
         self._date_params = date_params or DateParams()
@@ -66,6 +68,7 @@ class RestConnector(APIConnector):
             initial_start=initial_start,
             date_field=date_field,
             incremental=incremental,
+            extraction_batch_size=extraction_batch_size,
         )
 
     def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
