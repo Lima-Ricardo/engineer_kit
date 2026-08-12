@@ -6,14 +6,18 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Any, Iterable
-from uuid import uuid4
 
 import pyarrow.parquet as pq
 
 from engineer_kit.adapters._arrow import bronze_arrow_schema, rows_to_table
 from engineer_kit.storage.batching import DEFAULT_BATCH_SIZE, iter_in_batches, validate_batch_size
 from engineer_kit.storage.bronze import build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
+from engineer_kit.storage.destination import (
+    Destination,
+    LoadContext,
+    LoadResult,
+    WriteMode,
+)
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
@@ -22,12 +26,12 @@ logger = logging.getLogger("engineer_kit.storage.parquet")
 
 
 class ParquetDestination(Destination):
-    """Write one immutable Parquet file per successful append run.
+    """Write bounded-memory Parquet Bronze files.
 
-    Batches are streamed as row groups into a temporary file. The file becomes
-    visible only after the writer closes successfully. ``overwrite`` stages a
-    complete replacement directory first and swaps it into place only after
-    the source iterator has been fully consumed.
+    APPEND writes one file per ingestion window. Its final filename uses the
+    deterministic ``ingestion_key`` supplied by Pipeline, so retrying a window
+    atomically replaces that window's previous file instead of duplicating it.
+    OVERWRITE stages a complete replacement directory before promotion.
     """
 
     def __init__(
@@ -53,31 +57,60 @@ class ParquetDestination(Destination):
         schema: EndpointSchema,
         records: Iterable[dict[str, Any]],
     ) -> LoadResult:
+        return self._load(
+            connector_name,
+            endpoint,
+            schema,
+            records,
+            LoadContext.adhoc(connector_name),
+        )
+
+    def load_with_context(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
+        return self._load(connector_name, endpoint, schema, records, context)
+
+    def _load(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
         endpoint_name = validate_identifier(endpoint, "endpoint")
         endpoint_dir = self._base_path / endpoint_name
         staging_root = self._base_path / ".engineer_kit_staging" / endpoint_name
         staging_root.mkdir(parents=True, exist_ok=True)
 
-        run_id = uuid4().hex
         arrow_schema = bronze_arrow_schema(schema)
         total_rows = 0
         all_extra_fields: set[str] = set()
 
         if self._write_mode is WriteMode.OVERWRITE:
-            staged_dir = staging_root / f"replace-{run_id}"
+            staged_dir = staging_root / f"replace-{context.run_id}"
             staged_dir.mkdir(parents=True, exist_ok=False)
-            temp_path = staged_dir / f"part-{run_id}.parquet"
+            temp_path = staged_dir / f"part-{context.run_id}.parquet"
             final_path = temp_path
         else:
             endpoint_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = staging_root / f"{run_id}.parquet.tmp"
-            final_path = endpoint_dir / f"part-{run_id}.parquet"
+            temp_path = staging_root / f"{context.run_id}.parquet.tmp"
+            final_path = endpoint_dir / f"part-{context.ingestion_key}.parquet"
 
         writer: pq.ParquetWriter | None = None
         try:
             for batch in iter_in_batches(records, self._batch_size):
                 rows, extra_fields = build_bronze_rows(
-                    connector_name, endpoint_name, schema, batch
+                    connector_name,
+                    endpoint_name,
+                    schema,
+                    batch,
+                    context=context,
                 )
                 all_extra_fields.update(extra_fields)
                 table = rows_to_table(rows, schema)
@@ -96,11 +129,13 @@ class ParquetDestination(Destination):
                 writer = None
 
             if self._write_mode is WriteMode.OVERWRITE:
-                # Empty overwrite intentionally replaces the endpoint with an
-                # empty directory rather than leaving stale files visible.
-                self._promote_overwrite(staged_dir, endpoint_dir, run_id)
+                self._promote_overwrite(staged_dir, endpoint_dir, context.run_id)
             elif total_rows:
                 temp_path.replace(final_path)
+            else:
+                # Successful retry of the same window with no rows means the
+                # previous committed representation of that window is stale.
+                final_path.unlink(missing_ok=True)
         except Exception:
             if writer is not None:
                 writer.close()
