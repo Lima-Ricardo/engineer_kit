@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from datetime import date
 from typing import Any, Iterator, Optional, Union
 
 import requests
 
+from engineer_kit.connectors.base import Connector
 from engineer_kit.connectors.date_field import DateFieldSpec
 from engineer_kit.connectors.extraction import (
     DEFAULT_EXTRACTION_BATCH_SIZE,
@@ -30,7 +31,7 @@ class MissingDateFieldError(ValueError):
     """Raised when DATA_DATE mode has no record date field."""
 
 
-class APIConnector(ABC):
+class APIConnector(Connector):
     """Base for API connectors with reusable pagination and incremental state.
 
     The preferred public API is :meth:`extract_incremental`, which returns a
