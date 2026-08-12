@@ -2,59 +2,81 @@
 {% block title %}Arquitetura - engineer_kit{% endblock %}
 {% block content %}
 <h1>Arquitetura do engineer_kit</h1>
-<p class="subtitle">A interface local serve para aprender e testar os mesmos contratos usados pelo core.</p>
+<p class="subtitle">O local lab ensina e testa os mesmos contratos usados em código, Parquet e Lakehouse.</p>
 
 <div class="flow-strip architecture-flow">
     <div class="flow-node active"><strong>Source</strong><span>RestConnector</span><small>HTTP, auth, paginação</small></div>
     <div class="flow-arrow">→</div>
     <div class="flow-node active"><strong>Incremental</strong><span>StateStore</span><small>watermark/checkpoint</small></div>
     <div class="flow-arrow">→</div>
-    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>persistência em batches</small></div>
+    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>batch + schema estável</small></div>
     <div class="flow-arrow">→</div>
     <div class="flow-node"><strong>Transform</strong><span>opcional</span><small>dbt, Spark ou SQL</small></div>
 </div>
 
 <div class="grid-2 docs-grid">
-    <section class="card"><h3>RestConnector</h3><p>Transforma uma API REST em uma fonte previsível. O usuário declara apenas o que varia: URL, método, autenticação, paginação, caminho dos registros e filtros de data.</p><code>API → Iterator[dict]</code></section>
-    <section class="card"><h3>StateStore</h3><p>Persiste o checkpoint incremental. O connector pergunta pelo último watermark sem saber se ele vive em DuckDB, Delta ou outro backend.</p><code>get_watermark / set_watermark</code></section>
-    <section class="card"><h3>Destination</h3><p>Recebe registros e materializa a Bronze. O core não conhece SQL de DuckDB nem detalhes de Lakehouse.</p><code>load(...) → LoadResult</code></section>
-    <section class="card"><h3>RunLogBackend</h3><p>Registra a execução de forma auditável sem amarrar o Pipeline a uma tabela específica. No local, o adapter é <code>DuckDBRunLogStore</code>.</p><code>record(RunLogEntry)</code></section>
-    <section class="card"><h3>Pipeline</h3><p>Coordena a unidade atômica: extrai, grava, confirma o watermark e registra auditoria. Pode ser chamado pela UI, Scheduler, Airflow ou outro orquestrador.</p><code>state → extract → load → commit</code></section>
-    <section class="card"><h3>Transform</h3><p>É deliberadamente pós-ingestão. dbt é uma integração opcional no laboratório local; em uma plataforma robusta, Spark/dbt/SQL podem rodar externamente.</p><code>Bronze → staging → silver → gold</code></section>
+    <section class="card"><h3>RestConnector</h3><p>Transforma uma API REST em uma fonte previsível. O usuário declara URL, autenticação, paginação, caminho dos registros e regra incremental.</p><code>API → Iterator[dict]</code></section>
+    <section class="card"><h3>StateStore</h3><p>Persiste o checkpoint sem acoplar o connector ao storage. Implementações oficiais: <code>DuckDBStateStore</code>, <code>JsonFileStateStore</code> e <code>DeltaStateStore</code>.</p><code>get_watermark / set_watermark</code></section>
+    <section class="card"><h3>Destination</h3><p>Materializa a Bronze. Implementações oficiais: <code>DuckDBDestination</code>, <code>ParquetDestination</code> e <code>DeltaDestination</code>.</p><code>load(...) → LoadResult</code></section>
+    <section class="card"><h3>RunLogBackend</h3><p>Audita a execução sem amarrar o Pipeline a uma tabela específica. Há backends DuckDB, JSONL e Delta.</p><code>record(RunLogEntry)</code></section>
+    <section class="card"><h3>Pipeline</h3><p>Coordena extração, transação da Bronze, checkpoint e auditoria. Um <code>PipelineResult</code> contém run id, janela, destino, linhas e watermarks.</p><code>extract → load → checkpoint → audit</code></section>
+    <section class="card"><h3>Transform</h3><p>É deliberadamente pós-ingestão. dbt é uma integração opcional no local lab; plataformas podem executar dbt, Spark ou SQL externamente.</p><code>Bronze → staging → silver → gold</code></section>
+</div>
+
+<h2>Adapters disponíveis</h2>
+<div class="card">
+    <table><thead><tr><th>Uso</th><th>Destination</th><th>State</th><th>Audit</th><th>Instalação</th></tr></thead><tbody>
+        <tr><td>Local zero-infra</td><td>DuckDBDestination</td><td>DuckDBStateStore</td><td>DuckDBRunLogStore</td><td><code>engineer_kit[duckdb]</code></td></tr>
+        <tr><td>Arquivos / lake montado</td><td>ParquetDestination</td><td>JsonFileStateStore</td><td>JsonLinesRunLogStore</td><td><code>engineer_kit[parquet]</code></td></tr>
+        <tr><td>Lakehouse / plataforma</td><td>DeltaDestination</td><td>DeltaStateStore</td><td>DeltaRunLogStore</td><td><code>engineer_kit[delta]</code></td></tr>
+    </tbody></table>
+</div>
+
+<h2>Contrato Bronze</h2>
+<div class="card">
+    <p>Os campos declarados chegam fisicamente à Bronze como strings. A tipagem analítica é lógica e fica para staging/transformação. Isso evita que uma mudança de tipo na API derrube a ingestão.</p>
+    <pre class="code-block">campos declarados  → string / null
+campo novo          → _extra + warning
+registro original   → _raw
+execução            → _run_id
+janela incremental  → _window_start / _window_end
+retry idempotente   → _ingestion_key</pre>
+</div>
+
+<h2>Retry e checkpoint</h2>
+<div class="card">
+    <pre class="code-block">read watermark
+      ↓
+extract API
+      ↓
+write Bronze transaction
+      ↓
+commit watermark
+      ↓
+audit (best effort)
+      ↓
+transform opcional</pre>
+    <p>Se a Bronze falhar, o watermark não avança. Se a Bronze confirmar e o StateStore falhar, a próxima execução usa a mesma janela. Os adapters oficiais usam uma <code>ingestion_key</code> determinística para substituir essa mesma janela em vez de duplicá-la.</p>
+</div>
+
+<h2>Write modes</h2>
+<div class="card">
+    <p><code>append</code> é o padrão de Bronze e mantém janelas distintas. <code>overwrite</code> substitui o alvo inteiro com promoção/transação segura quando suportada. Merge/upsert não é inferido pela biblioteca porque exige uma chave de negócio explícita.</p>
 </div>
 
 <h2>Runtime local</h2>
 <div class="card">
-    <p>A interface é opcional. Instale apenas o que precisar:</p>
-    <pre class="code-block"># somente interface local
+    <p>A UI é opcional e pensada para desenvolvimento e treinamento:</p>
+    <pre class="code-block"># interface local
 pip install "engineer_kit[ui]"
 
-# somente integração dbt local
+# dbt local
 pip install "engineer_kit[dbt]"
 
-# laboratório local completo: UI + dbt
+# laboratório completo: DuckDB + UI + dbt
 pip install "engineer_kit[local]"
 
 engineer_kit ui --workspace .</pre>
-    <p>Nesse modo, o mapa de adapters é:</p>
-    <table><thead><tr><th>Contrato</th><th>Adapter local</th><th>Futuro em plataforma</th></tr></thead><tbody>
-        <tr><td>StateStore</td><td>DuckDBStateStore</td><td>Delta/Lakehouse StateStore</td></tr>
-        <tr><td>Destination</td><td>DuckDBLoader</td><td>Parquet/Delta Destination</td></tr>
-        <tr><td>RunLogBackend</td><td>DuckDBRunLogStore</td><td>Delta/SQL/observability backend</td></tr>
-        <tr><td>Transform</td><td>{{ "dbt disponível" if dbt_available else "dbt opcional" }}</td><td>dbt / Spark / SQL</td></tr>
-    </tbody></table>
+    <p>O editor visual cria pipelines DuckDB porque o navegador de dados e a integração dbt do local lab são locais. Parquet e Delta usam os mesmos contratos via Python/YAML e aparecem aqui como arquitetura de plataforma.</p>
 </div>
-
-<h2>Regra de segurança do incremental</h2>
-<div class="card"><pre class="code-block">read watermark
-      ↓
-extract API
-      ↓
-write Bronze
-   ┌──┴──┐
- fail  success
-   │      │
-   │    commit watermark
-   │      │
-retry    transform opcional</pre></div>
 {% endblock %}
