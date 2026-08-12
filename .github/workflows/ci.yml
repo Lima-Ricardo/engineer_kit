@@ -91,6 +91,29 @@ jobs:
       - name: Run tests with coverage
         run: python -m pytest -q -m 'not stress' --cov=engineer_kit --cov-report=term-missing
 
+  stress:
+    name: synthetic ingestion stress
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install storage adapters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,duckdb,parquet,delta]'
+
+      - name: Run synthetic stress suite
+        run: python -m pytest -q -m stress tests/test_stress_ingestion.py
+
   quality:
     name: quality and security
     runs-on: ubuntu-latest
