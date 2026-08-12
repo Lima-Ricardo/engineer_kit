@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import abstractmethod
 from datetime import date
 from typing import Any, Iterator, Optional, Union
@@ -21,6 +22,7 @@ from engineer_kit.http.client import HttpClient
 from engineer_kit.storage.state_store import StateStore, Watermark
 
 VALID_HTTP_METHODS = ("GET", "POST")
+DEFAULT_MAX_PAGES = 10_000
 
 
 class InvalidHttpMethodError(ValueError):
@@ -29,6 +31,14 @@ class InvalidHttpMethodError(ValueError):
 
 class MissingDateFieldError(ValueError):
     """Raised when DATA_DATE mode has no record date field."""
+
+
+class PaginationLimitError(RuntimeError):
+    """Raised before a broken/malicious API can paginate forever."""
+
+
+class PaginationLoopError(RuntimeError):
+    """Raised when the same pagination request state repeats."""
 
 
 class APIConnector(Connector):
@@ -52,12 +62,15 @@ class APIConnector(Connector):
         date_field: Optional[DateFieldSpec] = None,
         incremental: Optional[IncrementalStrategy] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
             raise InvalidHttpMethodError(
                 f"method deve ser um de {VALID_HTTP_METHODS}, recebido '{method}'."
             )
+        if max_pages <= 0:
+            raise ValueError("max_pages deve ser maior que zero.")
 
         self.name = name
         self._http = http_client
@@ -65,6 +78,7 @@ class APIConnector(Connector):
         self._method = method
         self._date_field = date_field
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
+        self._max_pages = max_pages
         self._legacy_session: ExtractionSession | None = None
 
         if incremental is not None:
@@ -90,6 +104,11 @@ class APIConnector(Connector):
     def extraction_batch_size(self) -> int:
         """Default batch size used by new ExtractionSession objects."""
         return self._extraction_batch_size
+
+    @property
+    def max_pages(self) -> int:
+        """Maximum pages one extraction attempt may request."""
+        return self._max_pages
 
     @property
     def current_window(self) -> IncrementalWindow | None:
@@ -149,17 +168,46 @@ class APIConnector(Connector):
         self._legacy_session = session
         return session.iter_records()
 
+    @staticmethod
+    def _pagination_fingerprint(next_url: str | None, page_params: dict[str, Any]) -> str:
+        if next_url is not None:
+            # Never put this fingerprint in error messages/logs: next URLs may
+            # contain cursor/token values.
+            return f"url:{next_url}"
+        try:
+            serialized = json.dumps(page_params, sort_keys=True, default=str, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized = repr(sorted((str(k), type(v).__name__) for k, v in page_params.items()))
+        return f"params:{serialized}"
+
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
         page_params = self._pagination.initial_params()
         next_url: Optional[str] = None
+        seen_requests: set[str] = set()
+        pages_requested = 0
 
         while True:
+            if pages_requested >= self._max_pages:
+                raise PaginationLimitError(
+                    f"'{self.name}' excedeu max_pages={self._max_pages}; "
+                    "interrompendo para evitar loop/custo de requisicoes sem limite."
+                )
+
+            fingerprint = self._pagination_fingerprint(next_url, page_params)
+            if fingerprint in seen_requests:
+                raise PaginationLoopError(
+                    f"'{self.name}' repetiu o mesmo estado de paginacao; "
+                    "a extracao foi interrompida para evitar loop infinito."
+                )
+            seen_requests.add(fingerprint)
+
             if next_url is not None:
                 request_kwargs: dict[str, Any] = {"url": next_url}
             else:
                 request_kwargs = self.build_request(window, page_params)
 
             response = self._http.request(self._method, **request_kwargs)
+            pages_requested += 1
             page = self.parse_response(response)
 
             yield from page.records
