@@ -29,6 +29,13 @@ duckdb = [
     "duckdb>=1.0.0",
     "tqdm>=4.66",
 ]
+parquet = [
+    "pyarrow>=18.0.0",
+]
+delta = [
+    "pyarrow>=18.0.0",
+    "deltalake>=1.6.0",
+]
 dbt = [
     "duckdb>=1.0.0",
     "dbt-duckdb>=1.8.0",
@@ -64,6 +71,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "stress: resource-intensive ingestion tests",
+]
 
 [tool.ruff]
 target-version = "py310"
