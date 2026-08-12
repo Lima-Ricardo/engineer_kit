@@ -1,24 +1,9 @@
-"""Une conector(es) -> destino em uma unidade atomica: e essa unidade
-que um scheduler (nosso ou externo, tipo Airflow) chama para rodar uma
-carga completa.
+"""Orquestra connector(s) -> destination como uma unidade atomica de ingestao.
 
-O watermark de cada conector so e commitado depois que o load no
-destino teve sucesso — uma falha no meio do caminho refaz a mesma
-janela no proximo run, sem duplicar nem perder dado. Uma fonte falhar
-nao impede as outras de rodar: um problema numa API nao deveria travar
-o resto do pipeline.
-
-Caso comum: um conector so. `Pipeline(connector=..., schema=..., destination=...)`
-resolve isso direto, sem precisar montar PipelineSource nem uma lista.
-Para varios conectores no mesmo pipeline, use `sources=[PipelineSource(...), ...]`.
-
-`run_log=True` (padrao) registra cada execucao (inicio, fim, status,
-quantidade de registros, colunas novas fora do schema) em
-`_meta.run_log`, alem de aparecer no log visual do terminal -- as duas
-saidas vem da mesma informacao. So funciona automaticamente quando
-`destination` expoe `.connection` (como o DuckDBLoader); pra outro
-destino, ou pra apontar o run_log em outro lugar, passe
-`run_log_store=` explicitamente.
+O Pipeline coordena o fluxo, mas nao conhece DuckDB, Delta, Parquet ou
+qualquer backend concreto. O watermark so e commitado depois que o load
+termina com sucesso. Auditoria e opcional e depende do contrato
+`RunLogBackend`, podendo ser fornecida pelo destino ou explicitamente.
 """
 
 from __future__ import annotations
@@ -30,27 +15,27 @@ from typing import Optional
 
 from engineer_kit.connectors.api_connector import APIConnector
 from engineer_kit.storage.destination import Destination
-from engineer_kit.storage.run_log import RunLogEntry, RunLogStore
+from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.pipeline")
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineSource:
     connector: APIConnector
     schema: EndpointSchema
 
 
-@dataclass
+@dataclass(frozen=True)
 class StepResult:
     connector_name: str
     rows_loaded: int
     error: Optional[str] = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineResult:
     steps: list[StepResult]
 
@@ -60,6 +45,8 @@ class PipelineResult:
 
 
 class Pipeline:
+    """Unidade atômica que um scheduler local ou externo pode executar."""
+
     def __init__(
         self,
         destination: Destination,
@@ -67,7 +54,7 @@ class Pipeline:
         schema: Optional[EndpointSchema] = None,
         sources: Optional[list[PipelineSource]] = None,
         run_log: bool = True,
-        run_log_store: Optional[RunLogStore] = None,
+        run_log_store: Optional[RunLogBackend] = None,
     ) -> None:
         self._sources = self._resolve_sources(connector, schema, sources)
         self._destination = destination
@@ -95,21 +82,21 @@ class Pipeline:
     @staticmethod
     def _resolve_run_log_store(
         run_log: bool,
-        run_log_store: Optional[RunLogStore],
+        run_log_store: Optional[RunLogBackend],
         destination: Destination,
-    ) -> Optional[RunLogStore]:
+    ) -> Optional[RunLogBackend]:
         if run_log_store is not None:
             return run_log_store
         if not run_log:
             return None
-        connection = getattr(destination, "connection", None)
-        if connection is None:
+
+        backend = destination.default_run_log_backend()
+        if backend is None:
             raise ValueError(
-                "run_log=True precisa que destination exponha `.connection` (ex: DuckDBLoader). "
-                "Para outro destino, passe run_log_store=... explicitamente, ou run_log=False "
-                "para desligar o registro de execucao."
+                "run_log=True, mas este destino nao fornece auditoria automaticamente. "
+                "Passe run_log_store=RunLogBackend(...) explicitamente ou run_log=False."
             )
-        return RunLogStore(connection)
+        return backend
 
     def run(self) -> PipelineResult:
         return PipelineResult(steps=[self._run_step(source) for source in self._sources])
@@ -140,8 +127,13 @@ class Pipeline:
             )
 
             self._record_run(
-                connector.name, started_at, finished_at, "success", result.rows_loaded,
-                result.extra_fields_seen, error_message=None,
+                connector.name,
+                started_at,
+                finished_at,
+                "success",
+                result.rows_loaded,
+                result.extra_fields_seen,
+                error_message=None,
             )
             return StepResult(connector_name=connector.name, rows_loaded=result.rows_loaded)
         except Exception as exc:
@@ -159,7 +151,13 @@ class Pipeline:
             )
 
             self._record_run(
-                connector.name, started_at, finished_at, "error", 0, [], error_message=str(exc),
+                connector.name,
+                started_at,
+                finished_at,
+                "error",
+                0,
+                [],
+                error_message=str(exc),
             )
             return StepResult(connector_name=connector.name, rows_loaded=0, error=str(exc))
 
