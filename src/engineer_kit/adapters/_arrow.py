@@ -1,4 +1,8 @@
-"""Shared Arrow conversion for Parquet and Delta adapters."""
+"""Shared PyArrow helpers for Parquet and Delta adapters.
+
+This module is outside the core import graph: importing ``engineer_kit`` does
+not require PyArrow until an Arrow-based adapter is selected.
+"""
 
 from __future__ import annotations
 
@@ -10,23 +14,21 @@ from engineer_kit.storage.schema import EndpointSchema
 
 
 def bronze_arrow_schema(schema: EndpointSchema) -> pa.Schema:
-    """Physical Bronze schema: API fields are strings until analytical staging."""
+    """Physical Bronze schema shared by Parquet and Delta."""
     fields = [pa.field(column.name, pa.string()) for column in schema.columns]
     fields.extend(
         [
-            pa.field("_source", pa.string()),
-            pa.field("_endpoint", pa.string()),
-            pa.field("_ingested_at", pa.timestamp("us", tz="UTC")),
-            pa.field("_raw", pa.string()),
+            pa.field("_source", pa.string(), nullable=False),
+            pa.field("_endpoint", pa.string(), nullable=False),
+            pa.field("_ingested_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("_raw", pa.string(), nullable=False),
             pa.field("_extra", pa.string()),
         ]
     )
     return pa.schema(fields)
 
 
-def rows_to_record_batch(
-    rows: list[dict[str, Any]], schema: EndpointSchema
-) -> pa.RecordBatch:
+def rows_to_record_batch(rows: list[dict[str, Any]], schema: EndpointSchema) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist(rows, schema=bronze_arrow_schema(schema))
 
 
