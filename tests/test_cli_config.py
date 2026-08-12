@@ -13,7 +13,8 @@ def test_adapters_command_lists_builtin_backends():
     result = runner.invoke(app, ["adapters"])
     assert result.exit_code == 0
     assert "destination: delta, duckdb, parquet" in result.output
-    assert "state_store: delta, duckdb, file, parquet" in result.output
+    assert "state_store: delta, duckdb, file" in result.output
+    assert "run_log: delta, duckdb, file" in result.output
 
 
 @responses.activate
