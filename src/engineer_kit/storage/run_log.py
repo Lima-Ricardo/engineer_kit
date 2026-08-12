@@ -61,4 +61,6 @@ def __getattr__(name: str):
     return DuckDBRunLogStore
 
 
-__all__ = ["RunLogBackend", "RunLogEntry", "DuckDBRunLogStore", "RunLogStore"]
+# ``__getattr__`` preserves explicit legacy imports. Wildcard exports remain
+# backend-neutral so static tooling and core-only installations see only ports.
+__all__ = ["RunLogBackend", "RunLogEntry"]
