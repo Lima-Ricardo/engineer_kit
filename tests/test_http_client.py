@@ -31,6 +31,10 @@ def test_invalid_http_client_tuning_is_rejected():
         HttpClient(max_retries=-1)
     with pytest.raises(ValueError):
         HttpClient(backoff_factor=-0.1)
+    with pytest.raises(ValueError):
+        HttpClient(max_response_bytes=0)
+    with pytest.raises(ValueError):
+        HttpClient(max_redirects=-1)
 
 
 def test_allow_http_override_permits_plain_http():
@@ -142,5 +146,27 @@ def test_retries_on_server_error_then_succeeds():
     responses.add(responses.GET, "https://example.test/data", json={"ok": True}, status=200)
 
     response = client.get("https://example.test/data")
+    assert response.json() == {"ok": True}
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_post_is_not_retried_by_default():
+    client = HttpClient(max_retries=2, backoff_factor=0)
+    responses.add(responses.POST, "https://example.test/query", status=503)
+
+    with pytest.raises(HttpRequestError):
+        client.request("POST", "https://example.test/query", json={"query": "safe"})
+
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_post_retry_requires_explicit_opt_in():
+    client = HttpClient(max_retries=2, backoff_factor=0, retry_post=True)
+    responses.add(responses.POST, "https://example.test/query", status=503)
+    responses.add(responses.POST, "https://example.test/query", json={"ok": True}, status=200)
+
+    response = client.request("POST", "https://example.test/query", json={"query": "safe"})
     assert response.json() == {"ok": True}
     assert len(responses.calls) == 2
