@@ -2,7 +2,7 @@
 {% block title %}{{ "Editar" if config else "Novo" }} pipeline - engineer_kit{% endblock %}
 {% block content %}
 <h1>{{ "Editar pipeline" if config else "Novo pipeline" }}</h1>
-<p class="subtitle">Monte o fluxo por conceitos: API → estado incremental → Bronze → transformação opcional.</p>
+<p class="subtitle">Monte o fluxo por contratos: API → checkpoint → Bronze → transformação opcional.</p>
 
 {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
 
@@ -25,20 +25,41 @@
             <div class="field-hint">Identifica a origem, a tabela Bronze e a chave do watermark.</div>
         </div>
         <div class="field-row">
-            <div class="field"><label>URL base</label><input type="text" name="base_url" value="{{ config.connector.base_url if config else '' }}" placeholder="https://api.exemplo.com/recurso" required></div>
-            <div class="field"><label>Método HTTP</label><select name="method"><option value="GET" {{ "selected" if config and config.connector.method == "GET" else "" }}>GET</option><option value="POST" {{ "selected" if config and config.connector.method == "POST" else "" }}>POST</option></select></div>
+            <div class="field">
+                <label>URL base</label>
+                <input type="text" name="base_url" value="{{ config.connector.base_url if config else '' }}" placeholder="https://api.exemplo.com/recurso" required>
+            </div>
+            <div class="field">
+                <label>Método HTTP</label>
+                <select name="method">
+                    <option value="GET" {{ "selected" if config and config.connector.method == "GET" else "" }}>GET</option>
+                    <option value="POST" {{ "selected" if config and config.connector.method == "POST" else "" }}>POST</option>
+                </select>
+            </div>
         </div>
-        <div class="field"><label>Caminho da lista na resposta JSON</label><input type="text" name="records_path" value="{{ config.connector.records_path if config and config.connector.records_path else '' }}" placeholder="results"><div class="field-hint">Deixe vazio quando a resposta da API já for uma lista.</div></div>
+        <div class="field">
+            <label>Caminho da lista na resposta JSON</label>
+            <input type="text" name="records_path" value="{{ config.connector.records_path if config and config.connector.records_path else '' }}" placeholder="results">
+            <div class="field-hint">Deixe vazio quando a resposta da API já for uma lista.</div>
+        </div>
     </fieldset>
 
     <fieldset>
         <legend>Autenticação</legend>
-        <div class="field"><label>Tipo</label><select name="auth_type"><option value="none" {{ "selected" if config and config.connector.auth.type == "none" else "" }}>Nenhuma</option><option value="bearer" {{ "selected" if config and config.connector.auth.type == "bearer" else "" }}>Bearer token</option><option value="api_key" {{ "selected" if config and config.connector.auth.type == "api_key" else "" }}>API key</option></select></div>
+        <div class="field">
+            <label>Tipo</label>
+            <select name="auth_type">
+                <option value="none" {{ "selected" if config and config.connector.auth.type == "none" else "" }}>Nenhuma</option>
+                <option value="bearer" {{ "selected" if config and config.connector.auth.type == "bearer" else "" }}>Bearer token</option>
+                <option value="api_key" {{ "selected" if config and config.connector.auth.type == "api_key" else "" }}>API key</option>
+            </select>
+        </div>
         <div class="field-row">
             <div class="field"><label>Variável de segredo</label><input type="text" name="auth_secret_key" value="{{ config.connector.auth.secret_key if config and config.connector.auth.secret_key else '' }}" placeholder="API_TOKEN"></div>
             <div class="field"><label>Parâmetro da API key</label><input type="text" name="auth_param_name" value="{{ config.connector.auth.param_name if config else 'api_key' }}"></div>
             <div class="field"><label>Local</label><select name="auth_location"><option value="query" {{ "selected" if config and config.connector.auth.location == "query" else "" }}>Query</option><option value="header" {{ "selected" if config and config.connector.auth.location == "header" else "" }}>Header</option></select></div>
         </div>
+        <div class="field-hint">O valor do token/chave não é salvo no YAML; informe apenas o nome usado pelo SecretProvider.</div>
     </fieldset>
 
     <fieldset>
@@ -54,41 +75,54 @@
 
     <fieldset>
         <legend>2. Incremental / StateStore</legend>
-        <div class="architecture-note"><strong>Runtime local:</strong> o watermark usa <code>DuckDBStateStore</code>. O core depende apenas de <code>StateStore</code>; um adapter Lakehouse poderá persistir o mesmo checkpoint em Delta.</div>
-        <div class="field-row"><div class="field"><label>Modo</label><select name="incremental_mode" id="incremental_mode"><option value="data_date" {{ "selected" if config and config.connector.incremental.mode == "data_date" else "" }}>Pela data do dado</option><option value="ingestion_date" {{ "selected" if config and config.connector.incremental.mode == "ingestion_date" else "" }}>Pela data da ingestão</option></select></div><div class="field"><label>Data inicial</label><input type="date" name="initial_start" value="{{ config.connector.incremental.initial_start if config and config.connector.incremental.initial_start else '' }}"></div></div>
-        <div class="field" id="date_field_wrapper"><label>Campo de data no JSON</label><input type="text" name="date_field" value="{{ config.connector.incremental.date_field if config and config.connector.incremental.date_field else '' }}" placeholder="commit.author.date"><div class="field-hint">A maior data vista só vira watermark depois que a escrita termina com sucesso.</div></div>
+        <div class="architecture-note"><strong>Local lab:</strong> usa <code>DuckDBStateStore</code>. Fora da UI, o mesmo contrato suporta <code>JsonFileStateStore</code> e <code>DeltaStateStore</code>. O Pipeline nunca consulta a Bronze inteira para descobrir o último checkpoint.</div>
+        <div class="field-row">
+            <div class="field"><label>Modo</label><select name="incremental_mode" id="incremental_mode"><option value="data_date" {{ "selected" if config and config.connector.incremental.mode == "data_date" else "" }}>Pela data do dado</option><option value="ingestion_date" {{ "selected" if config and config.connector.incremental.mode == "ingestion_date" else "" }}>Pela data da ingestão</option></select></div>
+            <div class="field"><label>Data inicial</label><input type="date" name="initial_start" value="{{ config.connector.incremental.initial_start if config and config.connector.incremental.initial_start else '' }}"></div>
+        </div>
+        <div class="field" id="date_field_wrapper"><label>Campo de data no JSON</label><input type="text" name="date_field" value="{{ config.connector.incremental.date_field if config and config.connector.incremental.date_field else '' }}" placeholder="commit.author.date"><div class="field-hint">A maior data vista só vira watermark depois que a escrita da Bronze termina com sucesso.</div></div>
         <div class="field-row"><div class="field"><label>Query param inicial</label><input type="text" name="date_param_start" value="{{ config.connector.date_params.start if config and config.connector.date_params.start else '' }}" placeholder="since"></div><div class="field"><label>Query param final</label><input type="text" name="date_param_end" value="{{ config.connector.date_params.end if config and config.connector.date_params.end else '' }}" placeholder="until"></div><div class="field"><label>Formato</label><input type="text" name="date_param_format" value="{{ config.connector.date_params.format if config else '%Y-%m-%d' }}"></div></div>
+        <div class="field-hint">Retries da mesma janela usam uma <code>ingestion_key</code> determinística nos adapters oficiais, evitando duplicação quando o destino confirmou mas o checkpoint falhou.</div>
     </fieldset>
 
     <fieldset>
-        <legend>Schema / contrato</legend>
-        <div id="columns-container">{% if config and config.columns %}{% for col in config.columns %}<div class="field-row column-row"><div class="field"><input type="text" name="column_name" value="{{ col.name }}" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="{{ col.dtype }}" placeholder="VARCHAR"></div></div>{% endfor %}{% else %}<div class="field-row column-row"><div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="VARCHAR"></div></div>{% endif %}</div>
+        <legend>Schema / contrato lógico</legend>
+        <div id="columns-container">
+            {% if config and config.columns %}
+                {% for col in config.columns %}
+                <div class="field-row column-row"><div class="field"><input type="text" name="column_name" value="{{ col.name }}" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="{{ col.dtype }}" placeholder="string"></div></div>
+                {% endfor %}
+            {% else %}
+                <div class="field-row column-row"><div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="string"></div></div>
+            {% endif %}
+        </div>
         <button type="button" class="btn btn-sm" id="add-column">+ Adicionar coluna</button>
-        <div class="field-hint">Campos novos da API são preservados em <code>_extra</code>; o schema não muda silenciosamente.</div>
+        <div class="field-hint">Tipos lógicos: <code>string</code>, <code>integer</code>, <code>bigint</code>, <code>float</code>, <code>decimal</code>, <code>boolean</code>, <code>date</code>, <code>timestamp</code>, <code>json</code>. Na Bronze os valores declarados ficam como strings; staging faz os casts. Campos novos vão para <code>_extra</code>.</div>
     </fieldset>
 
     <fieldset>
         <legend>3. Destination / Bronze</legend>
         <div class="field-row">
-            <div class="field"><label>Adapter</label><select name="destination_type"><option value="duckdb" selected>DuckDB (local)</option></select><div class="field-hint">Parquet/Delta entrarão como adapters sem mudar o Connector ou o Pipeline.</div></div>
+            <div class="field"><label>Adapter</label><select name="destination_type"><option value="duckdb" selected>DuckDBDestination (local lab)</option></select><div class="field-hint">O editor visual é DuckDB porque o browser de dados é local. Em Python/YAML existem também ParquetDestination e DeltaDestination.</div></div>
             <div class="field"><label>Schema Bronze</label><input type="text" name="destination_schema" value="{{ config.destination.schema if config else 'bronze' }}"></div>
             <div class="field"><label>Registros por bloco</label><input type="number" name="batch_size" value="{{ config.destination.batch_size if config else 1000 }}"></div>
         </div>
+        <div class="field"><label>Write mode</label><select name="write_mode"><option value="append" {{ "selected" if not config or config.destination.write_mode == "append" else "" }}>append — manter janelas e tornar retry idempotente</option><option value="overwrite" {{ "selected" if config and config.destination.write_mode == "overwrite" else "" }}>overwrite — substituir toda a tabela</option></select></div>
     </fieldset>
 
     <fieldset>
         <legend>4. Transformação opcional</legend>
         <div class="field-row">
             <div class="field"><label>Transform</label><select name="transform_type" id="transform_type"><option value="none" {{ "selected" if not config or config.transform.type == "none" else "" }}>Nenhuma — terminar na Bronze</option><option value="dbt" {{ "selected" if config and config.transform.type == "dbt" else "" }}>dbt — staging → silver → gold</option></select></div>
-            <div class="field" id="dbt_select_wrapper"><label>dbt --select (opcional)</label><input type="text" name="dbt_select" value="{{ config.transform.select if config and config.transform.select else '' }}" placeholder="tag:daily ou model_name"><div class="field-hint">Projeto local: {{ "encontrado" if dbt_available else "não encontrado ainda" }}. Instale <code>engineer_kit[dbt]</code> ou <code>engineer_kit[local]</code> para executar.</div></div>
+            <div class="field" id="dbt_select_wrapper"><label>dbt --select (opcional)</label><input type="text" name="dbt_select" value="{{ config.transform.select if config and config.transform.select else '' }}" placeholder="tag:daily ou model_name"><div class="field-hint">Projeto local: {{ "encontrado" if dbt_available else "não encontrado ainda" }}. Instale <code>engineer_kit[dbt]</code> ou <code>engineer_kit[local]</code>.</div></div>
         </div>
-        <div class="architecture-note">Selecionar dbt não muda o Pipeline de ingestão: primeiro <code>Pipeline.run()</code> confirma a Bronze e o watermark; só depois o <code>DbtRunner</code> transforma.</div>
+        <div class="architecture-note">dbt não faz parte da transação de ingestão: primeiro <code>Pipeline.run()</code> confirma Bronze + watermark. Só depois <code>DbtRunner</code> transforma. Em Lakehouse, Spark/dbt/SQL podem rodar fora da lib.</div>
     </fieldset>
 
     <fieldset>
         <legend>Observabilidade</legend>
         <div class="field"><label>Run log</label><select name="run_log"><option value="on" {{ "selected" if not config or config.run_log else "" }}>Ativo</option><option value="off" {{ "selected" if config and not config.run_log else "" }}>Desligado</option></select></div>
-        <div class="field-hint">O Pipeline depende de <code>RunLogBackend</code>. No modo local, <code>DuckDBRunLogStore</code> grava em <code>_meta.run_log</code>.</div>
+        <div class="field-hint">O Pipeline depende apenas de <code>RunLogBackend</code>. O log registra run id, ingestion key, janela, destino, linhas e watermarks. Uma falha somente na auditoria não invalida uma ingestão já confirmada.</div>
     </fieldset>
 
     <button type="submit" class="btn btn-primary">Salvar pipeline</button>
@@ -99,8 +133,10 @@
 function updatePaginationFields(){const type=document.getElementById('pagination_type').value;document.querySelectorAll('.pagination-fields').forEach(el=>el.classList.toggle('active',el.dataset.type===type));}
 function updateDateField(){document.getElementById('date_field_wrapper').style.display=document.getElementById('incremental_mode').value==='data_date'?'block':'none';}
 function updateTransform(){document.getElementById('dbt_select_wrapper').style.display=document.getElementById('transform_type').value==='dbt'?'block':'none';}
-document.getElementById('pagination_type').addEventListener('change',updatePaginationFields);document.getElementById('incremental_mode').addEventListener('change',updateDateField);document.getElementById('transform_type').addEventListener('change',updateTransform);
-document.getElementById('add-column').addEventListener('click',function(){const row=document.createElement('div');row.className='field-row column-row';row.innerHTML='<div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="VARCHAR"></div>';document.getElementById('columns-container').appendChild(row);});
+document.getElementById('pagination_type').addEventListener('change',updatePaginationFields);
+document.getElementById('incremental_mode').addEventListener('change',updateDateField);
+document.getElementById('transform_type').addEventListener('change',updateTransform);
+document.getElementById('add-column').addEventListener('click',function(){const row=document.createElement('div');row.className='field-row column-row';row.innerHTML='<div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="string"></div>';document.getElementById('columns-container').appendChild(row);});
 updatePaginationFields();updateDateField();updateTransform();
 </script>
 {% endblock %}
