@@ -24,4 +24,4 @@ engineer_kit = "engineer_kit.cli:app"
 packages = ["src/engineer_kit"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "responses>=0.25"]

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.schema import EndpointSchema
 
 
@@ -22,6 +23,11 @@ def generate_sources_yml(
     endpoints: dict[str, EndpointSchema],
     source_name: str = "bronze",
 ) -> str:
+    validate_identifier(bronze_schema, "Schema bronze")
+    validate_identifier(source_name, "Nome da source dbt")
+    for endpoint in endpoints:
+        validate_identifier(endpoint, "Nome de endpoint")
+
     doc = {
         "version": 2,
         "sources": [
@@ -36,6 +42,8 @@ def generate_sources_yml(
 
 
 def generate_staging_model(endpoint: str, schema: EndpointSchema, source_name: str = "bronze") -> str:
+    validate_identifier(endpoint, "Nome de endpoint")
+    validate_identifier(source_name, "Nome da source dbt")
     select_lines = [f'    "{col.name}"::{col.dtype} as {col.name}' for col in schema.columns]
     select_lines += [
         '    "_source" as _source',
