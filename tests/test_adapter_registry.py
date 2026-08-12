@@ -4,7 +4,6 @@ import duckdb
 import pytest
 
 from engineer_kit.adapters.registry import (
-    AdapterContext,
     available_adapters,
     register_destination,
     resolve_auto,
