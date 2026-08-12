@@ -34,12 +34,27 @@ from engineer_kit.config.pipeline_config import (
     load_pipeline_config,
     save_pipeline_config,
 )
+from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
 from engineer_kit.ui.run_manager import RunManager
+from engineer_kit.ui.security import (
+    SecurityHeadersMiddleware,
+    enforce_same_origin,
+    validate_resource_name,
+)
 
 BASE_DIR = Path(__file__).parent
 PREVIEW_ROW_LIMIT = 200
+
+
+def _workspace_child(workspace: Path, value: str) -> Path:
+    candidate = (workspace / value).resolve()
+    try:
+        candidate.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError(f"Caminho da UI deve permanecer dentro do workspace: {value!r}") from exc
+    return candidate
 
 
 def create_app(
@@ -51,10 +66,10 @@ def create_app(
     password: str = "admin",
 ) -> FastAPI:
     workspace = Path(workspace_dir).resolve()
-    pipelines_dir = workspace / pipelines_dirname
+    pipelines_dir = _workspace_child(workspace, pipelines_dirname)
     pipelines_dir.mkdir(parents=True, exist_ok=True)
-    warehouse_path = str(workspace / warehouse_filename)
-    dbt_project_dir = workspace / dbt_project_dirname
+    warehouse_path = str(_workspace_child(workspace, warehouse_filename))
+    dbt_project_dir = _workspace_child(workspace, dbt_project_dirname)
 
     run_manager = RunManager(
         warehouse_path=warehouse_path,
@@ -73,6 +88,7 @@ def create_app(
             )
 
     app = FastAPI(title="engineer_kit local lab")
+    app.add_middleware(SecurityHeadersMiddleware)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -159,6 +175,7 @@ def create_app(
 
     @app.post("/pipelines/save")
     async def save_pipeline(request: Request, _: None = Depends(check_auth)):
+        enforce_same_origin(request)
         form = await request.form()
         try:
             config = _config_from_form(form)
@@ -192,7 +209,8 @@ def create_app(
         )
 
     @app.post("/pipelines/{name}/run")
-    def trigger_run(name: str, _: None = Depends(check_auth)):
+    def trigger_run(request: Request, name: str, _: None = Depends(check_auth)):
+        enforce_same_origin(request)
         config = _load_or_404(name)
         run_id = run_manager.start_run(config)
         return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
@@ -212,9 +230,14 @@ def create_app(
 
         def event_source():
             for line in run_manager.stream_log(run_id):
-                yield f"data: {line}\n\n"
+                # One SSE data line per logical log line. Newlines are split so
+                # log content cannot inject a new event field/type.
+                for part in str(line).replace("\r", "").split("\n"):
+                    yield f"data: {part}\n"
+                yield "\n"
             final_state = run_manager.get_state(run_id)
-            yield f"event: done\ndata: {final_state.status}\n\n"
+            status = final_state.status if final_state is not None else "unknown"
+            yield f"event: done\ndata: {status}\n\n"
 
         return StreamingResponse(event_source(), media_type="text/event-stream")
 
@@ -233,8 +256,6 @@ def create_app(
             for schema, table in tables:
                 quoted_schema = _quote_duckdb_identifier(schema)
                 quoted_table = _quote_duckdb_identifier(table)
-                # Identifiers come from DuckDB's own catalog and are escaped by
-                # _quote_duckdb_identifier before interpolation.
                 count = conn.execute(
                     f"SELECT count(*) FROM {quoted_schema}.{quoted_table}"  # nosec B608
                 ).fetchone()[0]
@@ -256,7 +277,6 @@ def create_app(
         quoted_table = _quote_duckdb_identifier(table)
         conn = _warehouse_conn()
         try:
-            # Route identifiers pass strict validation and are escaped before use.
             result = conn.execute(
                 f"SELECT * FROM {quoted_schema}.{quoted_table} "  # nosec B608
                 f"LIMIT {PREVIEW_ROW_LIMIT}"
@@ -294,9 +314,13 @@ def create_app(
         )
 
     def _load_or_404(name: str) -> PipelineConfig:
-        path = pipelines_dir / f"{name}.yaml"
+        try:
+            safe_name = validate_resource_name(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        path = pipelines_dir / f"{safe_name}.yaml"
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Pipeline '{name}' nao encontrado.")
+            raise HTTPException(status_code=404, detail=f"Pipeline '{safe_name}' nao encontrado.")
         try:
             return load_pipeline_config(path)
         except PipelineConfigError as exc:
@@ -336,6 +360,7 @@ def create_app(
         name = (form.get("name") or "").strip()
         if not name:
             raise ValueError("O nome do pipeline e obrigatorio.")
+        validate_resource_name(name)
         base_url = (form.get("base_url") or "").strip()
         if not base_url:
             raise ValueError("A URL base e obrigatoria.")
@@ -400,6 +425,7 @@ def create_app(
             extraction_batch_size=int(
                 form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
             ),
+            max_pages=int(form.get("max_pages") or DEFAULT_MAX_PAGES),
         )
         destination = DestinationConfig(
             type=form.get("destination_type") or "duckdb",
