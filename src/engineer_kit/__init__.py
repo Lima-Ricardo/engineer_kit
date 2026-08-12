@@ -16,9 +16,13 @@ from engineer_kit.adapters.registry import (
     register_state_store,
 )
 from engineer_kit.connectors.api_connector import (
+    DEFAULT_MAX_PAGES,
     APIConnector,
+    CrossOriginPaginationError,
     InvalidHttpMethodError,
     MissingDateFieldError,
+    PaginationLimitError,
+    PaginationLoopError,
     VALID_HTTP_METHODS,
 )
 from engineer_kit.connectors.base import Connector
@@ -44,17 +48,28 @@ from engineer_kit.connectors.pagination import (
     ParsedPage,
 )
 from engineer_kit.connectors.rest import DateParams, RestConnector
-from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, NoAuth
-from engineer_kit.http.client import HttpClient, HttpRequestError, InsecureUrlError
+from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, InvalidAuthValueError, NoAuth
+from engineer_kit.http.client import (
+    DEFAULT_MAX_REDIRECTS,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    HttpClient,
+    HttpRequestError,
+    InsecureUrlError,
+    ResponseTooLargeError,
+    UnsafeRedirectError,
+    UnsafeUrlError,
+)
 from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult, PipelineSource, StepResult
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Trigger
+from engineer_kit.security.redaction import redact_text
 from engineer_kit.security.secrets import (
     EnvSecretProvider,
     FileSecretProvider,
     InvalidSecretKeyError,
     SecretNotFoundError,
     SecretProvider,
+    SecretTooLargeError,
     StaticSecretProvider,
 )
 from engineer_kit.storage.destination import Destination, LoadContext, LoadResult, WriteMode
@@ -185,6 +200,10 @@ __all__ = [
     "DateParams",
     "InvalidHttpMethodError",
     "MissingDateFieldError",
+    "PaginationLimitError",
+    "PaginationLoopError",
+    "CrossOriginPaginationError",
+    "DEFAULT_MAX_PAGES",
     "VALID_HTTP_METHODS",
     "DateFieldSpec",
     "extract_date_value",
@@ -228,16 +247,24 @@ __all__ = [
     "HttpClient",
     "HttpRequestError",
     "InsecureUrlError",
+    "UnsafeUrlError",
+    "UnsafeRedirectError",
+    "ResponseTooLargeError",
+    "DEFAULT_MAX_RESPONSE_BYTES",
+    "DEFAULT_MAX_REDIRECTS",
     "AuthStrategy",
     "NoAuth",
     "BearerAuth",
     "ApiKeyAuth",
+    "InvalidAuthValueError",
     "SecretProvider",
     "EnvSecretProvider",
     "StaticSecretProvider",
     "FileSecretProvider",
     "SecretNotFoundError",
     "InvalidSecretKeyError",
+    "SecretTooLargeError",
+    "redact_text",
     "EndpointSchema",
     "ColumnSpec",
     "LogicalType",
