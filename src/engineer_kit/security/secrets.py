@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union
 
+MAX_SECRET_BYTES = 64 * 1024
+
 
 class SecretNotFoundError(KeyError):
     """Raised when a requested secret is absent from the configured source."""
@@ -14,6 +16,10 @@ class SecretNotFoundError(KeyError):
 
 class InvalidSecretKeyError(ValueError):
     """Raised when a file-backed secret key attempts path traversal."""
+
+
+class SecretTooLargeError(ValueError):
+    """Raised before an unexpectedly large mounted secret is materialized."""
 
 
 class SecretProvider(ABC):
@@ -63,7 +69,7 @@ class FileSecretProvider(SecretProvider):
     Values are re-read on every call so file rotation takes effect without a
     process restart. Directory mode accepts only a single filename as ``key``;
     path separators and traversal components are rejected before filesystem
-    access.
+    access. Symlinks that resolve outside the configured directory are refused.
     """
 
     def __init__(self, path: Union[str, Path]) -> None:
@@ -77,23 +83,55 @@ class FileSecretProvider(SecretProvider):
             )
         return key
 
-    def get(self, key: str) -> str:
-        if self._path.is_file():
-            target = self._path
-        else:
-            target = self._path / self._validate_key(key)
+    @staticmethod
+    def _read_bounded(target: Path) -> str:
         try:
-            return target.read_text(encoding="utf-8").strip()
+            size = target.stat().st_size
         except FileNotFoundError as exc:
             raise SecretNotFoundError(
                 f"Arquivo de segredo '{target}' nao encontrado."
             ) from exc
+        if size > MAX_SECRET_BYTES:
+            raise SecretTooLargeError(
+                f"Arquivo de segredo excede o limite de {MAX_SECRET_BYTES} bytes."
+            )
+        try:
+            raw = target.read_bytes()
+        except FileNotFoundError as exc:
+            raise SecretNotFoundError(
+                f"Arquivo de segredo '{target}' nao encontrado."
+            ) from exc
+        if len(raw) > MAX_SECRET_BYTES:
+            raise SecretTooLargeError(
+                f"Arquivo de segredo excede o limite de {MAX_SECRET_BYTES} bytes."
+            )
+        try:
+            return raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("Arquivo de segredo deve estar em UTF-8.") from exc
+
+    def get(self, key: str) -> str:
+        if self._path.is_file():
+            target = self._path
+        else:
+            base = self._path.resolve(strict=False)
+            target = base / self._validate_key(key)
+            resolved = target.resolve(strict=False)
+            try:
+                resolved.relative_to(base)
+            except ValueError as exc:
+                raise InvalidSecretKeyError(
+                    "Arquivo de segredo resolve fora do diretorio configurado."
+                ) from exc
+            target = resolved
+        return self._read_bounded(target)
 
 
 __all__ = [
     "SecretProvider",
     "SecretNotFoundError",
     "InvalidSecretKeyError",
+    "SecretTooLargeError",
     "EnvSecretProvider",
     "StaticSecretProvider",
     "FileSecretProvider",
