@@ -121,6 +121,7 @@ class HttpClient:
         allow_http: bool = False,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
+        retry_post: bool = False,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout deve ser maior que zero.")
@@ -140,12 +141,18 @@ class HttpClient:
         self._max_redirects = max_redirects
         self._session = requests.Session()
 
+        allowed_methods = {"GET"}
+        if retry_post:
+            # POST retries may duplicate side effects if the remote endpoint is
+            # not idempotent, so this remains an explicit opt-in.
+            allowed_methods.add("POST")
         retry = Retry(
             total=max_retries,
             backoff_factor=backoff_factor,
             status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=("GET", "POST"),
+            allowed_methods=frozenset(allowed_methods),
             raise_on_status=False,
+            respect_retry_after_header=True,
         )
         adapter = HTTPAdapter(max_retries=retry)
         self._session.mount("https://", adapter)
@@ -255,6 +262,7 @@ class HttpClient:
                 self._consume_bounded_body(response, target)
                 return response
 
+            status_code = response.status_code
             location = response.headers.get("Location")
             response.close()
             if not location:
@@ -280,8 +288,8 @@ class HttpClient:
             # Match common HTTP client/browser semantics without invoking a
             # second auth strategy. Same-origin credentials remain scoped to
             # the same origin only.
-            if response.status_code == 303 or (
-                response.status_code in {301, 302} and method.upper() == "POST"
+            if status_code == 303 or (
+                status_code in {301, 302} and method.upper() == "POST"
             ):
                 method = "GET"
                 request_kwargs.pop("json", None)
