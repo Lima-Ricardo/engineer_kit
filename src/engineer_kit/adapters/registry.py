@@ -32,6 +32,12 @@ _DESTINATIONS: dict[str, BuilderRef] = {}
 _STATE_STORES: dict[str, BuilderRef] = {}
 _RUN_LOGS: dict[str, BuilderRef] = {}
 
+# A destination's natural metadata backend may have a different name. Parquet
+# data files, for example, use small JSON/JSONL control files rather than
+# pretending that a "ParquetStateStore" exists.
+_AUTO_STATE: dict[str, str] = {"parquet": "file"}
+_AUTO_RUN_LOG: dict[str, str] = {"parquet": "file"}
+
 
 def _key(name: str) -> str:
     return name.strip().lower()
@@ -60,7 +66,13 @@ def register_run_log(name: str, builder: BuilderRef) -> None:
     _register(_RUN_LOGS, name, builder)
 
 
-def _build(registry: dict[str, BuilderRef], kind: str, name: str, config: Any, context: AdapterContext):
+def _build(
+    registry: dict[str, BuilderRef],
+    kind: str,
+    name: str,
+    config: Any,
+    context: AdapterContext,
+):
     key = _key(name)
     ref = registry.get(key)
     if ref is None:
@@ -84,17 +96,33 @@ def build_run_log(name: str, config: Any, context: AdapterContext):
 
 
 def resolve_auto(name: str, *, destination_type: str, kind: str) -> str:
-    """Resolve ``auto`` to the destination's natural persistence backend."""
+    """Resolve ``auto`` only when a natural metadata backend is known.
+
+    Custom destinations do not silently fall back to local files: packages
+    should register matching state/audit adapters or users should configure
+    those backends explicitly.
+    """
     if _key(name) != "auto":
         return _key(name)
+
     destination_key = _key(destination_type)
-    registry = _STATE_STORES if kind == "state" else _RUN_LOGS
+    if kind == "state":
+        registry = _STATE_STORES
+        aliases = _AUTO_STATE
+    elif kind == "run_log":
+        registry = _RUN_LOGS
+        aliases = _AUTO_RUN_LOG
+    else:
+        raise ValueError(f"kind de adapter automatico desconhecido: {kind}")
+
     if destination_key in registry:
         return destination_key
-    if "file" in registry:
-        return "file"
+    alias = aliases.get(destination_key)
+    if alias and alias in registry:
+        return alias
     raise AdapterNotFoundError(
-        f"Nao existe adapter automatico de {kind} para destination '{destination_type}'."
+        f"Nao existe adapter automatico de {kind} para destination '{destination_type}'. "
+        f"Configure {kind}.type explicitamente ou registre um adapter compativel."
     )
 
 
@@ -112,9 +140,6 @@ register_state_store("duckdb", "engineer_kit.adapters.duckdb.runtime:build_state
 register_run_log("duckdb", "engineer_kit.adapters.duckdb.runtime:build_run_log")
 
 register_destination("parquet", "engineer_kit.adapters.parquet.runtime:build_destination")
-register_state_store("parquet", "engineer_kit.adapters.parquet.runtime:build_state_store")
-register_run_log("parquet", "engineer_kit.adapters.parquet.runtime:build_run_log")
-
 register_state_store("file", "engineer_kit.adapters.files.runtime:build_state_store")
 register_run_log("file", "engineer_kit.adapters.files.runtime:build_run_log")
 
