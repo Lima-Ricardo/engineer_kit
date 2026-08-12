@@ -8,11 +8,53 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  core-only:
+    name: core import without DuckDB
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install core only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Verify core has no DuckDB dependency
+        run: |
+          python - <<'PY'
+          import importlib.util
+
+          assert importlib.util.find_spec('duckdb') is None, 'duckdb leaked into core dependencies'
+
+          import engineer_kit
+          from engineer_kit import Destination, Pipeline, StateStore
+
+          assert engineer_kit.__version__
+          assert Destination is not None
+          assert Pipeline is not None
+          assert StateStore is not None
+
+          try:
+              engineer_kit.DuckDBLoader
+          except ModuleNotFoundError as exc:
+              assert 'engineer_kit[duckdb]' in str(exc)
+          else:
+              raise AssertionError('DuckDBLoader should require the optional duckdb extra')
+          PY
+
   test:
     name: pytest / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -31,15 +73,56 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Upgrade packaging tools
-        run: python -m pip install --upgrade pip build
+      - name: Install local runtime and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,local]'
 
-      - name: Install project and test dependencies
-        run: python -m pip install -e '.[dev,ui]'
+      - name: Run tests with coverage
+        run: python -m pytest -q --cov=engineer_kit --cov-report=term-missing
 
-      - name: Run tests
-        run: python -m pytest tests -q
+  quality:
+    name: quality and security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Build wheel and sdist
-        if: matrix.python-version == '3.12'
-        run: python -m build
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and quality tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,local]'
+
+      - name: Ruff
+        run: ruff check src tests
+
+      - name: Bandit
+        run: bandit -q -r src/engineer_kit -ll
+
+      - name: Dependency audit
+        run: pip-audit
+
+  package:
+    name: build package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Build and validate distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
