@@ -34,6 +34,7 @@ from engineer_kit.config.pipeline_config import (
     load_pipeline_config,
     save_pipeline_config,
 )
+from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
 from engineer_kit.ui.run_manager import RunManager
 
@@ -388,6 +389,9 @@ def create_app(
                 format=form.get("date_param_format") or "%Y-%m-%d",
             ),
             records_path=form.get("records_path") or None,
+            extraction_batch_size=int(
+                form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
+            ),
         )
         destination = DestinationConfig(
             type=form.get("destination_type") or "duckdb",
