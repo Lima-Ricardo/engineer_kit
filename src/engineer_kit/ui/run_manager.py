@@ -126,7 +126,7 @@ class RunManager:
         )
         dbt_result = DbtRunner(
             project_dir=str(self._dbt_project_dir),
-            env={"ENGINEER_KIT_WAREHOUSE_PATH": self._warehouse_path},
+            env={"ENGINEER_KIT_DUCKDB_PATH": self._warehouse_path},
         ).run(select=config.transform.select)
 
         for line in dbt_result.output.splitlines():
