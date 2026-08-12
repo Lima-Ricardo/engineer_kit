@@ -1,5 +1,5 @@
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pytest
 import responses
@@ -12,9 +12,12 @@ from engineer_kit.config.pipeline_config import (
     load_pipeline_config,
     pipeline_config_from_dict,
 )
-from engineer_kit.connectors.api_connector import PaginationLimitError
+from engineer_kit.connectors.api_connector import (
+    CrossOriginPaginationError,
+    PaginationLimitError,
+)
 from engineer_kit.connectors.incremental import IncrementalMode
-from engineer_kit.connectors.pagination import PageNumberPagination
+from engineer_kit.connectors.pagination import NextUrlPagination, PageNumberPagination
 from engineer_kit.connectors.rest import RestConnector
 from engineer_kit.http.auth import ApiKeyAuth, BearerAuth, InvalidAuthValueError
 from engineer_kit.http.client import (
@@ -23,6 +26,7 @@ from engineer_kit.http.client import (
     UnsafeRedirectError,
     UnsafeUrlError,
 )
+from engineer_kit.security.redaction import redact_text
 from engineer_kit.security.secrets import (
     FileSecretProvider,
     InvalidSecretKeyError,
@@ -123,6 +127,19 @@ def test_auth_rejects_header_injection_characters():
         )
 
 
+def test_redaction_covers_common_secret_shapes():
+    text = (
+        "Authorization: Bearer abcdefghijklmnop "
+        "api_key=super-secret password=hunter2 "
+        "https://example.test/items?token=hidden"
+    )
+    result = redact_text(text)
+    assert "abcdefghijklmnop" not in result
+    assert "super-secret" not in result
+    assert "hunter2" not in result
+    assert "token=hidden" not in result
+
+
 def test_declarative_config_refuses_obvious_inline_secrets():
     with pytest.raises(PipelineConfigError, match="sensivel inline"):
         pipeline_config_from_dict(
@@ -135,6 +152,26 @@ def test_declarative_config_refuses_obvious_inline_secrets():
                 },
             }
         )
+
+
+def test_declarative_config_allows_explicit_training_inline_values():
+    config = pipeline_config_from_dict(
+        {
+            "name": "training",
+            "secrets": {"allow_inline_values": True},
+            "connector": {
+                "base_url": "https://example.test/items",
+                "incremental": {"mode": "ingestion_date"},
+                "static_params": {"api_key": "training-only-value"},
+            },
+        }
+    )
+    assert config.connector.static_params["api_key"] == "training-only-value"
+
+
+def test_static_secret_provider_remains_available_for_training_code():
+    provider = StaticSecretProvider({"TOKEN": "hardcoded-training-token"})
+    assert provider.get("TOKEN") == "hardcoded-training-token"
 
 
 def test_declarative_secret_reference_is_resolved_only_in_memory():
@@ -184,6 +221,36 @@ def test_connector_stops_at_max_pages_before_unbounded_requests():
     with pytest.raises(PaginationLimitError, match="max_pages=1"):
         list(connector.extract(end=date(2026, 8, 12)))
     assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_cross_origin_next_url_is_blocked_before_second_authenticated_request():
+    state = MemoryStateStore()
+    secret_provider = StaticSecretProvider({"TOKEN": "pagination-secret"})
+    connector = RestConnector(
+        name="cross-origin",
+        base_url="https://api.example.test/items",
+        pagination=NextUrlPagination(next_url_field="next"),
+        method="GET",
+        state_store=state,
+        incremental_mode=IncrementalMode.INGESTION_DATE,
+        auth=BearerAuth(secret_provider, "TOKEN"),
+    )
+    responses.add(
+        responses.GET,
+        "https://api.example.test/items",
+        json={
+            "results": [{"id": 1}],
+            "next": "https://evil.example.test/items?page=2",
+        },
+    )
+    connector._records_path = "results"
+
+    with pytest.raises(CrossOriginPaginationError, match="outra origem"):
+        list(connector.extract(end=date(2026, 8, 12)))
+
+    assert len(responses.calls) == 1
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer pagination-secret"
 
 
 def test_local_ui_adds_security_headers_and_blocks_cross_site_post(tmp_path):
