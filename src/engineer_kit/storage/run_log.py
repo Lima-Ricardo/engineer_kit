@@ -1,21 +1,21 @@
-"""Backend-agnostic contracts for ingestion run audit events.
-
-The Pipeline depends only on :class:`RunLogBackend`. Concrete persistence
-backends live in adapters so importing the core does not require DuckDB or
-any Lakehouse-specific package.
-"""
+"""Backend-agnostic contracts for ingestion run audit events."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 
 @dataclass(frozen=True)
 class RunLogEntry:
-    """Auditable event produced at the end of one ingestion attempt."""
+    """Auditable event produced at the end of one ingestion attempt.
+
+    The original 0.1 fields remain first for backwards compatibility. New
+    execution/window metadata is optional so custom backends can adopt it
+    incrementally.
+    """
 
     connector_name: str
     started_at: datetime
@@ -24,6 +24,12 @@ class RunLogEntry:
     rows_loaded: int
     extra_fields_seen: list[str]
     error_message: Optional[str] = None
+    run_id: Optional[str] = None
+    destination: Optional[str] = None
+    window_start: Optional[date] = None
+    window_end: Optional[date] = None
+    watermark_before: Optional[str] = None
+    watermark_after: Optional[str] = None
 
 
 class RunLogBackend(ABC):
@@ -47,8 +53,7 @@ def __getattr__(name: str):
     except ModuleNotFoundError as exc:
         if exc.name == "duckdb":
             raise ModuleNotFoundError(
-                "DuckDB support is optional. Install it with "
-                "`pip install \"engineer_kit[duckdb]\"`."
+                'DuckDB support is optional. Install `pip install "engineer_kit[duckdb]"`.'
             ) from None
         raise
 
