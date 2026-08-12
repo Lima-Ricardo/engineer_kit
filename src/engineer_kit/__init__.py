@@ -21,7 +21,14 @@ from engineer_kit.connectors.api_connector import (
     MissingDateFieldError,
     VALID_HTTP_METHODS,
 )
+from engineer_kit.connectors.base import Connector
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
+from engineer_kit.connectors.extraction import (
+    DEFAULT_EXTRACTION_BATCH_SIZE,
+    ExtractionSession,
+    InvalidExtractionBatchSizeError,
+    validate_extraction_batch_size,
+)
 from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import (
@@ -168,8 +175,13 @@ def __getattr__(name: str):
 
 __all__ = [
     "__version__",
+    "Connector",
     "APIConnector",
     "RestConnector",
+    "ExtractionSession",
+    "DEFAULT_EXTRACTION_BATCH_SIZE",
+    "InvalidExtractionBatchSizeError",
+    "validate_extraction_batch_size",
     "DateParams",
     "InvalidHttpMethodError",
     "MissingDateFieldError",
