@@ -25,8 +25,16 @@
 
 <h2>Runtime local</h2>
 <div class="card">
-    <p>A instalação da UI é opcional e faz sentido para desenvolvimento, treinamento e pequenos projetos locais.</p>
-    <pre class="code-block">pip install "engineer_kit[ui]"
+    <p>A interface é opcional. Instale apenas o que precisar:</p>
+    <pre class="code-block"># somente interface local
+pip install "engineer_kit[ui]"
+
+# somente integração dbt local
+pip install "engineer_kit[dbt]"
+
+# laboratório local completo: UI + dbt
+pip install "engineer_kit[local]"
+
 engineer_kit ui --workspace .</pre>
     <p>Nesse modo, o mapa de adapters é:</p>
     <table><thead><tr><th>Contrato</th><th>Adapter local</th><th>Futuro em plataforma</th></tr></thead><tbody>
