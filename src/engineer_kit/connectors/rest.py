@@ -1,16 +1,9 @@
 """Conector generico e configuravel para APIs REST/JSON padrao.
 
-Cobre o caso comum sem precisar herdar de APIConnector: autenticacao
-via header/query, paginacao por pagina/offset/cursor/link-header/
-next-url, filtro de data via dois query params, GET ou POST, e
-incremental montado automaticamente a partir de `name` + `state_store`
-(sem precisar construir um IncrementalStrategy a parte e repetir o
-nome do conector). Para o caso comum, o usuario so instancia esta
-classe com os parametros da API — nao escreve codigo novo.
-
-Para APIs com comportamento fora do padrao (resposta nao-JSON, auth
-por assinatura HMAC), estenda APIConnector diretamente em vez de
-forcar esses casos aqui dentro.
+Cobre autenticacao, paginacao, filtros de data e incremental sem exigir
+que o usuario implemente o loop de extracao. O estado incremental e
+recebido pelo contrato `StateStore`, portanto pode viver no backend que
+melhor se encaixa no ambiente de execucao.
 """
 
 from __future__ import annotations
@@ -28,7 +21,7 @@ from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import PaginationStrategy, ParsedPage
 from engineer_kit.http.auth import AuthStrategy, NoAuth
 from engineer_kit.http.client import HttpClient
-from engineer_kit.storage.state_store import IngestionStateStore
+from engineer_kit.storage.state_store import StateStore
 
 
 @dataclass
@@ -47,7 +40,7 @@ class RestConnector(APIConnector):
         base_url: str,
         pagination: PaginationStrategy,
         method: str,
-        state_store: Optional[IngestionStateStore] = None,
+        state_store: Optional[StateStore] = None,
         incremental_mode: IncrementalMode = IncrementalMode.DATA_DATE,
         initial_start: Optional[date] = None,
         date_field: Optional[DateFieldSpec] = None,
@@ -82,8 +75,6 @@ class RestConnector(APIConnector):
         if self._date_params.end and window.end:
             payload[self._date_params.end] = window.end.strftime(self._date_params.date_format)
 
-        # GET manda o payload como query string; POST manda como corpo JSON
-        # (padrao comum em APIs de busca/paginacao mais complexas).
         if self._method == "POST":
             return {"url": self._base_url, "json": payload}
         return {"url": self._base_url, "params": payload}
