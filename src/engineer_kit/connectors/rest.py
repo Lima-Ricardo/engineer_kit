@@ -53,6 +53,7 @@ class RestConnector(APIConnector):
         http_client: Optional[HttpClient] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
+        allow_cross_origin_pagination: bool = False,
     ) -> None:
         self._base_url = base_url
         self._date_params = date_params or DateParams()
@@ -71,6 +72,7 @@ class RestConnector(APIConnector):
             incremental=incremental,
             extraction_batch_size=extraction_batch_size,
             max_pages=max_pages,
+            allow_cross_origin_pagination=allow_cross_origin_pagination,
         )
 
     def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
