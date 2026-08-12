@@ -1,426 +1,458 @@
 # engineer_kit
 
-*[Português abaixo](#engineer_kit-pt-br) / Portuguese version below.*
+**Reliable REST API ingestion for analytical destinations.**
 
-Python library for API ingestion: **Python (extraction) + dbt (transformation)**, both executed on top of DuckDB — you write connector config and dbt models, never raw DuckDB SQL yourself. Comes with an optional **local web UI** to configure and run pipelines with zero code (see [Web UI](#web-ui-optional) below).
+`engineer_kit` handles the repetitive ingestion mechanics — HTTP, auth, pagination, incremental windows, schema drift, batching, checkpoints and audit — while letting the data platform remain the data platform.
 
-The goal is to be the easy-to-use bridge between a REST API and an analytics pipeline, without hiding what's happening underneath: explicitly declared schema, watermark-based incremental loading, batched writes, everything auditable in bronze.
+```text
+REST API
+   │
+   ▼
+RestConnector
+   │
+   ├──────────► StateStore
+   ▼
+Destination
+   │
+   ▼
+Bronze
+   │
+   ├──────────► RunLogBackend
+   ▼
+optional transform
+```
 
-## Why it exists
+The core is backend-agnostic. **DuckDB, Parquet, Delta Lake, dbt and the localhost UI are optional integrations.**
 
-- **Connectors** (`APIConnector`/`RestConnector`) abstract `requests`, pagination, HTTP method and the incremental window — you only write what changes from one API to another (endpoint, auth, date format).
-- **Python writes the raw load (bronze)**, already flattened, with everything as `VARCHAR` by default, using DuckDB as the execution engine underneath (never exposed directly — you configure `DuckDBLoader`, not raw SQL). It never breaks on schema drift: any new field the API sends goes into an `_extra` column, with a log warning — the load never fails because of it. Writes happen in batches, not all at once.
-- **dbt does the real transformation** (staging → silver → gold), also running on DuckDB via the `dbt-duckdb` adapter. Staging (type casting) is generated automatically from the declared schema; business rules are still written by hand — dbt is the only place transformation logic lives.
-- **Visual log + run table**: every load shows a terminal progress bar and records start/end/status/row count in `_meta.run_log` inside DuckDB itself — queryable from dbt like any other source.
-- **Optional local web UI** (`engineer_kit ui`): configure connectors through a form, run and monitor pipelines with a live log, browse the warehouse — see [Web UI](#web-ui-optional) below.
+> Portuguese documentation starts at [PT-BR](#pt-br). Detailed architecture: [`docs/architecture.md`](docs/architecture.md). Platform guidance: [`docs/platforms.md`](docs/platforms.md).
 
-DuckDB itself is never a third thing you manage — it's the engine both Python and dbt run on, invisible the same way `libpq` is invisible when you say "I use Postgres."
+## What the library owns
+
+- REST extraction through `RestConnector` / `APIConnector`;
+- explicit pagination strategies;
+- watermark-based incremental loading;
+- stable Bronze contract with `_raw` and `_extra`;
+- bounded-memory batch writes;
+- backend-independent `StateStore`, `Destination` and `RunLogBackend` contracts;
+- deterministic ingestion identity for idempotent retries in official destinations;
+- declarative YAML pipelines;
+- optional dbt/local UI integrations.
+
+## What it does not try to replace
+
+Spark, Databricks, Microsoft Fabric, Airflow, Dagster, dbt, a Lakehouse, a warehouse, a catalog or a distributed worker system.
+
+## Built-in adapters
+
+| Mode | Destination | State | Audit | Extra |
+|---|---|---|---|---|
+| local | `DuckDBDestination` | `DuckDBStateStore` | `DuckDBRunLogStore` | `engineer_kit[duckdb]` |
+| files | `ParquetDestination` | `JsonFileStateStore` | `JsonLinesRunLogStore` | `engineer_kit[parquet]` |
+| Lakehouse | `DeltaDestination` | `DeltaStateStore` | `DeltaRunLogStore` | `engineer_kit[delta]` |
+
+`DuckDBLoader`, `IngestionStateStore` and `RunLogStore` remain available as compatibility names for the initial API.
 
 ## Installation
 
 ```bash
-python -m venv venv
-venv/Scripts/activate   # or source venv/bin/activate on Linux/Mac
-pip install -e ".[dev]"
+# core only — no DuckDB/PyArrow/Delta/dbt/UI
+pip install engineer_kit
+
+# choose only what the runtime needs
+pip install "engineer_kit[duckdb]"
+pip install "engineer_kit[parquet]"
+pip install "engineer_kit[delta]"
+pip install "engineer_kit[platform]"   # Delta/Lakehouse profile
+pip install "engineer_kit[dbt]"
+pip install "engineer_kit[ui]"
+pip install "engineer_kit[local]"      # DuckDB + dbt + localhost UI
 ```
 
-License: MIT (see [`LICENSE`](LICENSE)).
-
-## Quickstart
-
-There are two ways to use this: through the **web UI** (no code) or through the **Python API** directly. Both build the same `RestConnector`/`Pipeline` underneath.
-
-### Option A — Web UI, no code
+For repository development:
 
 ```bash
-pip install "engineer_kit[ui]"
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev,all]"
+pytest -q
+```
+
+## Declarative pipeline
+
+```yaml
+name: orders
+
+connector:
+  base_url: https://api.example.com/orders
+  method: GET
+  pagination:
+    type: page
+    params:
+      page_size: 100
+  incremental:
+    mode: ingestion_date
+
+columns:
+  - name: id
+    dtype: bigint
+  - name: created_at
+    dtype: timestamp
+
+destination:
+  type: parquet
+  path: ./lake
+  schema: bronze
+  batch_size: 5000
+  write_mode: append
+
+state:
+  type: auto
+
+run_log:
+  enabled: true
+  type: auto
+
+transform:
+  type: none
+```
+
+For Parquet/Delta, no database runtime is required:
+
+```python
+from engineer_kit import build_pipeline, load_pipeline_config
+
+config = load_pipeline_config("pipelines/orders.yaml")
+result = build_pipeline(config).run()
+
+if not result.success:
+    raise RuntimeError(result.steps)
+```
+
+DuckDB uses an existing connection supplied by the caller:
+
+```python
+import duckdb
+from engineer_kit import build_pipeline, load_pipeline_config
+
+config = load_pipeline_config("pipelines/orders.yaml")
+conn = duckdb.connect("warehouse.duckdb")
+result = build_pipeline(config, conn).run()
+conn.close()
+```
+
+## Bronze contract
+
+Official destinations persist declared API fields as strings/null. The declared `dtype` is a **logical analytical type** used by staging/transform tooling rather than a type inferred from every API response.
+
+Known logical types:
+
+```text
+string · integer · bigint · float · decimal · boolean · date · timestamp · json
+```
+
+Every Bronze row also carries:
+
+```text
+_source
+_endpoint
+_ingested_at
+_run_id
+_ingestion_key
+_window_start
+_window_end
+_raw
+_extra
+```
+
+Unexpected API fields are preserved in `_extra` and reported; they do not trigger automatic source-schema mutations.
+
+## Incremental reliability
+
+```text
+extract
+  ↓
+Destination transaction
+  ↓
+StateStore checkpoint
+  ↓
+RunLogBackend audit
+```
+
+If destination persistence fails, the checkpoint does not advance. If destination persistence succeeds but the state checkpoint fails, the same window is retried.
+
+Official destinations receive a deterministic `ingestion_key` for that connector/window, so the retry replaces the previous representation of the same window instead of duplicating it:
+
+- DuckDB: transactional delete/rewrite of that ingestion key;
+- Parquet: deterministic final file promoted only after success;
+- Delta: predicate overwrite in a Delta transaction.
+
+Third-party destinations implementing only `Destination.load()` remain compatible with at-least-once semantics. They can implement `load_with_context()` to use the same retry identity.
+
+## Write modes
+
+`append` is the default Bronze mode. `overwrite` replaces the target using the adapter's transactional/staging guarantees.
+
+A generic merge/upsert is intentionally not guessed by the ingestion layer because it requires explicit business keys and semantics.
+
+## Schema drift
+
+```text
+Declared: A, B
+API sends: A, B, C
+
+A → normal column
+B → normal column
+C → _extra + warning
+```
+
+The original record is retained in `_raw`.
+
+## dbt
+
+`dbt` is optional and **not part of the ingestion transaction**.
+
+The localhost runtime executes:
+
+```text
+Pipeline.run()
+   ↓
+Bronze + watermark confirmed
+   ↓
+DbtRunner.run()
+```
+
+Generated staging models cast Bronze strings using the logical types declared in `ColumnSpec`. Business rules, joins, tests and materializations remain explicit dbt code.
+
+## Local web UI
+
+The web UI is a **local learning/development lab**, not a production control plane.
+
+```bash
+pip install "engineer_kit[local]"
 engineer_kit ui --workspace .
 ```
 
-Opens `http://127.0.0.1:8000` (login `admin`/`admin` by default). Create a connector through a form, click **Run now**, watch the log live, browse the data it loaded. See [Web UI](#web-ui-optional) below for the full walkthrough.
+It provides:
 
-### Option B — Python API
+- pipeline form;
+- live execution logs;
+- DuckDB data browser;
+- dbt model view;
+- visual Source → State → Destination → Transform flow;
+- architecture/documentation pages explaining the same core contracts.
 
-Import directly from the package — no need to know which submodule each class lives in, `import pandas as pd`-style:
+The visual editor deliberately targets the DuckDB local runtime. Parquet/Delta pipelines use the same Python/YAML contracts and are documented inside the UI.
+
+## Databricks / Microsoft Fabric / Lakehouse
+
+The intended platform boundary is:
+
+```text
+API → engineer_kit → Delta/Parquet Bronze → platform Spark/dbt/SQL
+```
+
+The library does not start or replace Spark. Run the Python ingestion from the platform's job/notebook/orchestrator and point the destination to a path available to that runtime.
+
+See [`docs/platforms.md`](docs/platforms.md) for Databricks/Fabric patterns, storage options, state/audit layout and current test boundaries.
+
+## Extending adapters
+
+Built-in adapters are resolved lazily through a registry. Custom packages can register their own destination/state/audit builders:
 
 ```python
-from engineer_kit import (
-    ColumnSpec, DateParams, DuckDBLoader, EndpointSchema, IncrementalMode,
-    IngestionStateStore, NoAuth, PageNumberPagination,
-    Pipeline, RestConnector,
-)
+from engineer_kit import register_destination
+
+register_destination("company_lake", "company_ingestion.runtime:build_destination")
 ```
 
-See [`examples/github_commits.py`](examples/github_commits.py) for a full pipeline running against the public GitHub API. Summary:
-
-```python
-from datetime import date, timedelta
-import duckdb
-
-conn = duckdb.connect("warehouse.duckdb")
-
-connector = RestConnector(
-    name="github_commits",
-    base_url="https://api.github.com/repos/psf/requests/commits",
-    state_store=IngestionStateStore(conn),  # the incremental strategy is built automatically from "name" above
-    incremental_mode=IncrementalMode.DATA_DATE,
-    initial_start=date.today() - timedelta(days=30),
-    date_field="commit.author.date",  # date field in the raw API JSON (required in DATA_DATE mode)
-    pagination=PageNumberPagination(page_size=20),  # every other parameter already has a sensible default
-    method="GET",  # required: GET or POST, no implicit default
-    auth=NoAuth(),
-    date_params=DateParams(start="since", end="until", date_format="%Y-%m-%dT%H:%M:%SZ"),
-)
-
-schema = EndpointSchema.from_names(["sha", "commit_author_name", "commit_author_date", "commit_message"])
-
-pipeline = Pipeline(
-    connector=connector,
-    schema=schema,
-    destination=DuckDBLoader(conn, schema="bronze", batch_size=1000),  # 1000 records per batch
-    # run_log=True is the default: records each run in _meta.run_log automatically
-)
-
-result = pipeline.run()
-```
-
-For more than one connector in the same pipeline, use `sources=[PipelineSource(connector=..., schema=...), ...]` instead of `connector=`/`schema=`.
-
-After running the pipeline, generate the dbt staging from the same schema and run it:
-
-```python
-from engineer_kit import write_staging_scaffold, DbtRunner
-
-write_staging_scaffold("dbt_project", {"github_commits": schema}, bronze_schema="bronze")
-DbtRunner(project_dir="dbt_project").run()
-```
-
-## Pagination
-
-`pagination` is always required when creating a connector — there's no implicit type "under the hood," because this changes from API to API. `STANDARD_PAGINATION_TYPES` lists every standard type already supported:
-
-| Type | Class | When to use |
-|---|---|---|
-| `page` | `PageNumberPagination` | `?page=1&per_page=100` |
-| `offset` | `OffsetPagination` | `?offset=0&limit=100` |
-| `cursor` | `CursorPagination` | cursor returned in the response body |
-| `link_header` | `LinkHeaderPagination` | HTTP `Link` header (RFC 5988) — GitHub, Stripe |
-| `next_url` | `NextUrlPagination` | full URL of the next page in a body field |
-| `none` | `NoPagination` | API returns everything in a single response |
-
-Every strategy already has sensible defaults for the most common parameter names — you'll usually only tune `page_size`.
-
-## HTTP method
-
-`method` is also required (`"GET"` or `"POST"`, validated) — no implicit default. On `POST`, the payload (date + pagination params) goes as a JSON body instead of a query string, for APIs that require search via `POST`.
-
-## Incremental: `date_field`
-
-Under `incremental_mode=IncrementalMode.DATA_DATE`, `date_field` is required: it's the dot-separated path to the date field **in the raw API JSON**, before flattening — e.g. `"commit.author.date"`. Note the separator here is `.`, different from the `_` used in the already-flattened column names in the schema (`commit_author_date`) — these are two different points in the pipeline (one reads the API's raw response, the other describes the already-flattened bronze table).
-
-With `date_field` configured, the connector automatically tracks the highest date seen in each run and uses it in the watermark — no need to pass anything manually to `commit_watermark()`. Without `date_field`, `DATA_DATE` would have no way to know the data's real date and would silently fall back to the same behavior as `INGESTION_DATE`; that's why the library requires the field instead of silently ignoring it.
-
-For non-standard cases, `date_field` also accepts a function: `date_field=lambda record: record["some_computed_field"]`.
-
-You no longer need to build a separate `IncrementalStrategy`: `RestConnector` takes `state_store`/`incremental_mode`/`initial_start`/`date_field` directly and builds the incremental strategy internally, using the connector's own `name` — without duplicating that identifier in two places. Anyone who needs a custom `IncrementalStrategy` can still pass a ready-made one via `incremental=`.
-
-## Architecture
-
-Two things you write — a connector (Python) and dbt models — both executing on DuckDB, which you never touch directly:
-
-```
-Connector (RestConnector : APIConnector)
-  ├─ PaginationStrategy   (page/offset/cursor/link_header/next_url/none)
-  ├─ IncrementalStrategy  (watermark read/written in IngestionStateStore)
-  └─ HttpClient           (retry+backoff, HTTPS required, auth via SecretProvider)
-        ↓ extract() -> Iterator[dict]  (everything already as string)
-DuckDBLoader (implements Destination)
-  ├─ flatten_record()     (flattens nested JSON, full-path column names)
-  ├─ EndpointSchema       (schema declared by hand — columns outside it go to _extra)
-  ├─ writes in `batch_size` chunks (default 1000; never materializes everything in memory)
-  ├─ progress bar (tqdm) + visual log (loguru) during the write
-  └─ bronze.<endpoint>    (DuckDB table: schema columns + _source/_endpoint/_ingested_at/_raw/_extra)
-        ↓
-dbt (generated scaffold + hand-written models)
-  ├─ models/staging/stg_<endpoint>.sql   (generated: type casting)
-  ├─ models/silver/*.sql                 (hand-written: business rules)
-  └─ models/gold/*.sql                   (hand-written: denormalization)
-        ↓
-Pipeline -> _meta.run_log (optional, via RunLogStore)
-         -> Scheduler (thin wrapper over APScheduler) / CLI (`engineer_kit run module:attribute`)
-```
-
-### Design decisions worth explaining
-
-- **Everything comes out of the connector as a string.** Prevents schema drift at the source from breaking ingestion — proper typing happens in dbt staging, deliberately, not automatically.
-- **Schema is declared, not inferred.** The loader never runs `ALTER TABLE` on its own. A field outside the declared schema becomes an entry in `_extra` (JSON) plus a warning — the load never fails because of it.
-- **Flattening is done in Python, not with DuckDB's native `unnest`.** DuckDB's `unnest(recursive := true)` resolves field-name collisions (e.g. `commit.author.date` vs `commit.committer.date`) by order of appearance, not by path — unpredictable. The flatten here always names by full path (`commit_author_date`), so it never collides.
-- **`DATA_DATE` requires `date_field`.** Without it, the incremental logic has no way to know the data's real date — and before this check existed, `DATA_DATE` silently behaved exactly like `INGESTION_DATE`, because nothing extracted the record's own date. Forcing the field prevents that kind of silent bug.
-- **Batched writes, not everything at once.** `DuckDBLoader` consumes the record generator in `batch_size` slices (default 1000), writing each one and releasing memory — an extraction of millions of records doesn't need to fit in memory before the first row is written.
-- **The watermark only advances after the load succeeds.** `commit_watermark()` is an explicit call, separate from `extract()` — a failure partway through redoes the same window on the next run, without duplicating or losing data.
-- **Method and pagination are always explicit, never implicit.** Neither has a hidden "default" behavior — it's one of the things that varies most from API to API, and an implicit choice here is an easy source of silent bugs.
-- **The library doesn't replace an orchestrator or dbt.** `Pipeline` is the atomic unit that any external orchestrator (Airflow, cron, GitHub Actions) can call via the CLI; the built-in `Scheduler` is only for those without (or who don't want) an external orchestrator.
-
-## Visual log and run table
-
-During writes, the terminal shows a progress bar (tqdm, with elapsed time and record count) and a narrative log (loguru) of each connector's start/end/success/error. If a `RunLogStore` is passed to `Pipeline`, the same information — connector, start, end, status, row count and new columns outside the schema — gets recorded in `_meta.run_log` in DuckDB, queryable from dbt.
-
-This visual log (loguru) is separate from the library's internal technical logging (standard `logging`, used in `HttpClient`/auditing) — they serve different purposes: one is for human reading in the terminal, the other is what the security tests audit (see below).
+Equivalent functions exist for state and audit backends.
 
 ## Security
 
-- Secrets always go through a `SecretProvider`: `EnvSecretProvider` (env vars), `FileSecretProvider` (reads from a file — one file per secret in a directory, Docker/Kubernetes-secrets style, or a single file; re-reads on every call, so rotating the file takes effect without restarting the process), or `StaticSecretProvider` (hardcoded in memory — a deliberate choice for internal scripts/controlled environments, never commit a real secret to a shared repo).
-- HTTPS is required by default (`allow_http=True` must be explicit).
-- Schema/table/column names are validated against a safe identifier pattern before entering any dynamically-built SQL — including files generated for dbt.
-- No log or error message ever exposes a secret, even when authentication is done via a query param: the URL used in logs and exception messages is always the pre-auth version, or redacted.
-- See `tests/test_http_client.py` for the tests that lock in this behavior.
+- HTTPS is enforced by the HTTP client unless explicitly configured otherwise;
+- API credentials are resolved through `SecretProvider` implementations;
+- the UI never asks users to paste secret values into pipeline YAML;
+- use managed/workload identity, environment variables or the platform's secret manager for Lakehouse credentials;
+- SQL identifiers are validated before use.
 
-## Running the tests
+## Tests and CI
 
-```bash
-venv/Scripts/python.exe -m pytest tests/ -v
-```
+CI validates:
 
-## Running the end-to-end example
+- core import with no DuckDB/PyArrow/Delta installed;
+- Python 3.10 / 3.11 / 3.12;
+- DuckDB, Parquet and Delta adapters;
+- checkpoint failure and retry idempotency;
+- schema drift and batch behavior;
+- local UI;
+- Ruff, Bandit and dependency audit;
+- wheel/sdist build validation.
 
-```bash
-venv/Scripts/python.exe examples/github_commits.py
-```
+Local Delta tests validate the Delta format and adapter contract. Cloud-specific authentication, catalog registration and workspace paths must still be verified in the target Databricks/Fabric environment.
 
-Extracts recent commits from `psf/requests`, loads them into bronze in batches, generates dbt staging, materializes a silver model (`commits_daily_summary`) and records the run in `_meta.run_log` — all against the public GitHub API, no token needed for this example's volume.
+## License
 
-## Web UI (optional)
-
-A local dashboard for configuring and monitoring pipelines without writing Python — install with `pip install "engineer_kit[ui]"`, then:
-
-```bash
-engineer_kit ui --workspace .
-```
-
-Opens on `http://127.0.0.1:8000` with HTTP Basic Auth (`admin`/`admin` by default — override with `ENGINEER_KIT_UI_USER`/`ENGINEER_KIT_UI_PASSWORD`, or with `--username`/`--password`). It only binds to localhost by default; exposing it elsewhere is your responsibility.
-
-The "workspace" is a folder with `pipelines/*.yaml`, a `warehouse.duckdb` file, and a `dbt_project/` — the same layout as the example above. From the UI you can:
-
-- **Create/edit a connector** through a form (base URL, auth, pagination, incremental, schema) — this builds a `RestConnector` under the hood via a new declarative YAML config (`PipelineConfig`/`build_pipeline`, also usable directly from Python without the UI). Custom `APIConnector` subclasses still require Python code — the form covers the same ground as `RestConnector`, not arbitrary connectors.
-- **Run a pipeline** and watch its log live (Server-Sent Events, same visual log described above) instead of waiting for a blocking command to finish.
-- **Browse the DuckDB warehouse**: every schema/table with row counts, and a row preview.
-- **See the dbt models** across staging/silver/gold.
-
-## Scope
-
-Focused on **API ingestion**. Database sources and cloud warehouse destinations (Redshift, Snowflake, Data Lake) were deliberately left out — not due to a technical limitation, but because joining data across different database engines in a single query is a query-federation problem (Trino/Presto), not something a Python abstraction layer solves.
+MIT — see [`LICENSE`](LICENSE).
 
 ---
 
-<a name="engineer_kit-pt-br"></a>
-# engineer_kit (PT-BR)
+# PT-BR
 
-*[English version above](#engineer_kit).*
+## O que é o engineer_kit
 
-Biblioteca Python para ingestão de APIs: **Python (extração) + dbt (transformação)**, os dois executando em cima do DuckDB — você escreve configuração de conector e modelo dbt, nunca SQL de DuckDB direto. Vem com uma **interface web local opcional** pra configurar e rodar pipelines sem escrever código (ver [Interface web](#interface-web-opcional) abaixo).
+`engineer_kit` é uma biblioteca Python para transformar APIs REST em uma **camada de ingestão confiável e portátil**.
 
-O objetivo é ser a ponte fácil de usar entre uma API REST e um pipeline analítico, sem esconder o que está acontecendo por baixo: schema declarado explicitamente, incremental por watermark, gravação em blocos, tudo auditável no bronze.
+O objetivo não é criar um novo Airflow, Databricks ou Fabric. O objetivo é remover o código repetitivo que aparece antes da Bronze:
 
-## Por que existe
+- requests/auth;
+- paginação;
+- incremental;
+- watermark;
+- retry;
+- flattening;
+- schema drift;
+- batches;
+- auditoria;
+- persistência da Bronze.
 
-- **Conectores** (`APIConnector`/`RestConnector`) abstraem `requests`, paginação, método HTTP e janela incremental — você só escreve o que muda de uma API pra outra (endpoint, auth, formato de data).
-- **O Python grava a carga bruta (bronze)**, já desaninhada, com tudo como `VARCHAR` por padrão, usando o DuckDB como motor de execução por baixo (nunca exposto direto — você configura o `DuckDBLoader`, não escreve SQL). Nunca quebra por schema drift: campo novo que a API mandar vai para uma coluna `_extra`, com aviso no log — a carga nunca falha por isso. A gravação acontece em blocos, não tudo de uma vez.
-- **O dbt faz a transformação de verdade** (staging → silver → gold), também rodando em cima do DuckDB via o adapter `dbt-duckdb`. O staging (cast de tipo) é gerado automaticamente a partir do schema declarado; as regras de negócio continuam sendo escritas à mão — o dbt é o único lugar onde mora lógica de transformação.
-- **Log visual + tabela de execução**: cada carga mostra uma barra de progresso no terminal e registra início/fim/status/quantidade em `_meta.run_log` no próprio DuckDB — consultável pelo dbt como qualquer outra fonte.
-- **Interface web local opcional** (`engineer_kit ui`): configura conector pelo formulário, roda e acompanha pipelines com log ao vivo, navega o warehouse — ver [Interface web](#interface-web-opcional) abaixo.
-
-O DuckDB nunca é uma terceira coisa que você gerencia — é o motor sobre o qual Python e dbt rodam, invisível do mesmo jeito que o `libpq` é invisível quando você diz "eu uso Postgres".
-
-## Instalação
-
-```bash
-python -m venv venv
-venv/Scripts/activate   # ou source venv/bin/activate no Linux/Mac
-pip install -e ".[dev]"
-```
-
-Licença: MIT (ver [`LICENSE`](LICENSE)).
-
-## Quickstart
-
-Tem dois jeitos de usar: pela **interface web** (sem código) ou direto pela **API Python**. Os dois montam o mesmo `RestConnector`/`Pipeline` por baixo.
-
-### Opção A — Interface web, sem código
-
-```bash
-pip install "engineer_kit[ui]"
-engineer_kit ui --workspace .
-```
-
-Abre em `http://127.0.0.1:8000` (login `admin`/`admin` por padrão). Cria um conector pelo formulário, clica em **Rodar agora**, acompanha o log ao vivo, navega os dados carregados. Ver [Interface web](#interface-web-opcional) abaixo pro passo a passo completo.
-
-### Opção B — API Python
-
-Import direto do pacote — sem precisar saber em qual submódulo cada classe mora, no estilo `import pandas as pd`:
-
-```python
-from engineer_kit import (
-    ColumnSpec, DateParams, DuckDBLoader, EndpointSchema, IncrementalMode,
-    IngestionStateStore, NoAuth, PageNumberPagination,
-    Pipeline, RestConnector,
-)
-```
-
-Veja [`examples/github_commits.py`](examples/github_commits.py) para um pipeline completo rodando contra a API pública do GitHub. Resumo:
-
-```python
-from datetime import date, timedelta
-import duckdb
-
-conn = duckdb.connect("warehouse.duckdb")
-
-connector = RestConnector(
-    name="github_commits",
-    base_url="https://api.github.com/repos/psf/requests/commits",
-    state_store=IngestionStateStore(conn),  # o incremental e montado automaticamente a partir do "name" acima
-    incremental_mode=IncrementalMode.DATA_DATE,
-    initial_start=date.today() - timedelta(days=30),
-    date_field="commit.author.date",  # campo de data no JSON bruto da API (obrigatorio em modo DATA_DATE)
-    pagination=PageNumberPagination(page_size=20),  # todos os outros parametros ja tem padrao sensato
-    method="GET",  # obrigatorio: GET ou POST, sem valor implicito
-    auth=NoAuth(),
-    date_params=DateParams(start="since", end="until", date_format="%Y-%m-%dT%H:%M:%SZ"),
-)
-
-schema = EndpointSchema.from_names(["sha", "commit_author_name", "commit_author_date", "commit_message"])
-
-pipeline = Pipeline(
-    connector=connector,
-    schema=schema,
-    destination=DuckDBLoader(conn, schema="bronze", batch_size=1000),  # 1000 registros por bloco
-    # run_log=True e o padrao: registra cada execucao em _meta.run_log automaticamente
-)
-
-result = pipeline.run()
-```
-
-Para mais de um conector no mesmo pipeline, use `sources=[PipelineSource(connector=..., schema=...), ...]` em vez de `connector=`/`schema=`.
-
-Depois de rodar o pipeline, gere o staging do dbt a partir do mesmo schema e rode:
-
-```python
-from engineer_kit import write_staging_scaffold, DbtRunner
-
-write_staging_scaffold("dbt_project", {"github_commits": schema}, bronze_schema="bronze")
-DbtRunner(project_dir="dbt_project").run()
-```
-
-## Paginação
-
-`pagination` é sempre obrigatório na criação de um conector — não existe um tipo "por baixo dos panos", porque isso muda de API para API. `STANDARD_PAGINATION_TYPES` lista todo tipo padrão já suportado:
-
-| Tipo | Classe | Quando usar |
-|---|---|---|
-| `page` | `PageNumberPagination` | `?page=1&per_page=100` |
-| `offset` | `OffsetPagination` | `?offset=0&limit=100` |
-| `cursor` | `CursorPagination` | cursor devolvido no corpo da resposta |
-| `link_header` | `LinkHeaderPagination` | header HTTP `Link` (RFC 5988) — GitHub, Stripe |
-| `next_url` | `NextUrlPagination` | URL completa da próxima página num campo do corpo |
-| `none` | `NoPagination` | API devolve tudo numa única resposta |
-
-Cada estratégia já tem valores padrão sensatos para os nomes de parâmetro mais comuns — normalmente você só ajusta o `page_size`.
-
-## Método HTTP
-
-`method` também é obrigatório (`"GET"` ou `"POST"`, validado) — sem default implícito. Em `POST`, o payload (params de data + paginação) vai como corpo JSON em vez de query string, para as APIs que exigem busca via `POST`.
-
-## Incremental: `date_field`
-
-Em `incremental_mode=IncrementalMode.DATA_DATE`, `date_field` é obrigatório: é o caminho (separado por ponto) até o campo de data **no JSON bruto da API**, antes do flatten — ex.: `"commit.author.date"`. Note que o separador aqui é `.`, diferente do `_` usado nos nomes de coluna já achatados no schema (`commit_author_date`) — são dois pontos diferentes do pipeline (um lê a resposta crua da API, o outro descreve a tabela já achatada no bronze).
-
-Com `date_field` configurado, o conector rastreia automaticamente a maior data vista em cada execução e usa isso no watermark — sem precisar passar nada manualmente em `commit_watermark()`. Sem `date_field`, `DATA_DATE` não teria como saber a data real dos dados e cairia para o mesmo comportamento de `INGESTION_DATE`; por isso a biblioteca exige o campo em vez de silenciosamente ignorá-lo.
-
-Para casos fora do padrão, `date_field` também aceita uma função: `date_field=lambda record: record["algum_campo_calculado"]`.
-
-Não precisa mais montar um `IncrementalStrategy` separado: `RestConnector` recebe `state_store`/`incremental_mode`/`initial_start`/`date_field` diretamente e monta o incremental internamente, usando o próprio `name` do conector — sem duplicar esse identificador em dois lugares. Quem precisar de um `IncrementalStrategy` customizado ainda pode passar um pronto via `incremental=`.
+A plataforma continua cuidando daquilo que ela já faz bem: Spark, catálogo, transformação, governança, jobs e consumo.
 
 ## Arquitetura
 
-Duas coisas que você escreve — um conector (Python) e modelos dbt — os dois executando em cima do DuckDB, que você nunca toca direto:
-
-```
-Connector (RestConnector : APIConnector)
-  ├─ PaginationStrategy   (page/offset/cursor/link_header/next_url/none)
-  ├─ IncrementalStrategy  (watermark lido/escrito na IngestionStateStore)
-  └─ HttpClient           (retry+backoff, HTTPS obrigatório, auth via SecretProvider)
-        ↓ extract() -> Iterator[dict]  (tudo já como string)
-DuckDBLoader (implementa Destination)
-  ├─ flatten_record()     (achata JSON aninhado, nomes por caminho completo)
-  ├─ EndpointSchema       (schema declarado a mão — colunas fora dele vão para _extra)
-  ├─ grava em blocos de `batch_size` (padrão 1000; nunca materializa tudo em memória)
-  ├─ barra de progresso (tqdm) + log visual (loguru) durante a gravação
-  └─ bronze.<endpoint>    (tabela DuckDB: colunas do schema + _source/_endpoint/_ingested_at/_raw/_extra)
-        ↓
-dbt (scaffold gerado + modelos escritos a mão)
-  ├─ models/staging/stg_<endpoint>.sql   (gerado: cast de tipo)
-  ├─ models/silver/*.sql                 (escrito a mão: regra de negócio)
-  └─ models/gold/*.sql                   (escrito a mão: desnormalização)
-        ↓
-Pipeline -> _meta.run_log (opcional, via RunLogStore)
-         -> Scheduler (wrapper fino sobre APScheduler) / CLI (`engineer_kit run modulo:atributo`)
+```text
+                         engineer_kit core
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+     RestConnector         StateStore          Destination
+          │                    │                    │
+          │              ┌─────┼─────┐       ┌─────┼─────┐
+          │              │     │     │       │     │     │
+          │           DuckDB  File  Delta  DuckDB Parquet Delta
+          │                    │                    │
+          └────────────────────┴────────────────────┘
+                               │
+                               ▼
+                             Bronze
+                               │
+                         transformação
+                            opcional
 ```
 
-### Decisões de design que valem explicar
+Detalhes: [`docs/architecture.md`](docs/architecture.md).
 
-- **Tudo sai como string do conector.** Evita que schema drift na origem quebre a ingestão — a tipagem certa acontece no staging do dbt, de forma deliberada, não automática.
-- **Schema é declarado, não inferido.** O loader nunca faz `ALTER TABLE` sozinho. Campo fora do schema declarado vira uma entrada em `_extra` (JSON) e um aviso — a carga nunca falha por causa disso.
-- **Flatten é feito em Python, não com o `unnest` nativo do DuckDB.** O `unnest(recursive := true)` do DuckDB resolve colisão de nome de campo por ordem de aparição, não por caminho — imprevisível. O flatten aqui sempre nomeia pelo caminho completo (`commit_author_date`), então nunca colide.
-- **`DATA_DATE` exige `date_field`.** Sem isso, o incremental não tem como saber a data real dos dados — e antes dessa checagem existir, `DATA_DATE` silenciosamente se comportava igual a `INGESTION_DATE`, porque nada extraía a data do registro. Forçar o campo evita esse tipo de bug silencioso.
-- **Gravação em blocos, não tudo de uma vez.** `DuckDBLoader` consome o gerador de registros em fatias de `batch_size` (padrão 1000), gravando cada uma e liberando a memória — uma extração de milhões de registros não precisa caber tudo em memória antes da primeira linha ser gravada.
-- **O watermark só avança depois que a carga tem sucesso.** `commit_watermark()` é uma chamada explícita e separada de `extract()` — uma falha no meio do caminho refaz a mesma janela no próximo run, sem duplicar nem perder dado.
-- **Método e paginação são sempre explícitos, nunca implícitos.** Nenhum dos dois tem comportamento "por padrão" escondido — é um dos pontos que mais varia de API para API, e uma escolha implícita aqui é fonte fácil de bug silencioso.
-- **A biblioteca não substitui orquestrador nem o dbt.** `Pipeline` é a unidade atômica que qualquer orquestrador externo (Airflow, cron, GitHub Actions) pode chamar via CLI; o `Scheduler` embutido é só para quem não tem/quer um orquestrador externo.
-
-## Log visual e tabela de execução
-
-Durante a gravação, o terminal mostra uma barra de progresso (tqdm, com cronômetro e contagem de registros) e um log narrativo (loguru) de início/fim/sucesso/erro de cada conector. Se um `RunLogStore` for passado ao `Pipeline`, a mesma informação — conector, início, fim, status, quantidade de registros e colunas novas fora do schema — fica registrada em `_meta.run_log` no DuckDB, consultável pelo dbt.
-
-Esse log visual (loguru) é separado do logging técnico interno da biblioteca (`logging` padrão, usado em `HttpClient`/auditoria) — são propósitos diferentes: um é para leitura humana no terminal, o outro é o que os testes de segurança auditam (ver seção abaixo).
-
-## Segurança
-
-- Segredos sempre passam por um `SecretProvider`: `EnvSecretProvider` (variável de ambiente), `FileSecretProvider` (lê de um arquivo — um arquivo por segredo numa pasta, estilo Docker/Kubernetes secrets, ou um arquivo único; relê a cada chamada, então rotacionar o arquivo vale sem reiniciar o processo), ou `StaticSecretProvider` (hardcoded em memória — escolha deliberada para script interno/ambiente controlado, nunca comite um segredo real num repositório compartilhado).
-- HTTPS é obrigatório por padrão (`allow_http=True` precisa ser explícito).
-- Nomes de schema/tabela/coluna são validados contra um identificador seguro antes de entrar em qualquer SQL montado dinamicamente — inclusive nos arquivos gerados para o dbt.
-- Nenhum log ou mensagem de erro expõe segredo, mesmo quando a autenticação é feita via query param: a URL usada em log e em mensagens de exceção é sempre a versão pré-autenticação ou redigida.
-- Ver `tests/test_http_client.py` para os testes que travam esses comportamentos.
-
-## Rodando os testes
+## Instalação por capacidade
 
 ```bash
-venv/Scripts/python.exe -m pytest tests/ -v
+pip install engineer_kit             # core
+pip install "engineer_kit[duckdb]"  # local sem UI/dbt
+pip install "engineer_kit[parquet]" # arquivos Bronze
+pip install "engineer_kit[delta]"   # Lakehouse Delta
+pip install "engineer_kit[local]"   # DuckDB + UI + dbt
 ```
 
-## Rodando o exemplo end-to-end
+Nenhuma dessas integrações é necessária para importar o core.
 
-```bash
-venv/Scripts/python.exe examples/github_commits.py
+## DuckDB continua fazendo sentido
+
+Sim — como **adapter zero-infra**.
+
+```text
+API → engineer_kit → DuckDB → dbt
 ```
 
-Extrai commits recentes de `psf/requests`, carrega no bronze em blocos, gera o staging do dbt, materializa um modelo de silver (`commits_daily_summary`) e registra a execução em `_meta.run_log` — tudo contra a API pública do GitHub, sem precisar de token para o volume desse exemplo.
+É ótimo para desenvolvimento, aprendizado, CI e projetos locais. Ele deixou de ser uma premissa arquitetural.
 
-## Interface web (opcional)
+## Em plataforma
 
-Um painel local pra configurar e monitorar pipelines sem escrever Python — instale com `pip install "engineer_kit[ui]"` e rode:
+```text
+API → engineer_kit → Delta Bronze → Databricks/Fabric/Spark/dbt/SQL
+```
+
+ou:
+
+```text
+API → engineer_kit → Parquet Bronze → lake/filesystem montado
+```
+
+O mesmo `RestConnector` e `Pipeline` continuam válidos. O que muda é o adapter.
+
+Veja [`docs/platforms.md`](docs/platforms.md).
+
+## Estado incremental não depende da Bronze
+
+O watermark fica em `StateStore`, não em `SELECT MAX(...)` sobre a tabela Bronze.
+
+```text
+StateStore
+├── DuckDBStateStore
+├── JsonFileStateStore
+└── DeltaStateStore
+```
+
+Assim a leitura do checkpoint permanece pequena e previsível mesmo quando a Bronze cresce.
+
+## Destination, State e Audit são separados
+
+```yaml
+destination:
+  type: delta
+
+state:
+  type: auto
+
+run_log:
+  enabled: true
+  type: auto
+```
+
+`auto` usa o backend natural do destination, mas cada parte pode ser configurada independentemente.
+
+## Bronze e tipos
+
+A Bronze prioriza captura. Campos declarados ficam em string e a tipagem analítica é explícita:
+
+```yaml
+columns:
+  - name: amount
+    dtype: decimal
+  - name: created_at
+    dtype: timestamp
+```
+
+O staging/dbt pode transformar isso no tipo físico apropriado. Se a API adicionar um campo novo, ele vai para `_extra` sem derrubar a carga.
+
+## Confiabilidade
+
+O watermark só avança depois da transação da Bronze.
+
+Os adapters oficiais também tornam o retry da mesma janela idempotente usando `_ingestion_key`, reduzindo o risco clássico de duplicação quando a escrita terminou mas a persistência do checkpoint falhou.
+
+## Interface localhost
+
+A interface é opcional e propositalmente local:
 
 ```bash
+pip install "engineer_kit[local]"
 engineer_kit ui --workspace .
 ```
 
-Abre em `http://127.0.0.1:8000` com autenticação básica (`admin`/`admin` por padrão — troque via `ENGINEER_KIT_UI_USER`/`ENGINEER_KIT_UI_PASSWORD`, ou `--username`/`--password`). Só faz bind em localhost por padrão; expor em outro endereço é responsabilidade de quem estiver rodando.
+Ela serve para aprender, montar e observar pipelines. A tela de arquitetura mostra `RestConnector`, `StateStore`, `Destination`, `RunLogBackend`, tipos lógicos, retry e dbt.
 
-O "workspace" é uma pasta com `pipelines/*.yaml`, um arquivo `warehouse.duckdb` e um `dbt_project/` — o mesmo layout do exemplo acima. Pela interface dá pra:
+## Transformação
 
-- **Criar/editar um conector** por formulário (URL base, autenticação, paginação, incremental, schema) — isso monta um `RestConnector` por baixo, através de uma nova configuração declarativa em YAML (`PipelineConfig`/`build_pipeline`, também usável direto em Python sem a interface). Conector customizado (subclasse de `APIConnector`) continua exigindo código Python — o formulário cobre o mesmo terreno do `RestConnector`, não qualquer conector possível.
-- **Rodar um pipeline** e acompanhar o log ao vivo (Server-Sent Events, o mesmo log visual descrito acima), em vez de esperar um comando bloqueante terminar.
-- **Navegar o warehouse DuckDB**: todo schema/tabela com contagem de linhas, e uma amostra dos dados.
-- **Ver os modelos dbt** em staging/silver/gold.
+`Pipeline` termina na ingestão. dbt é uma integração pós-ingestão no local lab. Em ambientes robustos, a transformação pode ser executada pela própria plataforma.
 
 ## Escopo
 
-Focado em **ingestão de APIs**. Fontes de banco de dados e destinos de warehouse em nuvem (Redshift, Snowflake, Data Lake) foram deliberadamente deixados de fora — não por limitação técnica, mas porque juntar dados de motores de banco diferentes numa mesma query é um problema de federação de query (Trino/Presto), não algo que uma camada de abstração em Python resolve.
+O foco continua sendo **API ingestion**. A biblioteca não quer se transformar em um novo orquestrador, Lakehouse ou framework de infraestrutura.
+
+## Desenvolvimento
+
+```bash
+pip install -e ".[dev,all]"
+pytest -q
+ruff check src tests
+```
+
+O CI também verifica que o core continua importável sem os backends opcionais.
