@@ -17,10 +17,11 @@ from typing import Any, Iterable, Iterator
 import duckdb
 from tqdm import tqdm
 
+from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
 from engineer_kit.storage.destination import Destination, LoadResult
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import validate_identifier
-from engineer_kit.storage.run_log import DuckDBRunLogStore, RunLogBackend
+from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
 
@@ -185,3 +186,6 @@ class DuckDBLoader(Destination):
             f"FROM (SELECT unnest($1) AS row FROM range(1))",
             [rows],
         )
+
+
+DuckDBDestination = DuckDBLoader
