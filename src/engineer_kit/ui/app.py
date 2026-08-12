@@ -1,9 +1,9 @@
-"""Interface web local: monitorar e disparar pipelines, navegar os
-dados do bronze no DuckDB, ver os modelos dbt. So sobe em localhost,
-com usuario/senha (ver `engineer_kit ui --help`).
+"""Interface web local para aprender, configurar e observar pipelines.
 
-O "workspace" e uma pasta com `pipelines/*.yaml`, um arquivo DuckDB e
-(opcional) um projeto dbt -- o mesmo layout dos exemplos da lib.
+A UI e propositalmente um extra opcional e orientado ao runtime local.
+Ela usa DuckDB para permitir uma experiencia zero-infra, mas apresenta
+os mesmos conceitos do core: Connector, StateStore, Destination,
+RunLogBackend e transformacao opcional (dbt).
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import glob
 import secrets
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -30,6 +29,7 @@ from engineer_kit.config.pipeline_config import (
     PaginationConfig,
     PipelineConfig,
     PipelineConfigError,
+    TransformConfig,
     list_pipeline_configs,
     load_pipeline_config,
     save_pipeline_config,
@@ -55,7 +55,10 @@ def create_app(
     warehouse_path = str(workspace / warehouse_filename)
     dbt_project_dir = workspace / dbt_project_dirname
 
-    run_manager = RunManager(warehouse_path=warehouse_path)
+    run_manager = RunManager(
+        warehouse_path=warehouse_path,
+        dbt_project_dir=str(dbt_project_dir),
+    )
     security = HTTPBasic()
 
     def check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
@@ -68,7 +71,7 @@ def create_app(
                 headers={"WWW-Authenticate": "Basic"},
             )
 
-    app = FastAPI(title="engineer_kit")
+    app = FastAPI(title="engineer_kit local lab")
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -91,21 +94,32 @@ def create_app(
         finally:
             conn.close()
         return {
-            r[0]: {"status": r[1], "started_at": r[2], "finished_at": r[3], "rows_loaded": r[4]} for r in rows
+            r[0]: {"status": r[1], "started_at": r[2], "finished_at": r[3], "rows_loaded": r[4]}
+            for r in rows
         }
-
-    # ---------- dashboard ----------
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, _: None = Depends(check_auth)):
         configs = list_pipeline_configs(pipelines_dir)
         last_runs = _last_run_by_pipeline()
-        pipelines = [
-            {"config": config, "last_run": last_runs.get(config.name)} for _, config in configs
-        ]
-        return templates.TemplateResponse(request, "dashboard.html", {"pipelines": pipelines})
+        pipelines = [{"config": config, "last_run": last_runs.get(config.name)} for _, config in configs]
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "pipelines": pipelines,
+                "dbt_available": dbt_project_dir.exists(),
+                "runtime": "DuckDB local",
+            },
+        )
 
-    # ---------- pipelines: criar / editar ----------
+    @app.get("/architecture", response_class=HTMLResponse)
+    def architecture(request: Request, _: None = Depends(check_auth)):
+        return templates.TemplateResponse(
+            request,
+            "architecture.html",
+            {"dbt_available": dbt_project_dir.exists()},
+        )
 
     @app.get("/pipelines/new", response_class=HTMLResponse)
     def new_pipeline_form(request: Request, _: None = Depends(check_auth)):
@@ -116,6 +130,7 @@ def create_app(
                 "config": None,
                 "pagination_types": list(STANDARD_PAGINATION_TYPES),
                 "error": None,
+                "dbt_available": dbt_project_dir.exists(),
             },
         )
 
@@ -129,6 +144,7 @@ def create_app(
                 "config": config,
                 "pagination_types": list(STANDARD_PAGINATION_TYPES),
                 "error": None,
+                "dbt_available": dbt_project_dir.exists(),
             },
         )
 
@@ -146,19 +162,24 @@ def create_app(
                     "config": None,
                     "pagination_types": list(STANDARD_PAGINATION_TYPES),
                     "error": str(exc),
+                    "dbt_available": dbt_project_dir.exists(),
                 },
                 status_code=400,
             )
         return RedirectResponse(url=f"/pipelines/{config.name}", status_code=303)
-
-    # ---------- pipelines: detalhe / rodar ----------
 
     @app.get("/pipelines/{name}", response_class=HTMLResponse)
     def pipeline_detail(request: Request, name: str, _: None = Depends(check_auth)):
         config = _load_or_404(name)
         history = _run_history(name)
         return templates.TemplateResponse(
-            request, "pipeline_detail.html", {"config": config, "history": history}
+            request,
+            "pipeline_detail.html",
+            {
+                "config": config,
+                "history": history,
+                "dbt_available": dbt_project_dir.exists(),
+            },
         )
 
     @app.post("/pipelines/{name}/run")
@@ -187,8 +208,6 @@ def create_app(
             yield f"event: done\ndata: {final_state.status}\n\n"
 
         return StreamingResponse(event_source(), media_type="text/event-stream")
-
-    # ---------- dados (DuckDB) ----------
 
     @app.get("/data", response_class=HTMLResponse)
     def data_browser(request: Request, _: None = Depends(check_auth)):
@@ -226,17 +245,21 @@ def create_app(
             {"schema": schema, "table": table, "columns": columns, "rows": rows, "limit": PREVIEW_ROW_LIMIT},
         )
 
-    # ---------- dbt ----------
-
     @app.get("/dbt", response_class=HTMLResponse)
     def dbt_models(request: Request, _: None = Depends(check_auth)):
         layers = {"staging": [], "silver": [], "gold": []}
         for layer in layers:
             pattern = str(dbt_project_dir / "models" / layer / "*.sql")
             layers[layer] = sorted(Path(p).stem for p in glob.glob(pattern))
-        return templates.TemplateResponse(request, "dbt_models.html", {"layers": layers})
-
-    # ---------- helpers ----------
+        return templates.TemplateResponse(
+            request,
+            "dbt_models.html",
+            {
+                "layers": layers,
+                "dbt_available": dbt_project_dir.exists(),
+                "project_dir": dbt_project_dir,
+            },
+        )
 
     def _load_or_404(name: str) -> PipelineConfig:
         path = pipelines_dir / f"{name}.yaml"
@@ -329,10 +352,22 @@ def create_app(
             records_path=form.get("records_path") or None,
         )
         destination = DestinationConfig(
+            type=form.get("destination_type") or "duckdb",
             schema=form.get("destination_schema") or "bronze",
             batch_size=int(form.get("batch_size") or 1000),
         )
-        return PipelineConfig(name=name, connector=connector, columns=columns, destination=destination)
+        transform = TransformConfig(
+            type=form.get("transform_type") or "none",
+            select=form.get("dbt_select") or None,
+        )
+        return PipelineConfig(
+            name=name,
+            connector=connector,
+            columns=columns,
+            destination=destination,
+            transform=transform,
+            run_log=form.get("run_log") == "on",
+        )
 
     return app
 
