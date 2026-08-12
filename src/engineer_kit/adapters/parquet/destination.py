@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
+from engineer_kit.adapters._arrow import bronze_arrow_schema, rows_to_table
 from engineer_kit.storage.batching import DEFAULT_BATCH_SIZE, iter_in_batches, validate_batch_size
 from engineer_kit.storage.bronze import build_bronze_rows
 from engineer_kit.storage.destination import Destination, LoadResult
@@ -20,22 +20,14 @@ from engineer_kit.terminal_log import visual_logger
 logger = logging.getLogger("engineer_kit.storage.parquet")
 
 
-def _bronze_arrow_schema(schema: EndpointSchema) -> pa.Schema:
-    fields = [pa.field(column.name, pa.string()) for column in schema.columns]
-    fields.extend(
-        [
-            pa.field("_source", pa.string()),
-            pa.field("_endpoint", pa.string()),
-            pa.field("_ingested_at", pa.timestamp("us", tz="UTC")),
-            pa.field("_raw", pa.string()),
-            pa.field("_extra", pa.string()),
-        ]
-    )
-    return pa.schema(fields)
-
-
 class ParquetDestination(Destination):
-    """Append API batches as immutable Parquet files under one endpoint directory."""
+    """Append each successful ingestion run as one immutable Parquet file.
+
+    Batches are streamed as row groups into a temporary file. The final file
+    becomes visible only after the writer closes successfully and ``replace``
+    promotes it into the endpoint directory. This keeps memory bounded and
+    prevents a normal Python exception mid-load from exposing a partial run.
+    """
 
     def __init__(
         self,
@@ -56,22 +48,45 @@ class ParquetDestination(Destination):
     ) -> LoadResult:
         endpoint_name = validate_identifier(endpoint, "endpoint")
         endpoint_dir = self._base_path / endpoint_name
+        staging_dir = self._base_path / ".engineer_kit_staging" / endpoint_name
         endpoint_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir.mkdir(parents=True, exist_ok=True)
 
         run_id = uuid4().hex
-        arrow_schema = _bronze_arrow_schema(schema)
+        temp_path = staging_dir / f"{run_id}.parquet.tmp"
+        final_path = endpoint_dir / f"part-{run_id}.parquet"
+        arrow_schema = bronze_arrow_schema(schema)
         total_rows = 0
         all_extra_fields: set[str] = set()
+        writer: pq.ParquetWriter | None = None
 
-        for batch_number, batch in enumerate(iter_in_batches(records, self._batch_size)):
-            rows, extra_fields = build_bronze_rows(
-                connector_name, endpoint_name, schema, batch
-            )
-            all_extra_fields.update(extra_fields)
-            table = pa.Table.from_pylist(rows, schema=arrow_schema)
-            file_path = endpoint_dir / f"part-{run_id}-{batch_number:05d}.parquet"
-            pq.write_table(table, file_path, compression=self._compression, flavor="spark")
-            total_rows += len(rows)
+        try:
+            for batch in iter_in_batches(records, self._batch_size):
+                rows, extra_fields = build_bronze_rows(
+                    connector_name, endpoint_name, schema, batch
+                )
+                all_extra_fields.update(extra_fields)
+                table = rows_to_table(rows, schema)
+
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temp_path,
+                        arrow_schema,
+                        compression=self._compression,
+                        flavor="spark",
+                    )
+                writer.write_table(table, row_group_size=len(rows))
+                total_rows += len(rows)
+
+            if writer is not None:
+                writer.close()
+                writer = None
+                temp_path.replace(final_path)
+        except Exception:
+            if writer is not None:
+                writer.close()
+            temp_path.unlink(missing_ok=True)
+            raise
 
         if all_extra_fields:
             logger.warning(
