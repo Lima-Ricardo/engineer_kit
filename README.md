@@ -34,7 +34,7 @@ The core is backend-agnostic. **DuckDB, Parquet, Delta Lake, dbt and the localho
 - stable Bronze contract with `_raw` and `_extra`;
 - bounded-memory batch writes;
 - backend-independent `StateStore`, `Destination` and `RunLogBackend` contracts;
-- deterministic ingestion identity for idempotent retries in official destinations;
+- deterministic checkpoint-transition identity for idempotent retries in official destinations;
 - declarative YAML pipelines;
 - optional dbt/local UI integrations.
 
@@ -140,6 +140,15 @@ result = build_pipeline(config, conn).run()
 conn.close()
 ```
 
+Or execute YAML directly from the CLI:
+
+```bash
+engineer_kit run-config pipelines/orders.yaml
+engineer_kit adapters
+```
+
+`run-config` opens `destination.path` for DuckDB (falling back to `warehouse.duckdb`) and needs no database runtime object for Parquet/Delta.
+
 ## Bronze contract
 
 Official destinations persist declared API fields as strings/null. The declared `dtype` is a **logical analytical type** used by staging/transform tooling rather than a type inferred from every API response.
@@ -178,9 +187,9 @@ StateStore checkpoint
 RunLogBackend audit
 ```
 
-If destination persistence fails, the checkpoint does not advance. If destination persistence succeeds but the state checkpoint fails, the same window is retried.
+If destination persistence fails, the checkpoint does not advance. If destination persistence succeeds but the state checkpoint fails, the same checkpoint transition is retried.
 
-Official destinations receive a deterministic `ingestion_key` for that connector/window, so the retry replaces the previous representation of the same window instead of duplicating it:
+Official destinations receive a deterministic `ingestion_key` derived from **connector + incremental window + checkpoint-before**. A retry after a state failure therefore gets the same key and replaces the previous representation instead of duplicating it. Once the checkpoint succeeds, the checkpoint-before changes, so a later successful run receives another key even if it occurs on the same calendar day.
 
 - DuckDB: transactional delete/rewrite of that ingestion key;
 - Parquet: deterministic final file promoted only after success;
@@ -265,7 +274,7 @@ from engineer_kit import register_destination
 register_destination("company_lake", "company_ingestion.runtime:build_destination")
 ```
 
-Equivalent functions exist for state and audit backends.
+Equivalent functions exist for state and audit backends. `auto` only resolves known natural relationships (DuckDB→DuckDB, Parquet→file metadata, Delta→Delta); a custom destination must register or explicitly select compatible state/audit backends.
 
 ## Security
 
@@ -283,8 +292,9 @@ CI validates:
 - Python 3.10 / 3.11 / 3.12;
 - DuckDB, Parquet and Delta adapters;
 - checkpoint failure and retry idempotency;
+- successful same-day runs after checkpoint advancement;
 - schema drift and batch behavior;
-- local UI;
+- local UI and declarative CLI;
 - Ruff, Bandit and dependency audit;
 - wheel/sdist build validation.
 
@@ -348,6 +358,7 @@ pip install engineer_kit             # core
 pip install "engineer_kit[duckdb]"  # local sem UI/dbt
 pip install "engineer_kit[parquet]" # arquivos Bronze
 pip install "engineer_kit[delta]"   # Lakehouse Delta
+pip install "engineer_kit[platform]"# perfil Lakehouse/Delta
 pip install "engineer_kit[local]"   # DuckDB + UI + dbt
 ```
 
@@ -406,7 +417,7 @@ run_log:
   type: auto
 ```
 
-`auto` usa o backend natural do destination, mas cada parte pode ser configurada independentemente.
+`auto` usa o backend natural conhecido do destination, mas cada parte pode ser configurada independentemente. Um adapter customizado não cai silenciosamente em arquivos locais: ele deve registrar ou selecionar state/audit compatíveis.
 
 ## Bronze e tipos
 
@@ -426,7 +437,18 @@ O staging/dbt pode transformar isso no tipo físico apropriado. Se a API adicion
 
 O watermark só avança depois da transação da Bronze.
 
-Os adapters oficiais também tornam o retry da mesma janela idempotente usando `_ingestion_key`, reduzindo o risco clássico de duplicação quando a escrita terminou mas a persistência do checkpoint falhou.
+Os adapters oficiais também tornam o retry idempotente usando `_ingestion_key`. A chave identifica a transição de checkpoint (connector + janela + checkpoint anterior): uma falha de state reutiliza a mesma chave; depois de um checkpoint bem-sucedido, uma nova execução recebe outra chave mesmo no mesmo dia.
+
+## CLI declarativa
+
+Além de pipelines Python, um YAML pode ser executado diretamente:
+
+```bash
+engineer_kit run-config pipelines/orders.yaml
+engineer_kit adapters
+```
+
+Isso facilita jobs em Databricks/Fabric, CI e outros orquestradores sem exigir um módulo Python intermediário.
 
 ## Interface localhost
 
