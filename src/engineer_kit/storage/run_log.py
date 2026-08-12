@@ -1,92 +1,58 @@
-"""Contratos e implementacoes para registrar execucoes de ingestao.
+"""Backend-agnostic contracts for ingestion run audit events.
 
-O core do Pipeline depende apenas de :class:`RunLogBackend`. Onde os
-logs persistem e uma decisao de infraestrutura: DuckDB no modo local,
-Delta/Lakehouse em plataformas de dados, ou uma implementacao customizada.
-
-`RunLogStore` e mantido como alias compativel da implementacao DuckDB
-para nao quebrar codigo existente.
+The Pipeline depends only on :class:`RunLogBackend`. Concrete persistence
+backends live in adapters so importing the core does not require DuckDB or
+any Lakehouse-specific package.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-import duckdb
-
 
 @dataclass(frozen=True)
 class RunLogEntry:
-    """Evento auditavel produzido ao final de uma tentativa de carga."""
+    """Auditable event produced at the end of one ingestion attempt."""
 
     connector_name: str
     started_at: datetime
     finished_at: datetime
-    status: str  # "success" ou "error"
+    status: str
     rows_loaded: int
     extra_fields_seen: list[str]
     error_message: Optional[str] = None
 
 
 class RunLogBackend(ABC):
-    """Porta de observabilidade usada pelo Pipeline.
-
-    Uma implementacao precisa apenas persistir um :class:`RunLogEntry`.
-    Isso permite trocar DuckDB por Delta, uma tabela SQL, um servico de
-    observabilidade ou um backend em memoria sem alterar a orquestracao.
-    """
+    """Observability port used by the Pipeline."""
 
     @abstractmethod
     def record(self, entry: RunLogEntry) -> None:
-        """Persiste um evento de execucao."""
+        """Persist one execution event."""
 
 
-class DuckDBRunLogStore(RunLogBackend):
-    """RunLogBackend zero-infra persistido em `_meta.run_log` no DuckDB."""
-
-    _SCHEMA = "_meta"
-    _TABLE = "run_log"
-
-    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-        self._conn = conn
-        self._ensure_table()
-
-    def _ensure_table(self) -> None:
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._SCHEMA}")
-        self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self._SCHEMA}.{self._TABLE} (
-                connector_name VARCHAR,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP,
-                status VARCHAR,
-                rows_loaded BIGINT,
-                extra_fields_seen VARCHAR,
-                error_message VARCHAR
-            )
-            """
-        )
-
-    def record(self, entry: RunLogEntry) -> None:
-        self._conn.execute(
-            f"INSERT INTO {self._SCHEMA}.{self._TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                entry.connector_name,
-                entry.started_at,
-                entry.finished_at,
-                entry.status,
-                entry.rows_loaded,
-                json.dumps(entry.extra_fields_seen, ensure_ascii=False),
-                entry.error_message,
-            ],
-        )
+_DUCKDB_EXPORTS = {"DuckDBRunLogStore", "RunLogStore"}
 
 
-# Compatibilidade com a API 0.1: codigo existente que instancia
-# RunLogStore(conn) continua usando DuckDB, enquanto codigo novo pode
-# explicitar o backend.
-RunLogStore = DuckDBRunLogStore
+def __getattr__(name: str):
+    """Keep 0.1 DuckDB imports compatible without making DuckDB mandatory."""
+    if name not in _DUCKDB_EXPORTS:
+        raise AttributeError(name)
+
+    try:
+        from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
+    except ModuleNotFoundError as exc:
+        if exc.name == "duckdb":
+            raise ModuleNotFoundError(
+                "DuckDB support is optional. Install it with "
+                "`pip install \"engineer_kit[duckdb]\"`."
+            ) from None
+        raise
+
+    return DuckDBRunLogStore
+
+
+__all__ = ["RunLogBackend", "RunLogEntry", "DuckDBRunLogStore", "RunLogStore"]
