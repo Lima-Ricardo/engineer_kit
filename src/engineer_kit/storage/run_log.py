@@ -25,6 +25,7 @@ class RunLogEntry:
     extra_fields_seen: list[str]
     error_message: Optional[str] = None
     run_id: Optional[str] = None
+    ingestion_key: Optional[str] = None
     destination: Optional[str] = None
     window_start: Optional[date] = None
     window_end: Optional[date] = None
