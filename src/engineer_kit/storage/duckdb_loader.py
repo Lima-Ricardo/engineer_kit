@@ -38,8 +38,11 @@ class DuckDBLoader(Destination):
 
     Declared API fields are always stored as ``VARCHAR`` in Bronze. The
     ``ColumnSpec.dtype`` value is the analytical target type used by the dbt
-    staging scaffold, not a source-ingestion type. This keeps schema drift
-    from turning a transient API type change into a failed raw load.
+    staging scaffold, not a source-ingestion type.
+
+    A complete ``load`` call is one DuckDB transaction. If record generation
+    or a later batch fails, earlier batches from the same run are rolled back,
+    so the unchanged watermark can safely retry the same extraction window.
     """
 
     def __init__(
@@ -77,20 +80,25 @@ class DuckDBLoader(Destination):
         total_rows = 0
         all_extra_fields: set[str] = set()
         started_at = time.monotonic()
-
         bar_format = "tempo {elapsed} | {desc} | {n_fmt} registros gravados ({rate_fmt})"
-        with tqdm(desc=full_table, unit=" registros", bar_format=bar_format) as progress:
-            for batch in iter_in_batches(records, self._batch_size):
-                rows, extra_fields = build_bronze_rows(
-                    connector_name, endpoint, schema, batch
-                )
-                all_extra_fields.update(extra_fields)
 
-                columns = schema.column_names() + METADATA_COLUMNS
-                self._insert_rows(full_table, columns, rows)
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            with tqdm(desc=full_table, unit=" registros", bar_format=bar_format) as progress:
+                for batch in iter_in_batches(records, self._batch_size):
+                    rows, extra_fields = build_bronze_rows(
+                        connector_name, endpoint, schema, batch
+                    )
+                    all_extra_fields.update(extra_fields)
 
-                total_rows += len(rows)
-                progress.update(len(rows))
+                    columns = schema.column_names() + METADATA_COLUMNS
+                    self._insert_rows(full_table, columns, rows)
+                    total_rows += len(rows)
+                    progress.update(len(rows))
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
         elapsed = time.monotonic() - started_at
 
@@ -117,7 +125,6 @@ class DuckDBLoader(Destination):
             full_table,
             elapsed,
         )
-
         return LoadResult(
             table=full_table,
             rows_loaded=total_rows,
