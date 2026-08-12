@@ -1,25 +1,30 @@
-"""Grava lotes de registros extraidos por um conector na camada Bronze do DuckDB.
+"""DuckDB Bronze destination.
 
-DuckDB e uma implementacao local/zero-infra de :class:`Destination`.
-O core do engineer_kit nao depende dele: outros adapters podem persistir
-a mesma carga em Parquet, Delta/Lakehouse ou backends customizados.
+DuckDB is the local/zero-infrastructure implementation of ``Destination``.
+The ingestion core does not depend on it; other adapters reuse the same
+Bronze row contract and batching utilities.
 """
 
 from __future__ import annotations
 
-import itertools
-import json
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
 import duckdb
 from tqdm import tqdm
 
 from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
+from engineer_kit.storage.batching import (
+    DEFAULT_BATCH_SIZE,
+    MAX_BATCH_SIZE,
+    MIN_BATCH_SIZE,
+    InvalidBatchSizeError,
+    iter_in_batches,
+    validate_batch_size,
+)
+from engineer_kit.storage.bronze import METADATA_COLUMNS, build_bronze_rows
 from engineer_kit.storage.destination import Destination, LoadResult
-from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
@@ -27,37 +32,9 @@ from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.storage")
 
-_METADATA_COLUMNS = ["_source", "_endpoint", "_ingested_at", "_raw", "_extra"]
-
-MIN_BATCH_SIZE = 100
-MAX_BATCH_SIZE = 100_000
-DEFAULT_BATCH_SIZE = 5000
-
-
-class InvalidBatchSizeError(ValueError):
-    """Levantado quando batch_size esta fora dos limites globais permitidos."""
-
-
-def _validate_batch_size(batch_size: int) -> int:
-    if not (MIN_BATCH_SIZE <= batch_size <= MAX_BATCH_SIZE):
-        raise InvalidBatchSizeError(
-            f"batch_size={batch_size} fora do intervalo permitido "
-            f"[{MIN_BATCH_SIZE}, {MAX_BATCH_SIZE}]."
-        )
-    return batch_size
-
-
-def _iter_in_batches(records: Iterator[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
-    """Consome o iterator em fatias sem materializar a extracao inteira."""
-    while True:
-        batch = list(itertools.islice(records, batch_size))
-        if not batch:
-            return
-        yield batch
-
 
 class DuckDBLoader(Destination):
-    """Destination local que materializa a Bronze no DuckDB."""
+    """Destination that materializes Bronze tables in DuckDB."""
 
     def __init__(
         self,
@@ -67,17 +44,17 @@ class DuckDBLoader(Destination):
     ) -> None:
         self._conn = conn
         self._db_schema = validate_identifier(schema, "schema")
-        self._batch_size = _validate_batch_size(batch_size)
+        self._batch_size = validate_batch_size(batch_size)
         self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")
         self._ensured_tables: set[str] = set()
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
-        """Compatibilidade: expoe a conexao recebida pelo adapter."""
+        """Compatibility accessor for callers that already use the connection."""
         return self._conn
 
     def default_run_log_backend(self) -> RunLogBackend:
-        """Usa a mesma conexao local para auditoria sem o Pipeline conhecer DuckDB."""
+        """Persist audit events in the same local DuckDB connection."""
         return DuckDBRunLogStore(self._conn)
 
     def load(
@@ -97,11 +74,13 @@ class DuckDBLoader(Destination):
 
         bar_format = "tempo {elapsed} | {desc} | {n_fmt} registros gravados ({rate_fmt})"
         with tqdm(desc=full_table, unit=" registros", bar_format=bar_format) as progress:
-            for batch in _iter_in_batches(iter(records), self._batch_size):
-                rows, extra_fields = self._build_rows(connector_name, endpoint, schema, batch)
+            for batch in iter_in_batches(records, self._batch_size):
+                rows, extra_fields = build_bronze_rows(
+                    connector_name, endpoint, schema, batch
+                )
                 all_extra_fields.update(extra_fields)
 
-                columns = schema.column_names() + _METADATA_COLUMNS
+                columns = schema.column_names() + METADATA_COLUMNS
                 self._insert_rows(full_table, columns, rows)
 
                 total_rows += len(rows)
@@ -139,33 +118,6 @@ class DuckDBLoader(Destination):
             extra_fields_seen=sorted(all_extra_fields),
         )
 
-    def _build_rows(
-        self,
-        connector_name: str,
-        endpoint: str,
-        schema: EndpointSchema,
-        batch: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], set[str]]:
-        known_columns = set(schema.column_names())
-        now = datetime.now(timezone.utc)
-        extra_fields: set[str] = set()
-        rows = []
-
-        for original in batch:
-            flat = flatten_record(original)
-            extras = {key: value for key, value in flat.items() if key not in known_columns}
-            extra_fields.update(extras.keys())
-
-            row = {col: flat.get(col) for col in schema.column_names()}
-            row["_source"] = connector_name
-            row["_endpoint"] = endpoint
-            row["_ingested_at"] = now
-            row["_raw"] = json.dumps(original, ensure_ascii=False, default=str)
-            row["_extra"] = json.dumps(extras, ensure_ascii=False) if extras else None
-            rows.append(row)
-
-        return rows, extra_fields
-
     def _ensure_table(self, full_table: str, schema: EndpointSchema) -> None:
         if full_table in self._ensured_tables:
             return
@@ -178,8 +130,10 @@ class DuckDBLoader(Destination):
         )
         self._ensured_tables.add(full_table)
 
-    def _insert_rows(self, full_table: str, columns: list[str], rows: list[dict[str, Any]]) -> None:
-        column_list = ", ".join(f'"{c}"' for c in columns)
+    def _insert_rows(
+        self, full_table: str, columns: list[str], rows: list[dict[str, Any]]
+    ) -> None:
+        column_list = ", ".join(f'"{column}"' for column in columns)
         self._conn.execute(
             f"INSERT INTO {full_table} ({column_list}) "
             f"SELECT unnest(row, recursive := true) "
@@ -189,3 +143,12 @@ class DuckDBLoader(Destination):
 
 
 DuckDBDestination = DuckDBLoader
+
+__all__ = [
+    "DuckDBLoader",
+    "DuckDBDestination",
+    "DEFAULT_BATCH_SIZE",
+    "MIN_BATCH_SIZE",
+    "MAX_BATCH_SIZE",
+    "InvalidBatchSizeError",
+]
