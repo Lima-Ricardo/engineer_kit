@@ -24,7 +24,12 @@ from engineer_kit.storage.batching import (
     validate_batch_size,
 )
 from engineer_kit.storage.bronze import METADATA_COLUMNS, build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
+from engineer_kit.storage.destination import (
+    Destination,
+    LoadContext,
+    LoadResult,
+    WriteMode,
+)
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
@@ -32,13 +37,27 @@ from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.storage.duckdb")
 
+_INTERNAL_METADATA_TYPES = {
+    "_source": "VARCHAR",
+    "_endpoint": "VARCHAR",
+    "_ingested_at": "TIMESTAMP",
+    "_run_id": "VARCHAR",
+    "_ingestion_key": "VARCHAR",
+    "_window_start": "DATE",
+    "_window_end": "DATE",
+    "_raw": "VARCHAR",
+    "_extra": "VARCHAR",
+}
+
 
 class DuckDBLoader(Destination):
     """Materialize the portable Bronze contract in DuckDB.
 
-    A complete ``load`` is one DuckDB transaction. If record generation or a
-    later batch fails, earlier batches from the same run are rolled back, so an
-    unchanged watermark can retry the same extraction window safely.
+    A complete load is one transaction. In APPEND mode, official Pipeline
+    retries first remove rows with the same deterministic ``_ingestion_key``
+    inside that transaction, then rewrite the window. This covers the case
+    where data committed successfully but the subsequent state checkpoint did
+    not, without changing the legacy ``load`` API for direct callers.
     """
 
     def __init__(
@@ -57,7 +76,6 @@ class DuckDBLoader(Destination):
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
-        """Compatibility accessor for callers that already use the connection."""
         return self._conn
 
     @property
@@ -74,6 +92,32 @@ class DuckDBLoader(Destination):
         schema: EndpointSchema,
         records: Iterable[dict[str, Any]],
     ) -> LoadResult:
+        return self._load(
+            connector_name,
+            endpoint,
+            schema,
+            records,
+            LoadContext.adhoc(connector_name),
+        )
+
+    def load_with_context(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
+        return self._load(connector_name, endpoint, schema, records, context)
+
+    def _load(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
         table_name = validate_identifier(endpoint, "endpoint")
         full_table = f"{self._db_schema}.{table_name}"
         self._ensure_table(full_table, schema)
@@ -87,11 +131,20 @@ class DuckDBLoader(Destination):
         try:
             if self._write_mode is WriteMode.OVERWRITE:
                 self._conn.execute(f"DELETE FROM {full_table}")
+            else:
+                self._conn.execute(
+                    f'DELETE FROM {full_table} WHERE "_ingestion_key" = ?',
+                    [context.ingestion_key],
+                )
 
             with tqdm(desc=full_table, unit=" registros", bar_format=bar_format) as progress:
                 for batch in iter_in_batches(records, self._batch_size):
                     rows, extra_fields = build_bronze_rows(
-                        connector_name, endpoint, schema, batch
+                        connector_name,
+                        endpoint,
+                        schema,
+                        batch,
+                        context=context,
                     )
                     all_extra_fields.update(extra_fields)
                     columns = schema.column_names() + METADATA_COLUMNS
@@ -139,15 +192,21 @@ class DuckDBLoader(Destination):
     def _ensure_table(self, full_table: str, schema: EndpointSchema) -> None:
         if full_table in self._ensured_tables:
             return
+
         column_defs = ", ".join(f'"{column.name}" VARCHAR' for column in schema.columns)
-        if column_defs:
-            column_defs += ", "
-        self._conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {full_table} ("
-            f"{column_defs}"
-            f'"_source" VARCHAR, "_endpoint" VARCHAR, "_ingested_at" TIMESTAMP, '
-            f'"_raw" VARCHAR, "_extra" VARCHAR)'
+        metadata_defs = ", ".join(
+            f'"{name}" {dtype}' for name, dtype in _INTERNAL_METADATA_TYPES.items()
         )
+        all_defs = ", ".join(part for part in (column_defs, metadata_defs) if part)
+        self._conn.execute(f"CREATE TABLE IF NOT EXISTS {full_table} ({all_defs})")
+
+        # Internal metadata is library-owned and may evolve safely between
+        # engineer_kit versions. Declared API columns are still never ALTERed
+        # automatically, preserving the explicit source-schema contract.
+        for name, dtype in _INTERNAL_METADATA_TYPES.items():
+            self._conn.execute(
+                f'ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS "{name}" {dtype}'
+            )
         self._ensured_tables.add(full_table)
 
     def _insert_rows(
