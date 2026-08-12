@@ -3,6 +3,7 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
+from engineer_kit.config.pipeline_config import load_pipeline_config
 from engineer_kit.ui.app import create_app
 
 AUTH_HEADER = {
@@ -32,6 +33,9 @@ def test_new_pipeline_form_renders(client):
     assert response.status_code == 200
     assert "Novo pipeline" in response.text
     assert "page" in response.text  # opcao de paginacao presente
+    assert "ExtractionSession" in response.text
+    assert 'name="extraction_batch_size"' in response.text
+    assert 'value="25000"' in response.text
 
 
 def test_create_pipeline_via_form_then_appears_on_dashboard(client, tmp_path):
@@ -46,6 +50,7 @@ def test_create_pipeline_via_form_then_appears_on_dashboard(client, tmp_path):
         "page_param": "page",
         "page_size_param": "per_page",
         "page_size": "50",
+        "extraction_batch_size": "12500",
         "incremental_mode": "ingestion_date",
         "date_param_start": "since",
         "date_param_end": "until",
@@ -55,10 +60,17 @@ def test_create_pipeline_via_form_then_appears_on_dashboard(client, tmp_path):
         "destination_schema": "bronze",
         "batch_size": "1000",
     }
-    response = client.post("/pipelines/save", data=form_data, headers=AUTH_HEADER, follow_redirects=False)
+    response = client.post(
+        "/pipelines/save",
+        data=form_data,
+        headers=AUTH_HEADER,
+        follow_redirects=False,
+    )
     assert response.status_code == 303
     assert response.headers["location"] == "/pipelines/test_pipeline"
-    assert (tmp_path / "pipelines" / "test_pipeline.yaml").exists()
+    config_path = tmp_path / "pipelines" / "test_pipeline.yaml"
+    assert config_path.exists()
+    assert load_pipeline_config(config_path).connector.extraction_batch_size == 12_500
 
     dashboard = client.get("/", headers=AUTH_HEADER)
     assert "test_pipeline" in dashboard.text
@@ -67,7 +79,12 @@ def test_create_pipeline_via_form_then_appears_on_dashboard(client, tmp_path):
 def test_create_pipeline_missing_base_url_shows_error(client):
     response = client.post(
         "/pipelines/save",
-        data={"name": "sem_url", "method": "GET", "pagination_type": "none", "incremental_mode": "ingestion_date"},
+        data={
+            "name": "sem_url",
+            "method": "GET",
+            "pagination_type": "none",
+            "incremental_mode": "ingestion_date",
+        },
         headers=AUTH_HEADER,
     )
     assert response.status_code == 400
