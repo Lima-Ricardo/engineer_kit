@@ -231,8 +231,12 @@ def create_app(
             ).fetchall()
             rows = []
             for schema, table in tables:
+                quoted_schema = _quote_duckdb_identifier(schema)
+                quoted_table = _quote_duckdb_identifier(table)
+                # Identifiers come from DuckDB's own catalog and are escaped by
+                # _quote_duckdb_identifier before interpolation.
                 count = conn.execute(
-                    f'SELECT count(*) FROM "{schema}"."{table}"'
+                    f"SELECT count(*) FROM {quoted_schema}.{quoted_table}"  # nosec B608
                 ).fetchone()[0]
                 rows.append({"schema": schema, "table": table, "rows": count})
         finally:
@@ -248,10 +252,14 @@ def create_app(
     ):
         _validate_identifier(schema)
         _validate_identifier(table)
+        quoted_schema = _quote_duckdb_identifier(schema)
+        quoted_table = _quote_duckdb_identifier(table)
         conn = _warehouse_conn()
         try:
+            # Route identifiers pass strict validation and are escaped before use.
             result = conn.execute(
-                f'SELECT * FROM "{schema}"."{table}" LIMIT {PREVIEW_ROW_LIMIT}'
+                f"SELECT * FROM {quoted_schema}.{quoted_table} "  # nosec B608
+                f"LIMIT {PREVIEW_ROW_LIMIT}"
             )
             columns = [description[0] for description in result.description]
             rows = result.fetchall()
@@ -420,3 +428,8 @@ def _validate_identifier(name: str) -> None:
 
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
         raise HTTPException(status_code=400, detail=f"Nome invalido: '{name}'.")
+
+
+def _quote_duckdb_identifier(name: str) -> str:
+    """Quote an identifier using SQL-standard doubled double-quotes."""
+    return '"' + str(name).replace('"', '""') + '"'
