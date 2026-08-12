@@ -3,7 +3,7 @@
 The top-level package exposes the backend-agnostic core eagerly and loads
 optional/local integrations only when the user asks for them. This keeps the
 simple ``from engineer_kit import RestConnector`` ergonomics without forcing
-DuckDB, dbt or a Lakehouse runtime into every installation.
+DuckDB, Arrow, Delta or dbt into every installation.
 """
 
 from __future__ import annotations
@@ -15,7 +15,11 @@ from engineer_kit.connectors.api_connector import (
     VALID_HTTP_METHODS,
 )
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
-from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
+from engineer_kit.connectors.incremental import (
+    IncrementalMode,
+    IncrementalStrategy,
+    IncrementalWindow,
+)
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import (
     NEXT_URL_KEY,
@@ -32,7 +36,12 @@ from engineer_kit.connectors.pagination import (
 from engineer_kit.connectors.rest import DateParams, RestConnector
 from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, NoAuth
 from engineer_kit.http.client import HttpClient, HttpRequestError, InsecureUrlError
-from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult, PipelineSource, StepResult
+from engineer_kit.orchestration.pipeline import (
+    Pipeline,
+    PipelineResult,
+    PipelineSource,
+    StepResult,
+)
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Trigger
 from engineer_kit.security.secrets import (
@@ -50,7 +59,11 @@ from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 from engineer_kit.storage.state_store import StateStore, Watermark
 from engineer_kit.terminal_log import visual_logger
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
-from engineer_kit.transform.scaffold import generate_sources_yml, generate_staging_model, write_staging_scaffold
+from engineer_kit.transform.scaffold import (
+    generate_sources_yml,
+    generate_staging_model,
+    write_staging_scaffold,
+)
 
 __version__ = "0.1.0"
 
@@ -85,12 +98,39 @@ _DUCKDB_EXPORTS = {
     "RunLogStore",
 }
 
+_PARQUET_EXPORTS = {"ParquetDestination"}
+_DELTA_EXPORTS = {"DeltaDestination", "DeltaStateStore", "DeltaRunLogStore"}
+
 
 def __getattr__(name: str):
     if name in _CONFIG_EXPORTS:
         from engineer_kit.config import pipeline_config
 
         return getattr(pipeline_config, name)
+
+    if name in _PARQUET_EXPORTS:
+        try:
+            from engineer_kit.adapters.parquet import ParquetDestination
+        except ModuleNotFoundError as exc:
+            if exc.name == "pyarrow":
+                raise ModuleNotFoundError(
+                    "Parquet support is optional. Install it with "
+                    "`pip install \"engineer_kit[parquet]\"`."
+                ) from None
+            raise
+        return ParquetDestination
+
+    if name in _DELTA_EXPORTS:
+        try:
+            from engineer_kit.adapters import delta
+        except ModuleNotFoundError as exc:
+            if exc.name in {"deltalake", "pyarrow"}:
+                raise ModuleNotFoundError(
+                    "Delta support is optional. Install it with "
+                    "`pip install \"engineer_kit[delta]\"`."
+                ) from None
+            raise
+        return getattr(delta, name)
 
     if name in _DUCKDB_EXPORTS:
         try:
@@ -185,6 +225,8 @@ __all__ = [
     "LoadResult",
     "DuckDBLoader",
     "DuckDBDestination",
+    "ParquetDestination",
+    "DeltaDestination",
     "DEFAULT_BATCH_SIZE",
     "MIN_BATCH_SIZE",
     "MAX_BATCH_SIZE",
@@ -192,10 +234,12 @@ __all__ = [
     "StateStore",
     "DuckDBStateStore",
     "IngestionStateStore",
+    "DeltaStateStore",
     "Watermark",
     "RunLogBackend",
     "DuckDBRunLogStore",
     "RunLogStore",
+    "DeltaRunLogStore",
     "RunLogEntry",
     "flatten_record",
     "InvalidIdentifierError",
