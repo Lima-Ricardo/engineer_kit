@@ -7,6 +7,8 @@ name = "engineer_kit"
 version = "0.1.0"
 description = "Biblioteca de ingestao de APIs: conectores -> DuckDB -> dbt"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Ricardo Alex De Lima" }]
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
@@ -15,6 +17,8 @@ dependencies = [
     "apscheduler>=3.10",
     "typer>=0.12",
     "pyyaml>=6.0",
+    "loguru>=0.7",
+    "tqdm>=4.66",
 ]
 
 [project.scripts]

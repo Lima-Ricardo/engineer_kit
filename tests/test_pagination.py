@@ -1,5 +1,9 @@
 from engineer_kit.connectors.pagination import (
+    NEXT_URL_KEY,
+    STANDARD_PAGINATION_TYPES,
     CursorPagination,
+    LinkHeaderPagination,
+    NextUrlPagination,
     NoPagination,
     OffsetPagination,
     PageNumberPagination,
@@ -49,3 +53,42 @@ def test_cursor_pagination_reads_cursor_from_raw_body():
 
     page_non_dict_raw = ParsedPage(records=[{}], raw=[1, 2, 3])
     assert strategy.next_params(page_non_dict_raw, {}) is None
+
+
+def test_link_header_pagination_extracts_next_url_from_header():
+    strategy = LinkHeaderPagination()
+    page = ParsedPage(
+        records=[{}],
+        raw=None,
+        headers={"Link": '<https://api.test/items?page=2>; rel="next", <https://api.test/items?page=1>; rel="prev"'},
+    )
+    next_params = strategy.next_params(page, {})
+    assert next_params == {NEXT_URL_KEY: "https://api.test/items?page=2"}
+
+
+def test_link_header_pagination_stops_without_next_rel():
+    strategy = LinkHeaderPagination()
+    page_no_header = ParsedPage(records=[{}], raw=None, headers={})
+    assert strategy.next_params(page_no_header, {}) is None
+
+    page_only_prev = ParsedPage(
+        records=[{}], raw=None, headers={"Link": '<https://api.test/items?page=1>; rel="prev"'}
+    )
+    assert strategy.next_params(page_only_prev, {}) is None
+
+
+def test_next_url_pagination_reads_url_field_from_body():
+    strategy = NextUrlPagination(next_url_field="next")
+    page_with_next = ParsedPage(records=[{}], raw={"next": "https://api.test/items?cursor=abc"})
+    assert strategy.next_params(page_with_next, {}) == {
+        NEXT_URL_KEY: "https://api.test/items?cursor=abc"
+    }
+
+    page_without_next = ParsedPage(records=[{}], raw={"next": None})
+    assert strategy.next_params(page_without_next, {}) is None
+
+
+def test_standard_pagination_types_catalog_lists_all_strategies():
+    assert set(STANDARD_PAGINATION_TYPES) == {"none", "page", "offset", "cursor", "link_header", "next_url"}
+    assert STANDARD_PAGINATION_TYPES["page"] is PageNumberPagination
+    assert STANDARD_PAGINATION_TYPES["link_header"] is LinkHeaderPagination

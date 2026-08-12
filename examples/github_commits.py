@@ -17,17 +17,23 @@ from pathlib import Path
 
 import duckdb
 
-from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy
-from engineer_kit.connectors.pagination import PageNumberPagination
-from engineer_kit.connectors.rest import DateParams, RestConnector
-from engineer_kit.http.auth import NoAuth
-from engineer_kit.orchestration.pipeline import Pipeline, PipelineSource
-from engineer_kit.storage.destination import Destination
-from engineer_kit.storage.duckdb_loader import DuckDBLoader
-from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
-from engineer_kit.storage.state_store import IngestionStateStore
-from engineer_kit.transform.dbt_runner import DbtRunner
-from engineer_kit.transform.scaffold import write_staging_scaffold
+from engineer_kit import (
+    ColumnSpec,
+    DateParams,
+    DbtRunner,
+    Destination,
+    DuckDBLoader,
+    EndpointSchema,
+    IncrementalMode,
+    IngestionStateStore,
+    NoAuth,
+    PageNumberPagination,
+    Pipeline,
+    PipelineSource,
+    RestConnector,
+    RunLogStore,
+    write_staging_scaffold,
+)
 
 DB_PATH = "warehouse.duckdb"
 OWNER, REPO = "psf", "requests"
@@ -52,25 +58,23 @@ COMMITS_SCHEMA = EndpointSchema(
 
 
 def build_pipeline(conn: duckdb.DuckDBPyConnection) -> Pipeline:
-    state_store = IngestionStateStore(conn)
-    incremental = IncrementalStrategy(
-        connector_name="github_commits",
-        state_store=state_store,
-        mode=IncrementalMode.DATA_DATE,
-        initial_start=date.today() - timedelta(days=30),
-    )
     connector = RestConnector(
         name="github_commits",
         base_url=f"https://api.github.com/repos/{OWNER}/{REPO}/commits",
-        incremental=incremental,
-        pagination=PageNumberPagination(page_param="page", page_size_param="per_page", page_size=20),
+        state_store=IngestionStateStore(conn),
+        incremental_mode=IncrementalMode.DATA_DATE,
+        initial_start=date.today() - timedelta(days=30),
+        date_field="commit.author.date",  # caminho na resposta bruta da API, antes do flatten
+        pagination=PageNumberPagination(page_size=20),
+        method="GET",
         auth=NoAuth(),
         date_params=DateParams(start="since", end="until", date_format="%Y-%m-%dT%H:%M:%SZ"),
     )
-    destination: Destination = DuckDBLoader(conn, schema="bronze")
+    destination: Destination = DuckDBLoader(conn, schema="bronze", batch_size=1000)
     return Pipeline(
         sources=[PipelineSource(connector=connector, schema=COMMITS_SCHEMA)],
         destination=destination,
+        run_log_store=RunLogStore(conn),
     )
 
 

@@ -1,7 +1,12 @@
 import duckdb
 import pytest
 
-from engineer_kit.storage.duckdb_loader import DuckDBLoader
+from engineer_kit.storage.duckdb_loader import (
+    MAX_BATCH_SIZE,
+    MIN_BATCH_SIZE,
+    DuckDBLoader,
+    InvalidBatchSizeError,
+)
 from engineer_kit.storage.identifiers import InvalidIdentifierError
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 
@@ -113,3 +118,25 @@ def test_invalid_schema_name_is_rejected():
 def test_invalid_column_dtype_is_rejected():
     with pytest.raises(InvalidIdentifierError):
         ColumnSpec("valor", dtype="VARCHAR); DROP TABLE bronze.commits; --")
+
+
+def test_batch_size_below_minimum_is_rejected(conn):
+    with pytest.raises(InvalidBatchSizeError):
+        DuckDBLoader(conn, schema="bronze", batch_size=MIN_BATCH_SIZE - 1)
+
+
+def test_batch_size_above_maximum_is_rejected(conn):
+    with pytest.raises(InvalidBatchSizeError):
+        DuckDBLoader(conn, schema="bronze", batch_size=MAX_BATCH_SIZE + 1)
+
+
+def test_small_batch_size_still_loads_everything_across_multiple_batches(conn, schema):
+    loader = DuckDBLoader(conn, schema="bronze", batch_size=MIN_BATCH_SIZE)
+    records = [{"sha": f"commit-{i}", "extra_field": f"drift-{i}"} for i in range(MIN_BATCH_SIZE * 3 + 7)]
+
+    result = loader.load("github_commits", "commits", schema, records)
+
+    assert result.rows_loaded == len(records)
+    assert result.extra_fields_seen == ["extra_field"]
+    total_in_db = conn.execute("SELECT count(*) FROM bronze.commits").fetchone()[0]
+    assert total_in_db == len(records)
