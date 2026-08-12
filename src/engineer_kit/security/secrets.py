@@ -1,14 +1,16 @@
 """Camada de segredos.
 
-Nenhum conector deve ler os.environ diretamente: tudo passa por um
-SecretProvider, para que trocar a fonte (env vars, Vault, AWS Secrets
-Manager) nao exija tocar em codigo de conector.
+Nenhum conector deve ler os.environ ou um arquivo diretamente: tudo
+passa por um SecretProvider, para que trocar a fonte (env vars, arquivo,
+Vault, AWS Secrets Manager) nao exija tocar em codigo de conector.
 """
 
 from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Union
 
 
 class SecretNotFoundError(KeyError):
@@ -37,7 +39,14 @@ class EnvSecretProvider(SecretProvider):
 
 
 class StaticSecretProvider(SecretProvider):
-    """Segredos fixos em memoria. Uso exclusivo em testes — nunca em producao."""
+    """Segredos fixos em memoria, definidos direto no codigo.
+
+    Uso pratico para scripts internos ou ambientes controlados onde
+    hardcode e uma escolha deliberada do time — mas nunca comite um
+    segredo real num repositorio compartilhado (mesmo privado). Para
+    producao ou qualquer repo versionado, prefira EnvSecretProvider ou
+    FileSecretProvider.
+    """
 
     def __init__(self, values: dict[str, str]) -> None:
         self._values = values
@@ -47,3 +56,28 @@ class StaticSecretProvider(SecretProvider):
             return self._values[key]
         except KeyError as exc:
             raise SecretNotFoundError(f"Segredo '{key}' nao encontrado no StaticSecretProvider.") from exc
+
+
+class FileSecretProvider(SecretProvider):
+    """Le segredos de arquivos no disco. Dois modos, pelo que `path` aponta:
+
+    - Um arquivo unico: toda chamada a `get()` devolve o conteudo desse
+      arquivo (sem espaco/quebra de linha nas pontas), ignorando `key`
+      -- uso simples de "um token, um arquivo".
+    - Um diretorio: `get(key)` le o arquivo `<path>/<key>` -- convencao
+      comum de Docker/Kubernetes secrets (`/run/secrets/<nome>`), um
+      arquivo por segredo.
+
+    Le o arquivo a cada chamada, sem cache: uma rotacao de token no
+    disco vale no proximo uso, sem precisar reiniciar o processo.
+    """
+
+    def __init__(self, path: Union[str, Path]) -> None:
+        self._path = Path(path)
+
+    def get(self, key: str) -> str:
+        target = self._path if self._path.is_file() else self._path / key
+        try:
+            return target.read_text(encoding="utf-8").strip()
+        except FileNotFoundError as exc:
+            raise SecretNotFoundError(f"Arquivo de segredo '{target}' nao encontrado.") from exc

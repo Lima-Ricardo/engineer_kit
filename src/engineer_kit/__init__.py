@@ -44,6 +44,7 @@ from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Trigger
 from engineer_kit.security.secrets import (
     EnvSecretProvider,
+    FileSecretProvider,
     SecretNotFoundError,
     SecretProvider,
     StaticSecretProvider,
@@ -110,6 +111,7 @@ __all__ = [
     "SecretProvider",
     "EnvSecretProvider",
     "StaticSecretProvider",
+    "FileSecretProvider",
     "SecretNotFoundError",
     # storage
     "EndpointSchema",

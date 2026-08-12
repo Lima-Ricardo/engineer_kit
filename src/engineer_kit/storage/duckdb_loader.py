@@ -78,6 +78,14 @@ class DuckDBLoader(Destination):
         self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")
         self._ensured_tables: set[str] = set()
 
+    @property
+    def connection(self) -> duckdb.DuckDBPyConnection:
+        """Expoe a conexao ja recebida no construtor -- quem criou o
+        loader ja tinha essa conexao; isso so permite que outras partes
+        da lib (ex.: Pipeline montando um RunLogStore) a reaproveitem
+        sem precisar guardar uma referencia separada."""
+        return self._conn
+
     def load(
         self,
         connector_name: str,

@@ -8,10 +8,17 @@ janela no proximo run, sem duplicar nem perder dado. Uma fonte falhar
 nao impede as outras de rodar: um problema numa API nao deveria travar
 o resto do pipeline.
 
-Se um RunLogStore for passado, cada execucao (inicio, fim, status,
-quantidade de registros, colunas novas fora do schema) fica registrada
-em `_meta.run_log` no DuckDB, alem de aparecer no log visual do
-terminal -- as duas saidas vem da mesma informacao.
+Caso comum: um conector so. `Pipeline(connector=..., schema=..., destination=...)`
+resolve isso direto, sem precisar montar PipelineSource nem uma lista.
+Para varios conectores no mesmo pipeline, use `sources=[PipelineSource(...), ...]`.
+
+`run_log=True` (padrao) registra cada execucao (inicio, fim, status,
+quantidade de registros, colunas novas fora do schema) em
+`_meta.run_log`, alem de aparecer no log visual do terminal -- as duas
+saidas vem da mesma informacao. So funciona automaticamente quando
+`destination` expoe `.connection` (como o DuckDBLoader); pra outro
+destino, ou pra apontar o run_log em outro lugar, passe
+`run_log_store=` explicitamente.
 """
 
 from __future__ import annotations
@@ -55,13 +62,54 @@ class PipelineResult:
 class Pipeline:
     def __init__(
         self,
-        sources: list[PipelineSource],
         destination: Destination,
+        connector: Optional[APIConnector] = None,
+        schema: Optional[EndpointSchema] = None,
+        sources: Optional[list[PipelineSource]] = None,
+        run_log: bool = True,
         run_log_store: Optional[RunLogStore] = None,
     ) -> None:
-        self._sources = sources
+        self._sources = self._resolve_sources(connector, schema, sources)
         self._destination = destination
-        self._run_log_store = run_log_store
+        self._run_log_store = self._resolve_run_log_store(run_log, run_log_store, destination)
+
+    @staticmethod
+    def _resolve_sources(
+        connector: Optional[APIConnector],
+        schema: Optional[EndpointSchema],
+        sources: Optional[list[PipelineSource]],
+    ) -> list[PipelineSource]:
+        if sources is not None:
+            if connector is not None or schema is not None:
+                raise ValueError(
+                    "Passe connector+schema (um conector) ou sources=[...] (varios) — nao os dois."
+                )
+            return sources
+        if connector is None or schema is None:
+            raise ValueError(
+                "Passe connector=... e schema=... (caso comum, um conector) "
+                "ou sources=[PipelineSource(...), ...] (varios conectores)."
+            )
+        return [PipelineSource(connector=connector, schema=schema)]
+
+    @staticmethod
+    def _resolve_run_log_store(
+        run_log: bool,
+        run_log_store: Optional[RunLogStore],
+        destination: Destination,
+    ) -> Optional[RunLogStore]:
+        if run_log_store is not None:
+            return run_log_store
+        if not run_log:
+            return None
+        connection = getattr(destination, "connection", None)
+        if connection is None:
+            raise ValueError(
+                "run_log=True precisa que destination exponha `.connection` (ex: DuckDBLoader). "
+                "Para outro destino, passe run_log_store=... explicitamente, ou run_log=False "
+                "para desligar o registro de execucao."
+            )
+        return RunLogStore(connection)
 
     def run(self) -> PipelineResult:
         return PipelineResult(steps=[self._run_step(source) for source in self._sources])

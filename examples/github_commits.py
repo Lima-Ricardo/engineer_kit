@@ -29,9 +29,7 @@ from engineer_kit import (
     NoAuth,
     PageNumberPagination,
     Pipeline,
-    PipelineSource,
     RestConnector,
-    RunLogStore,
     write_staging_scaffold,
 )
 
@@ -71,11 +69,8 @@ def build_pipeline(conn: duckdb.DuckDBPyConnection) -> Pipeline:
         date_params=DateParams(start="since", end="until", date_format="%Y-%m-%dT%H:%M:%SZ"),
     )
     destination: Destination = DuckDBLoader(conn, schema="bronze", batch_size=1000)
-    return Pipeline(
-        sources=[PipelineSource(connector=connector, schema=COMMITS_SCHEMA)],
-        destination=destination,
-        run_log_store=RunLogStore(conn),
-    )
+    return Pipeline(connector=connector, schema=COMMITS_SCHEMA, destination=destination)
+    # run_log=True e o padrao: registra a execucao em _meta.run_log automaticamente
 
 
 def main() -> None:

@@ -31,7 +31,7 @@ Import directly from the package — no need to know which submodule each class 
 from engineer_kit import (
     ColumnSpec, DateParams, DuckDBLoader, EndpointSchema, IncrementalMode,
     IngestionStateStore, NoAuth, PageNumberPagination,
-    Pipeline, PipelineSource, RestConnector, RunLogStore,
+    Pipeline, RestConnector,
 )
 ```
 
@@ -59,13 +59,16 @@ connector = RestConnector(
 schema = EndpointSchema.from_names(["sha", "commit_author_name", "commit_author_date", "commit_message"])
 
 pipeline = Pipeline(
-    sources=[PipelineSource(connector=connector, schema=schema)],
+    connector=connector,
+    schema=schema,
     destination=DuckDBLoader(conn, schema="bronze", batch_size=1000),  # 1000 records per batch
-    run_log_store=RunLogStore(conn),  # optional: records each run in _meta.run_log
+    # run_log=True is the default: records each run in _meta.run_log automatically
 )
 
 result = pipeline.run()
 ```
+
+For more than one connector in the same pipeline, use `sources=[PipelineSource(connector=..., schema=...), ...]` instead of `connector=`/`schema=`.
 
 After running the pipeline, generate the dbt staging from the same schema and run it:
 
@@ -148,7 +151,7 @@ This visual log (loguru) is separate from the library's internal technical loggi
 
 ## Security
 
-- Secrets are never hardcoded: they go through a `SecretProvider` (`EnvSecretProvider` by default).
+- Secrets always go through a `SecretProvider`: `EnvSecretProvider` (env vars), `FileSecretProvider` (reads from a file — one file per secret in a directory, Docker/Kubernetes-secrets style, or a single file; re-reads on every call, so rotating the file takes effect without restarting the process), or `StaticSecretProvider` (hardcoded in memory — a deliberate choice for internal scripts/controlled environments, never commit a real secret to a shared repo).
 - HTTPS is required by default (`allow_http=True` must be explicit).
 - Schema/table/column names are validated against a safe identifier pattern before entering any dynamically-built SQL — including files generated for dbt.
 - No log or error message ever exposes a secret, even when authentication is done via a query param: the URL used in logs and exception messages is always the pre-auth version, or redacted.
@@ -208,7 +211,7 @@ Import direto do pacote — sem precisar saber em qual submódulo cada classe mo
 from engineer_kit import (
     ColumnSpec, DateParams, DuckDBLoader, EndpointSchema, IncrementalMode,
     IngestionStateStore, NoAuth, PageNumberPagination,
-    Pipeline, PipelineSource, RestConnector, RunLogStore,
+    Pipeline, RestConnector,
 )
 ```
 
@@ -236,13 +239,16 @@ connector = RestConnector(
 schema = EndpointSchema.from_names(["sha", "commit_author_name", "commit_author_date", "commit_message"])
 
 pipeline = Pipeline(
-    sources=[PipelineSource(connector=connector, schema=schema)],
+    connector=connector,
+    schema=schema,
     destination=DuckDBLoader(conn, schema="bronze", batch_size=1000),  # 1000 registros por bloco
-    run_log_store=RunLogStore(conn),  # opcional: registra cada execucao em _meta.run_log
+    # run_log=True e o padrao: registra cada execucao em _meta.run_log automaticamente
 )
 
 result = pipeline.run()
 ```
+
+Para mais de um conector no mesmo pipeline, use `sources=[PipelineSource(connector=..., schema=...), ...]` em vez de `connector=`/`schema=`.
 
 Depois de rodar o pipeline, gere o staging do dbt a partir do mesmo schema e rode:
 
@@ -325,7 +331,7 @@ Esse log visual (loguru) é separado do logging técnico interno da biblioteca (
 
 ## Segurança
 
-- Segredos nunca são hardcoded: passam por um `SecretProvider` (`EnvSecretProvider` por padrão).
+- Segredos sempre passam por um `SecretProvider`: `EnvSecretProvider` (variável de ambiente), `FileSecretProvider` (lê de um arquivo — um arquivo por segredo numa pasta, estilo Docker/Kubernetes secrets, ou um arquivo único; relê a cada chamada, então rotacionar o arquivo vale sem reiniciar o processo), ou `StaticSecretProvider` (hardcoded em memória — escolha deliberada para script interno/ambiente controlado, nunca comite um segredo real num repositório compartilhado).
 - HTTPS é obrigatório por padrão (`allow_http=True` precisa ser explícito).
 - Nomes de schema/tabela/coluna são validados contra um identificador seguro antes de entrar em qualquer SQL montado dinamicamente — inclusive nos arquivos gerados para o dbt.
 - Nenhum log ou mensagem de erro expõe segredo, mesmo quando a autenticação é feita via query param: a URL usada em log e em mensagens de exceção é sempre a versão pré-autenticação ou redigida.

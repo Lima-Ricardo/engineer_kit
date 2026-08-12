@@ -25,6 +25,15 @@ class FakeConnector:
         self.watermark_committed = True
 
 
+class FakeDestinationWithoutConnection:
+    """Destination minima que nao expoe `.connection` -- simula um
+    destino futuro (ex: Redshift) sem suporte a run_log automatico."""
+
+    def load(self, connector_name, endpoint, schema, records):
+        rows = list(records)
+        return type("R", (), {"rows_loaded": len(rows), "extra_fields_seen": []})()
+
+
 @pytest.fixture
 def conn():
     return duckdb.connect()
@@ -35,21 +44,16 @@ def schema():
     return EndpointSchema.from_names(["id", "name"])
 
 
-def test_successful_run_commits_watermark_and_records_success(conn, schema):
+def test_simple_constructor_defaults_run_log_to_true(conn, schema):
+    """Caso comum: connector+schema direto, sem PipelineSource nem
+    RunLogStore manual -- run_log=True e o padrao."""
     connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
-    run_log = RunLogStore(conn)
-    pipeline = Pipeline(
-        sources=[PipelineSource(connector=connector, schema=schema)],
-        destination=DuckDBLoader(conn, schema="bronze"),
-        run_log_store=run_log,
-    )
+    pipeline = Pipeline(connector=connector, schema=schema, destination=DuckDBLoader(conn, schema="bronze"))
 
     result = pipeline.run()
 
     assert result.success
     assert connector.watermark_committed is True
-    assert result.steps[0].rows_loaded == 1
-
     log_row = conn.execute(
         "SELECT connector_name, status, rows_loaded, error_message FROM _meta.run_log"
     ).fetchone()
@@ -58,12 +62,7 @@ def test_successful_run_commits_watermark_and_records_success(conn, schema):
 
 def test_failed_extraction_does_not_commit_watermark_and_records_error(conn, schema):
     connector = FakeConnector("fake_api", [], should_fail=True)
-    run_log = RunLogStore(conn)
-    pipeline = Pipeline(
-        sources=[PipelineSource(connector=connector, schema=schema)],
-        destination=DuckDBLoader(conn, schema="bronze"),
-        run_log_store=run_log,
-    )
+    pipeline = Pipeline(connector=connector, schema=schema, destination=DuckDBLoader(conn, schema="bronze"))
 
     result = pipeline.run()
 
@@ -79,11 +78,10 @@ def test_failed_extraction_does_not_commit_watermark_and_records_error(conn, sch
     assert "falha simulada" in log_row[2]
 
 
-def test_pipeline_works_without_run_log_store(conn, schema):
+def test_run_log_false_disables_run_log_table(conn, schema):
     connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
     pipeline = Pipeline(
-        sources=[PipelineSource(connector=connector, schema=schema)],
-        destination=DuckDBLoader(conn, schema="bronze"),
+        connector=connector, schema=schema, destination=DuckDBLoader(conn, schema="bronze"), run_log=False
     )
 
     result = pipeline.run()
@@ -92,10 +90,49 @@ def test_pipeline_works_without_run_log_store(conn, schema):
     tables = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_schema='_meta' AND table_name='run_log'"
     ).fetchone()[0]
-    assert tables == 0  # sem RunLogStore, a tabela nem chega a ser criada
+    assert tables == 0
 
 
-def test_one_source_failing_does_not_block_the_others(conn, schema):
+def test_explicit_run_log_store_overrides_default(conn, schema):
+    connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
+    other_conn = duckdb.connect()
+    custom_store = RunLogStore(other_conn)
+    pipeline = Pipeline(
+        connector=connector,
+        schema=schema,
+        destination=DuckDBLoader(conn, schema="bronze"),
+        run_log_store=custom_store,
+    )
+
+    pipeline.run()
+
+    assert other_conn.execute("SELECT count(*) FROM _meta.run_log").fetchone()[0] == 1
+    # a conexao "principal" nao ganhou a tabela -- foi tudo pro store customizado
+    default_tables = conn.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='_meta' AND table_name='run_log'"
+    ).fetchone()[0]
+    assert default_tables == 0
+
+
+def test_run_log_true_without_connection_support_raises(schema):
+    connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
+    with pytest.raises(ValueError):
+        Pipeline(connector=connector, schema=schema, destination=FakeDestinationWithoutConnection())
+
+
+def test_run_log_false_works_with_destination_without_connection(schema):
+    connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
+    pipeline = Pipeline(
+        connector=connector,
+        schema=schema,
+        destination=FakeDestinationWithoutConnection(),
+        run_log=False,
+    )
+    result = pipeline.run()
+    assert result.success
+
+
+def test_multi_source_via_sources_list(conn, schema):
     good = FakeConnector("good_api", [{"id": "1", "name": "a"}])
     bad = FakeConnector("bad_api", [], should_fail=True)
     pipeline = Pipeline(
@@ -112,3 +149,19 @@ def test_one_source_failing_does_not_block_the_others(conn, schema):
     assert result.steps[0].error is not None
     assert result.steps[1].error is None
     assert good.watermark_committed is True
+
+
+def test_passing_both_connector_and_sources_is_rejected(conn, schema):
+    connector = FakeConnector("fake_api", [{"id": "1", "name": "a"}])
+    with pytest.raises(ValueError):
+        Pipeline(
+            connector=connector,
+            schema=schema,
+            sources=[PipelineSource(connector=connector, schema=schema)],
+            destination=DuckDBLoader(conn, schema="bronze"),
+        )
+
+
+def test_passing_neither_connector_nor_sources_is_rejected(conn):
+    with pytest.raises(ValueError):
+        Pipeline(destination=DuckDBLoader(conn, schema="bronze"))
