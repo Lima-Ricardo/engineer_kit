@@ -7,7 +7,10 @@ are resolved lazily through the adapter registry.
 
 from __future__ import annotations
 
+import copy
 import logging
+import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -23,6 +26,7 @@ from engineer_kit.adapters.registry import (
     build_state_store,
     resolve_auto,
 )
+from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import IncrementalMode
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES, PaginationStrategy
@@ -34,6 +38,26 @@ from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 
 logger = logging.getLogger("engineer_kit.config")
 
+MAX_PIPELINE_CONFIG_BYTES = 1024 * 1024
+_SECRET_REF_RE = re.compile(r"^\$\{SECRET:([A-Za-z0-9_.-]+)\}$")
+_SENSITIVE_OPTION_KEYS = {
+    "password",
+    "passwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "account_key",
+    "sas_token",
+    "connection_string",
+}
+
 
 class PipelineConfigError(ValueError):
     """Raised when a declarative pipeline is invalid or cannot be built."""
@@ -43,6 +67,7 @@ class PipelineConfigError(ValueError):
 class SecretsConfig:
     type: str = "env"
     path: Optional[str] = None
+    allow_inline_values: bool = False
 
     def build(self) -> SecretProvider:
         if self.type == "env":
@@ -142,6 +167,7 @@ class ConnectorConfig:
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
     extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE
+    max_pages: int = DEFAULT_MAX_PAGES
 
 
 @dataclass
@@ -220,6 +246,79 @@ def _run_log_from_value(value: Any) -> RunLogConfig:
     raise PipelineConfigError("run_log deve ser booleano ou um objeto de configuracao.")
 
 
+def _is_secret_ref(value: Any) -> bool:
+    return isinstance(value, str) and _SECRET_REF_RE.fullmatch(value) is not None
+
+
+def _validate_sensitive_mapping(
+    value: Any,
+    *,
+    path: str,
+    allow_inline_values: bool,
+) -> None:
+    if allow_inline_values or not isinstance(value, dict):
+        return
+    for key, nested in value.items():
+        normalized = str(key).strip().lower().replace("-", "_")
+        current_path = f"{path}.{key}"
+        if normalized in _SENSITIVE_OPTION_KEYS and nested not in (None, "") and not _is_secret_ref(nested):
+            raise PipelineConfigError(
+                f"Valor sensivel inline em '{current_path}' foi recusado. "
+                "Use ${SECRET:NOME} e configure secrets.type, ou habilite "
+                "secrets.allow_inline_values explicitamente assumindo o risco."
+            )
+        _validate_sensitive_mapping(
+            nested,
+            path=current_path,
+            allow_inline_values=allow_inline_values,
+        )
+
+
+def _validate_no_inline_secrets(data: dict[str, Any], secrets: SecretsConfig) -> None:
+    connector = data.get("connector") or {}
+    destination = data.get("destination") or {}
+    state = data.get("state", data.get("state_store", {})) or {}
+    run_log = data.get("run_log") or {}
+
+    if isinstance(connector, dict):
+        _validate_sensitive_mapping(
+            connector.get("static_params") or {},
+            path="connector.static_params",
+            allow_inline_values=secrets.allow_inline_values,
+        )
+    if isinstance(destination, dict):
+        _validate_sensitive_mapping(
+            destination.get("options") or {},
+            path="destination.options",
+            allow_inline_values=secrets.allow_inline_values,
+        )
+    if isinstance(state, dict):
+        _validate_sensitive_mapping(
+            state.get("options") or {},
+            path="state.options",
+            allow_inline_values=secrets.allow_inline_values,
+        )
+    if isinstance(run_log, dict):
+        _validate_sensitive_mapping(
+            run_log.get("options") or {},
+            path="run_log.options",
+            allow_inline_values=secrets.allow_inline_values,
+        )
+
+
+def _resolve_secret_refs(value: Any, provider: SecretProvider) -> Any:
+    if isinstance(value, str):
+        match = _SECRET_REF_RE.fullmatch(value)
+        return provider.get(match.group(1)) if match else value
+    if isinstance(value, dict):
+        return {key: _resolve_secret_refs(nested, provider) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_resolve_secret_refs(nested, provider) for nested in value]
+    if isinstance(value, tuple):
+        return tuple(_resolve_secret_refs(nested, provider) for nested in value)
+    return value
+
+
 def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
     try:
         name = data["name"]
@@ -227,6 +326,9 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         base_url = connector_data["base_url"]
     except KeyError as exc:
         raise PipelineConfigError(f"Campo obrigatorio faltando na configuracao: {exc}") from exc
+
+    secrets = SecretsConfig(**(data.get("secrets", {}) or {}))
+    _validate_no_inline_secrets(data, secrets)
 
     connector = ConnectorConfig(
         base_url=base_url,
@@ -240,6 +342,7 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         extraction_batch_size=connector_data.get(
             "extraction_batch_size", DEFAULT_EXTRACTION_BATCH_SIZE
         ),
+        max_pages=connector_data.get("max_pages", DEFAULT_MAX_PAGES),
     )
     columns = [
         ColumnConfig(name=column["name"], dtype=column.get("dtype", "string"))
@@ -256,7 +359,7 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         destination=DestinationConfig(**(data.get("destination", {}) or {})),
         state=StateConfig(**state_data),
         transform=TransformConfig(**(data.get("transform", {}) or {})),
-        secrets=SecretsConfig(**(data.get("secrets", {}) or {})),
+        secrets=secrets,
         run_log=_run_log_from_value(data.get("run_log", True)),
     )
 
@@ -276,6 +379,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "records_path": config.connector.records_path,
             "static_params": config.connector.static_params,
             "extraction_batch_size": config.connector.extraction_batch_size,
+            "max_pages": config.connector.max_pages,
         },
         "columns": [asdict(column) for column in config.columns],
         "destination": asdict(config.destination),
@@ -287,7 +391,20 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
 
 
 def load_pipeline_config(path: Union[str, Path]) -> PipelineConfig:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    source = Path(path)
+    raw = source.read_bytes()
+    if len(raw) > MAX_PIPELINE_CONFIG_BYTES:
+        raise PipelineConfigError(
+            f"Configuracao YAML excede o limite de {MAX_PIPELINE_CONFIG_BYTES} bytes: '{path}'."
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PipelineConfigError(f"Configuracao YAML deve usar UTF-8: '{path}'.") from exc
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise PipelineConfigError(f"Configuracao YAML invalida em '{path}'.") from exc
     if not isinstance(data, dict):
         raise PipelineConfigError(f"Configuracao YAML invalida em '{path}'.")
     return pipeline_config_from_dict(data)
@@ -297,9 +414,13 @@ def save_pipeline_config(config: PipelineConfig, path: Union[str, Path]) -> None
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
-        yaml.dump(pipeline_config_to_dict(config), sort_keys=False, allow_unicode=True),
+        yaml.safe_dump(pipeline_config_to_dict(config), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+    # Pipeline YAML should not contain literal secrets by default, but endpoint
+    # names, paths and secret-reference names can still be sensitive metadata.
+    if os.name != "nt":
+        destination.chmod(0o600)
 
 
 def list_pipeline_configs(directory: Union[str, Path]) -> list[tuple[Path, PipelineConfig]]:
@@ -320,6 +441,8 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
 
     ``runtime`` carries adapter-specific resources when needed. DuckDB uses an
     existing connection; Parquet and Delta do not require a runtime object.
+    Secret references in static/adapter options use ``${SECRET:name}`` and are
+    resolved only in memory immediately before an adapter/connector is built.
     """
     if config.transform.type not in {"none", "dbt"}:
         raise PipelineConfigError(
@@ -328,35 +451,45 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
 
     run_log = config.run_log
     assert isinstance(run_log, RunLogConfig)
-    context = AdapterContext(
-        pipeline_name=config.name,
-        runtime=runtime,
-        destination_config=config.destination,
-    )
 
     try:
+        secret_provider = config.secrets.build()
+        destination_config = copy.deepcopy(config.destination)
+        destination_config.options = _resolve_secret_refs(
+            destination_config.options, secret_provider
+        )
+        state_config = copy.deepcopy(config.state)
+        state_config.options = _resolve_secret_refs(state_config.options, secret_provider)
+        run_log_config = copy.deepcopy(run_log)
+        run_log_config.options = _resolve_secret_refs(run_log_config.options, secret_provider)
+        static_params = _resolve_secret_refs(config.connector.static_params, secret_provider)
+
+        context = AdapterContext(
+            pipeline_name=config.name,
+            runtime=runtime,
+            destination_config=destination_config,
+        )
         destination = build_destination(
-            config.destination.type,
-            config.destination,
+            destination_config.type,
+            destination_config,
             context,
         )
         state_type = resolve_auto(
-            config.state.type,
-            destination_type=config.destination.type,
+            state_config.type,
+            destination_type=destination_config.type,
             kind="state",
         )
-        state_store = build_state_store(state_type, config.state, context)
+        state_store = build_state_store(state_type, state_config, context)
 
         run_log_backend = None
-        if run_log.enabled:
+        if run_log_config.enabled:
             run_log_type = resolve_auto(
-                run_log.type,
-                destination_type=config.destination.type,
+                run_log_config.type,
+                destination_type=destination_config.type,
                 kind="run_log",
             )
-            run_log_backend = build_run_log(run_log_type, run_log, context)
+            run_log_backend = build_run_log(run_log_type, run_log_config, context)
 
-        secret_provider = config.secrets.build()
         connector = RestConnector(
             name=config.name,
             base_url=config.connector.base_url,
@@ -368,9 +501,10 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             method=config.connector.method,
             auth=config.connector.auth.build(secret_provider),
             date_params=config.connector.date_params.build(),
-            static_params=config.connector.static_params or None,
+            static_params=static_params or None,
             records_path=config.connector.records_path,
             extraction_batch_size=config.connector.extraction_batch_size,
+            max_pages=config.connector.max_pages,
         )
         schema = EndpointSchema(
             columns=[ColumnSpec(column.name, dtype=column.dtype) for column in config.columns]
@@ -379,7 +513,7 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             connector=connector,
             schema=schema,
             destination=destination,
-            run_log=run_log.enabled,
+            run_log=run_log_config.enabled,
             run_log_store=run_log_backend,
         )
     except PipelineConfigError:
