@@ -149,16 +149,26 @@ class Pipeline:
         visual_logger.info("'{}': iniciando extracao e carga.", connector.name)
 
         window = None
+        extraction_session = None
         context = LoadContext.adhoc(
             connector.name,
             run_id=run_id,
             started_at=started_at,
         )
 
-        # Phase 1: extraction + destination transaction.
+        # Phase 1: extraction + destination transaction. Official connectors use
+        # ExtractionSession internally, while legacy/third-party connector doubles
+        # can keep exposing extract()+commit_watermark().
         try:
-            records = connector.extract()
-            window = getattr(connector, "current_window", None)
+            session_factory = getattr(connector, "extract_incremental", None)
+            if callable(session_factory):
+                extraction_session = session_factory()
+                records = extraction_session.iter_records()
+                window = extraction_session.window
+            else:
+                records = connector.extract()
+                window = getattr(connector, "current_window", None)
+
             if window is not None:
                 context = LoadContext.for_window(
                     connector.name,
@@ -176,6 +186,11 @@ class Pipeline:
                 context=context,
             )
         except Exception as exc:
+            if extraction_session is not None:
+                try:
+                    extraction_session.abort()
+                except Exception:
+                    logger.debug("Falha ao abortar ExtractionSession", exc_info=True)
             finished_at = datetime.now(timezone.utc)
             logger.exception(
                 "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado.",
@@ -216,7 +231,10 @@ class Pipeline:
 
         # Phase 2: state checkpoint. Data is already committed here.
         try:
-            watermark_after = connector.commit_watermark()
+            if extraction_session is not None:
+                watermark_after = extraction_session.commit()
+            else:
+                watermark_after = connector.commit_watermark()
         except Exception as exc:
             finished_at = datetime.now(timezone.utc)
             error_message = f"checkpoint falhou apos a carga: {exc}"
