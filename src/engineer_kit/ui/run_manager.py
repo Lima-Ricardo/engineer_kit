@@ -1,9 +1,8 @@
-"""Executa pipelines locais sem bloquear a interface web.
+"""Run configured pipelines without blocking the localhost learning UI.
 
-A UI e uma experiencia de desenvolvimento/treino. Ela usa o builder
-local (DuckDB) e, quando configurado, executa dbt somente depois da
-ingestao ter concluido com sucesso. O Pipeline de ingestao continua
-independente da transformacao.
+The UI is a development/training surface, not a production orchestrator. It
+uses the same adapter-driven ``build_pipeline`` as code/YAML users. dbt remains
+an optional post-ingestion step and runs only after Bronze + checkpoint success.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ class RunState:
     status: str = "running"
     error: Optional[str] = None
     rows_loaded: int = 0
-    transform_status: str = "not_selected"  # not_selected | running | success | error
+    transform_status: str = "not_selected"
     log_queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
@@ -46,11 +45,19 @@ class RunManager:
 
     def start_run(self, config: PipelineConfig) -> str:
         run_id = uuid.uuid4().hex[:12]
-        state = RunState(run_id=run_id, pipeline_name=config.name, started_at=datetime.now(timezone.utc))
+        state = RunState(
+            run_id=run_id,
+            pipeline_name=config.name,
+            started_at=datetime.now(timezone.utc),
+        )
         with self._lock:
             self._runs[run_id] = state
 
-        thread = threading.Thread(target=self._execute, args=(run_id, config), daemon=True)
+        thread = threading.Thread(
+            target=self._execute,
+            args=(run_id, config),
+            daemon=True,
+        )
         thread.start()
         return run_id
 
@@ -63,21 +70,24 @@ class RunManager:
         )
         try:
             with visual_logger.contextualize(run_id=run_id):
-                conn = duckdb.connect(self._warehouse_path)
-                try:
-                    pipeline = build_pipeline(config, conn)
-                    result = pipeline.run()
-                finally:
-                    conn.close()
-
+                result = self._run_ingestion(config, run_id)
                 if not result.success:
                     state.status = "error"
                     state.error = "; ".join(step.error for step in result.steps if step.error)
                     return
 
-                state.rows_loaded = sum(step.rows_loaded for step in result.steps)
+                state.rows_loaded = result.rows_loaded
 
                 if config.transform.type == "dbt":
+                    if config.destination.type != "duckdb":
+                        state.transform_status = "error"
+                        state.error = (
+                            "A integracao dbt do local lab usa dbt-duckdb. Para Parquet/Delta, "
+                            "execute a transformacao da plataforma externamente."
+                        )
+                        visual_logger.error(state.error)
+                        state.status = "error"
+                        return
                     self._run_dbt(config, state)
                     if state.transform_status == "error":
                         state.status = "error"
@@ -87,9 +97,19 @@ class RunManager:
         except Exception as exc:
             state.status = "error"
             state.error = str(exc)
+            visual_logger.error("'{}': {}", config.name, exc)
         finally:
             visual_logger.remove(sink_id)
             state.log_queue.put(_STREAM_END)
+
+    def _run_ingestion(self, config: PipelineConfig, run_id: str):
+        if config.destination.type == "duckdb":
+            conn = duckdb.connect(self._warehouse_path)
+            try:
+                return build_pipeline(config, conn).run(run_id=run_id)
+            finally:
+                conn.close()
+        return build_pipeline(config).run(run_id=run_id)
 
     def _run_dbt(self, config: PipelineConfig, state: RunState) -> None:
         if self._dbt_project_dir is None or not self._dbt_project_dir.exists():
