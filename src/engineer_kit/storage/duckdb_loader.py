@@ -34,7 +34,13 @@ logger = logging.getLogger("engineer_kit.storage")
 
 
 class DuckDBLoader(Destination):
-    """Destination that materializes Bronze tables in DuckDB."""
+    """Destination that materializes Bronze tables in DuckDB.
+
+    Declared API fields are always stored as ``VARCHAR`` in Bronze. The
+    ``ColumnSpec.dtype`` value is the analytical target type used by the dbt
+    staging scaffold, not a source-ingestion type. This keeps schema drift
+    from turning a transient API type change into a failed raw load.
+    """
 
     def __init__(
         self,
@@ -121,7 +127,7 @@ class DuckDBLoader(Destination):
     def _ensure_table(self, full_table: str, schema: EndpointSchema) -> None:
         if full_table in self._ensured_tables:
             return
-        column_defs = ", ".join(f'"{c.name}" {c.dtype}' for c in schema.columns)
+        column_defs = ", ".join(f'"{column.name}" VARCHAR' for column in schema.columns)
         self._conn.execute(
             f"CREATE TABLE IF NOT EXISTS {full_table} ("
             f"{column_defs}, "
