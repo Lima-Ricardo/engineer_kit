@@ -5,10 +5,10 @@ optional audit logging. It never imports a concrete storage engine.
 
 Destination and StateStore may be different systems, so there is no universal
 cross-system transaction. Official engineer_kit destinations use a deterministic
-``ingestion_key`` per connector/window to make a retry replace the same Bronze
-window when a checkpoint fails after data persistence. Third-party destinations
-remain compatible through ``Destination.load`` and provide at-least-once
-semantics unless they implement ``load_with_context`` with their own idempotency.
+``ingestion_key`` per checkpoint transition to make a retry replace the same
+Bronze window when state persistence fails after data persistence. Third-party
+destinations remain compatible through ``Destination.load`` and provide
+at-least-once semantics unless they implement ``load_with_context``.
 """
 
 from __future__ import annotations
@@ -162,8 +162,9 @@ class Pipeline:
             if window is not None:
                 context = LoadContext.for_window(
                     connector.name,
-                    window.start,
-                    window.end,
+                    _window_start(window),
+                    _window_end(window),
+                    checkpoint_identity=_watermark_json(_window_watermark_before(window)),
                     started_at=started_at,
                     run_id=run_id,
                 )
