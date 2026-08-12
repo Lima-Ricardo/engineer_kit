@@ -1,21 +1,34 @@
 {% extends "base.html" %}
 {% block title %}dbt - engineer_kit{% endblock %}
 {% block content %}
-<h1>Modelos dbt</h1>
-<p class="subtitle">staging → silver → gold, na ordem em que os dados fluem.</p>
+<h1>dbt</h1>
+<p class="subtitle">Transformação opcional depois que a ingestão e o watermark foram confirmados.</p>
+
+<div class="flow-strip">
+    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>dados ingeridos</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>staging</strong><span>tipagem</span><small>casts e limpeza</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>silver</strong><span>modelo</span><small>regras e relações</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>gold</strong><span>consumo</span><small>métricas / marts</small></div>
+</div>
+
+{% if dbt_available %}
+<div class="architecture-note"><strong>Projeto detectado:</strong> <code>{{ project_dir }}</code>. Um pipeline com <code>transform.type: dbt</code> executa o <code>DbtRunner</code> somente depois da Bronze ser concluída.</div>
+{% else %}
+<div class="architecture-note warning"><strong>dbt não configurado neste workspace.</strong> A ingestão continua funcionando normalmente e termina na Bronze.</div>
+{% endif %}
+
+<div class="grid-2 docs-grid">
+    <div class="card"><h3>O que o engineer_kit abstrai</h3><p>Disparo do processo e integração com o fluxo local. O estado incremental e o destino continuam independentes do dbt.</p><code>Pipeline.run() → DbtRunner.run()</code></div>
+    <div class="card"><h3>O que continua explícito</h3><p>Joins, casts, regras de negócio, testes e materializações continuam nos modelos dbt. A biblioteca não tenta adivinhar transformação.</p><code>models/staging · silver · gold</code></div>
+</div>
 
 {% for layer, models in layers.items() %}
 <h2>{{ layer }}</h2>
-{% if models %}
-<table>
-    <tbody>
-        {% for model in models %}
-        <tr><td>{{ model }}</td></tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<div class="empty">Nenhum modelo em <code>models/{{ layer }}/</code> ainda.</div>
-{% endif %}
+{% if models %}<table><tbody>{% for model in models %}<tr><td><code>{{ model }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty">Nenhum modelo em <code>models/{{ layer }}/</code> ainda.</div>{% endif %}
 {% endfor %}
+
+<p style="margin-top:24px"><a href="/architecture" class="btn">Ver documentação das abstrações</a></p>
 {% endblock %}
