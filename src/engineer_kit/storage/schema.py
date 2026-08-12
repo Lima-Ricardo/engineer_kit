@@ -1,14 +1,9 @@
-"""Schema declarado explicitamente pelo engenheiro para cada endpoint.
+"""Declared endpoint schema shared by all destination adapters.
 
-Substitui a inferencia dinamica de colunas: o loader nunca decide por
-conta propria o que existe na tabela. Ele so aplica o que foi
-declarado aqui. Qualquer campo que a API mandar fora dessa lista cai
-em `_extra` — nunca quebra o pipeline; retipar corretamente e uma
-decisao explicita de quem escreve o schema, nao algo automatico.
-
-Todas as colunas comecam como VARCHAR por padrao (coerente com a
-decisao de que tudo que sai de um conector e string). Passe `dtype`
-so quando quiser tipar de verdade.
+Bronze columns are intentionally stable and string-oriented. ``dtype`` is a
+logical/analytical target type used by staging transforms; it is not inferred
+from each API response. Unknown API fields are preserved in ``_extra`` by the
+shared Bronze contract.
 """
 
 from __future__ import annotations
@@ -16,26 +11,37 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from engineer_kit.storage.identifiers import validate_identifier, validate_type
+from engineer_kit.storage.types import LogicalType, render_sql_type, resolve_logical_type
 
 
-@dataclass
+@dataclass(frozen=True)
 class ColumnSpec:
     name: str
-    dtype: str = "VARCHAR"
+    dtype: str = "string"
 
     def __post_init__(self) -> None:
         validate_identifier(self.name, "Nome de coluna")
-        validate_type(self.dtype)
+        if resolve_logical_type(self.dtype) is None:
+            validate_type(self.dtype)
+
+    @property
+    def logical_type(self) -> LogicalType | None:
+        """Portable logical type, or ``None`` for a legacy/custom SQL type."""
+        return resolve_logical_type(self.dtype)
+
+    def sql_type(self, dialect: str = "duckdb") -> str:
+        """Render the analytical type for the requested SQL dialect."""
+        return render_sql_type(self.dtype, dialect=dialect)
 
 
-@dataclass
+@dataclass(frozen=True)
 class EndpointSchema:
     columns: list[ColumnSpec] = field(default_factory=list)
 
     @classmethod
     def from_names(cls, names: list[str]) -> "EndpointSchema":
-        """Atalho: declarar so os nomes das colunas esperadas, todas VARCHAR."""
-        return cls(columns=[ColumnSpec(name=n) for n in names])
+        """Declare expected fields using the portable ``string`` type."""
+        return cls(columns=[ColumnSpec(name=name) for name in names])
 
     def column_names(self) -> list[str]:
-        return [c.name for c in self.columns]
+        return [column.name for column in self.columns]
