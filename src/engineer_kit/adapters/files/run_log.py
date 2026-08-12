@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -26,3 +27,6 @@ class JsonLinesRunLogStore(RunLogBackend):
         with self._lock, self._path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
             handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            self._path.chmod(0o600)
