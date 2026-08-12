@@ -45,7 +45,7 @@ class PipelineResult:
 
 
 class Pipeline:
-    """Unidade atômica que um scheduler local ou externo pode executar."""
+    """Unidade atomica que um scheduler local ou externo pode executar."""
 
     def __init__(
         self,
@@ -68,9 +68,7 @@ class Pipeline:
     ) -> list[PipelineSource]:
         if sources is not None:
             if connector is not None or schema is not None:
-                raise ValueError(
-                    "Passe connector+schema (um conector) ou sources=[...] (varios) — nao os dois."
-                )
+                raise ValueError("Passe connector+schema (um conector) ou sources=[...] (varios) — nao os dois.")
             return sources
         if connector is None or schema is None:
             raise ValueError(
@@ -90,7 +88,8 @@ class Pipeline:
         if not run_log:
             return None
 
-        backend = destination.default_run_log_backend()
+        factory = getattr(destination, "default_run_log_backend", None)
+        backend = factory() if callable(factory) else None
         if backend is None:
             raise ValueError(
                 "run_log=True, mas este destino nao fornece auditoria automaticamente. "
@@ -105,7 +104,6 @@ class Pipeline:
         connector = source.connector
         started_at = datetime.now(timezone.utc)
         visual_logger.info("'{}': iniciando extracao e carga.", connector.name)
-
         try:
             records = connector.extract()
             result = self._destination.load(
@@ -116,7 +114,6 @@ class Pipeline:
             )
             connector.commit_watermark()
             finished_at = datetime.now(timezone.utc)
-
             logger.info("Conector '%s': %d linha(s) carregada(s).", connector.name, result.rows_loaded)
             visual_logger.success(
                 "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
@@ -125,15 +122,9 @@ class Pipeline:
                 started_at.isoformat(timespec="seconds"),
                 finished_at.isoformat(timespec="seconds"),
             )
-
             self._record_run(
-                connector.name,
-                started_at,
-                finished_at,
-                "success",
-                result.rows_loaded,
-                result.extra_fields_seen,
-                error_message=None,
+                connector.name, started_at, finished_at, "success", result.rows_loaded,
+                result.extra_fields_seen, error_message=None,
             )
             return StepResult(connector_name=connector.name, rows_loaded=result.rows_loaded)
         except Exception as exc:
@@ -149,15 +140,8 @@ class Pipeline:
                 finished_at.isoformat(timespec="seconds"),
                 exc,
             )
-
             self._record_run(
-                connector.name,
-                started_at,
-                finished_at,
-                "error",
-                0,
-                [],
-                error_message=str(exc),
+                connector.name, started_at, finished_at, "error", 0, [], error_message=str(exc),
             )
             return StepResult(connector_name=connector.name, rows_loaded=0, error=str(exc))
 
