@@ -68,6 +68,8 @@ class JsonFileStateStore(StateStore):
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp_name, self._path)
+                if os.name != "nt":
+                    self._path.chmod(0o600)
             finally:
                 if os.path.exists(tmp_name):
                     os.unlink(tmp_name)
