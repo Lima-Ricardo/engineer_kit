@@ -3,6 +3,7 @@ name: orders
 connector:
   base_url: https://api.example.com/orders
   method: GET
+  extraction_batch_size: 25000
   auth:
     type: bearer
     secret_key: ORDERS_API_TOKEN
