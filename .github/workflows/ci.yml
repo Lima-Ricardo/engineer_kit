@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - 'agent/**'
   pull_request:
     branches:
       - main
@@ -15,7 +14,7 @@ permissions:
 
 jobs:
   core-only:
-    name: core import without DuckDB
+    name: core import without optional backends
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,12 +31,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
-      - name: Verify core has no DuckDB dependency
+      - name: Verify optional backends do not leak into core
         run: |
           python - <<'PY'
           import importlib.util
 
-          assert importlib.util.find_spec('duckdb') is None, 'duckdb leaked into core dependencies'
+          for package in ('duckdb', 'pyarrow', 'deltalake'):
+              assert importlib.util.find_spec(package) is None, f'{package} leaked into core dependencies'
 
           import engineer_kit
           from engineer_kit import Destination, Pipeline, StateStore
@@ -47,12 +47,18 @@ jobs:
           assert Pipeline is not None
           assert StateStore is not None
 
-          try:
-              engineer_kit.DuckDBLoader
-          except ModuleNotFoundError as exc:
-              assert 'engineer_kit[duckdb]' in str(exc)
-          else:
-              raise AssertionError('DuckDBLoader should require the optional duckdb extra')
+          expected = {
+              'DuckDBLoader': 'engineer_kit[duckdb]',
+              'ParquetDestination': 'engineer_kit[parquet]',
+              'DeltaDestination': 'engineer_kit[delta]',
+          }
+          for attribute, install_hint in expected.items():
+              try:
+                  getattr(engineer_kit, attribute)
+              except ModuleNotFoundError as exc:
+                  assert install_hint in str(exc)
+              else:
+                  raise AssertionError(f'{attribute} should require its optional extra')
           PY
 
   test:
@@ -73,13 +79,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install local runtime and test dependencies
+      - name: Install all supported adapters and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev,local]'
+          python -m pip install -e '.[dev,local,parquet,delta]'
 
       - name: Run tests with coverage
-        run: python -m pytest -q --cov=engineer_kit --cov-report=term-missing
+        run: python -m pytest -q -m 'not stress' --cov=engineer_kit --cov-report=term-missing
 
   quality:
     name: quality and security
@@ -97,7 +103,7 @@ jobs:
       - name: Install project and quality tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev,local]'
+          python -m pip install -e '.[dev,local,parquet,delta]'
 
       - name: Ruff
         run: ruff check src tests
