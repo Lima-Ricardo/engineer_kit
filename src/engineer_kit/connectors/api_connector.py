@@ -1,27 +1,11 @@
 """Classe base para conectores de API.
 
-Toda API nova so precisa implementar `build_request` e `parse_response`
-— o loop de paginacao e a leitura da janela incremental sao resolvidos
-aqui, sempre do mesmo jeito (Template Method).
+Toda API nova so precisa implementar `build_request` e `parse_response`:
+o loop de paginacao e a janela incremental sao resolvidos aqui. O
+conector depende do contrato `StateStore`, nunca de DuckDB ou de outro
+backend concreto.
 
-Casos comuns (REST/JSON padrao) nao devem herdar disso: usar
-`engineer_kit.RestConnector`. Reserve o subclassing direto para APIs
-com comportamento fora do padrao (resposta nao-JSON, auth por
-assinatura etc.).
-
-O IncrementalStrategy e montado aqui dentro a partir de `name` +
-`state_store` -- nao existe mais um objeto separado pra construir e
-manter sincronizado com o nome do conector (isso ja causou duplicacao
-de configuracao: o mesmo identificador tinha que ser passado duas
-vezes). Quem precisa de um IncrementalStrategy customizado ainda pode
-passar um pronto via `incremental=`.
-
-Importante: `extract()` so itera os registros, nao commita o watermark
-sozinho. Quem chama (normalmente o Pipeline) decide o momento certo de
-chamar `commit_watermark()` — depois que os registros foram gravados
-com sucesso no destino. Se o commit acontecesse automaticamente ao fim
-do generator, um loader que falha no meio da escrita ainda correria o
-risco de o generator ja ter sido drenado antes do erro aparecer.
+Casos REST/JSON comuns devem usar `engineer_kit.RestConnector`.
 """
 
 from __future__ import annotations
@@ -36,7 +20,7 @@ from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
 from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
-from engineer_kit.storage.state_store import IngestionStateStore
+from engineer_kit.storage.state_store import StateStore
 
 VALID_HTTP_METHODS = ("GET", "POST")
 
@@ -50,10 +34,7 @@ class MissingDateFieldError(ValueError):
 
 
 class APIConnector(ABC):
-    """Base para qualquer conector de API. `method` e `pagination` sao
-    obrigatorios de proposito: nao existe um padrao "por baixo dos
-    panos" para nenhum dos dois, porque os dois mudam de API para API e
-    uma escolha implicita e uma fonte facil de bug silencioso."""
+    """Base para conectores de API com paginacao e incremental reutilizaveis."""
 
     def __init__(
         self,
@@ -61,7 +42,7 @@ class APIConnector(ABC):
         http_client: HttpClient,
         pagination: PaginationStrategy,
         method: str,
-        state_store: Optional[IngestionStateStore] = None,
+        state_store: Optional[StateStore] = None,
         incremental_mode: IncrementalMode = IncrementalMode.DATA_DATE,
         initial_start: Optional[date] = None,
         date_field: Optional[DateFieldSpec] = None,
@@ -105,13 +86,11 @@ class APIConnector(ABC):
 
     @abstractmethod
     def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
-        """Monta os kwargs de HttpClient.request() (url, params/json,
-        headers) para uma pagina."""
+        """Monta os kwargs de HttpClient.request() para uma pagina."""
 
     @abstractmethod
     def parse_response(self, response: requests.Response) -> ParsedPage:
-        """Extrai os registros (list[dict], valores como str), o JSON
-        bruto e os headers da resposta."""
+        """Extrai registros, resposta bruta e headers."""
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
         self._current_window = self._incremental.resolve_window(end)
@@ -151,10 +130,7 @@ class APIConnector(ABC):
             self._max_data_date_seen = seen
 
     def commit_watermark(self, max_data_date: Optional[date] = None) -> None:
-        """Chamar so depois que os registros de extract() foram gravados
-        com sucesso. Se `date_field` estiver configurado e nenhum
-        `max_data_date` for passado explicitamente, usa automaticamente
-        a maior data vista nos registros durante o extract()."""
+        """Confirma o checkpoint depois que o destino gravou os dados com sucesso."""
         if self._current_window is None:
             raise RuntimeError("commit_watermark() chamado antes de extract() rodar.")
         effective_max_date = max_data_date if max_data_date is not None else self._max_data_date_seen
