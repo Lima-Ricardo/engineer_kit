@@ -1,12 +1,16 @@
-"""Guarda o watermark de cada conector: ate onde a ultima extracao bem-sucedida foi.
+"""Contratos e implementacoes para persistir o estado incremental.
 
-Vive numa tabela de metadados dentro do proprio DuckDB usado para o bronze
-— nao existe infraestrutura extra (Redis, tabela em outro banco) para
-gerenciar so por causa do estado incremental.
+O core da ingestao depende apenas de :class:`StateStore`. Onde o
+watermark vive e uma decisao de infraestrutura: DuckDB no modo local,
+Delta/Lakehouse em plataformas de dados, ou uma implementacao customizada.
+
+`IngestionStateStore` e mantido como alias compativel da implementacao
+DuckDB para nao quebrar codigo existente.
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
@@ -14,14 +18,36 @@ from typing import Optional
 import duckdb
 
 
-@dataclass
+@dataclass(frozen=True)
 class Watermark:
+    """Checkpoint persistido depois de uma carga concluida com sucesso."""
+
     last_run_at: datetime
     last_data_date: Optional[date]
     cursor_value: Optional[str]
 
 
-class IngestionStateStore:
+class StateStore(ABC):
+    """Porta de persistencia usada pelo incremental.
+
+    Implementacoes precisam apenas ler e substituir atomicamente o
+    watermark de um conector. Isso mantem APIConnector e
+    IncrementalStrategy independentes de DuckDB, Delta ou qualquer
+    plataforma especifica.
+    """
+
+    @abstractmethod
+    def get_watermark(self, connector_name: str) -> Watermark | None:
+        """Retorna o ultimo checkpoint do conector ou ``None`` no primeiro run."""
+
+    @abstractmethod
+    def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
+        """Persiste o checkpoint somente depois que a carga foi confirmada."""
+
+
+class DuckDBStateStore(StateStore):
+    """StateStore zero-infra persistido na area `_meta` do DuckDB."""
+
     _SCHEMA = "_meta"
     _TABLE = "ingestion_state"
 
@@ -51,11 +77,14 @@ class IngestionStateStore:
         if row is None:
             return None
         last_run_at, last_data_date, cursor_value = row
-        return Watermark(last_run_at=last_run_at, last_data_date=last_data_date, cursor_value=cursor_value)
+        return Watermark(
+            last_run_at=last_run_at,
+            last_data_date=last_data_date,
+            cursor_value=cursor_value,
+        )
 
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
-        """Escrita atomica: DELETE+INSERT numa unica transacao, nunca deixa a
-        tabela num estado parcialmente atualizado se o processo cair no meio."""
+        """Substitui o checkpoint numa unica transacao."""
         self._conn.execute("BEGIN TRANSACTION")
         try:
             self._conn.execute(
@@ -64,9 +93,19 @@ class IngestionStateStore:
             )
             self._conn.execute(
                 f"INSERT INTO {self._SCHEMA}.{self._TABLE} VALUES (?, ?, ?, ?)",
-                [connector_name, watermark.last_run_at, watermark.last_data_date, watermark.cursor_value],
+                [
+                    connector_name,
+                    watermark.last_run_at,
+                    watermark.last_data_date,
+                    watermark.cursor_value,
+                ],
             )
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
             raise
+
+
+# Compatibilidade com a API 0.1: codigo existente continua funcionando,
+# enquanto codigo novo pode usar o nome que explicita o backend.
+IngestionStateStore = DuckDBStateStore
