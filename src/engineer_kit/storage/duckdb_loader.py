@@ -71,7 +71,9 @@ class DuckDBLoader(Destination):
         self._db_schema = validate_identifier(schema, "schema")
         self._batch_size = validate_batch_size(batch_size)
         self._write_mode = WriteMode.parse(write_mode)
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")
+        # DuckDB cannot bind identifiers. _db_schema is validated above against
+        # the strict identifier contract before interpolation.
+        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._db_schema}")  # nosec B608
         self._ensured_tables: set[str] = set()
 
     @property
@@ -119,6 +121,7 @@ class DuckDBLoader(Destination):
         context: LoadContext,
     ) -> LoadResult:
         table_name = validate_identifier(endpoint, "endpoint")
+        # Both components of full_table have passed validate_identifier().
         full_table = f"{self._db_schema}.{table_name}"
         self._ensure_table(full_table, schema)
 
@@ -130,10 +133,12 @@ class DuckDBLoader(Destination):
         self._conn.execute("BEGIN TRANSACTION")
         try:
             if self._write_mode is WriteMode.OVERWRITE:
-                self._conn.execute(f"DELETE FROM {full_table}")
+                self._conn.execute(f"DELETE FROM {full_table}")  # nosec B608
             else:
+                # The table identifier is validated; the ingestion key remains a
+                # bound value parameter and is never interpolated into SQL.
                 self._conn.execute(
-                    f'DELETE FROM {full_table} WHERE "_ingestion_key" = ?',
+                    f'DELETE FROM {full_table} WHERE "_ingestion_key" = ?',  # nosec B608
                     [context.ingestion_key],
                 )
 
@@ -198,13 +203,17 @@ class DuckDBLoader(Destination):
             f'"{name}" {dtype}' for name, dtype in _INTERNAL_METADATA_TYPES.items()
         )
         all_defs = ", ".join(part for part in (column_defs, metadata_defs) if part)
-        self._conn.execute(f"CREATE TABLE IF NOT EXISTS {full_table} ({all_defs})")
+        # full_table and declared column identifiers are validated by the public
+        # schema/identifier contracts before they reach this adapter.
+        self._conn.execute(  # nosec B608
+            f"CREATE TABLE IF NOT EXISTS {full_table} ({all_defs})"
+        )
 
         # Internal metadata is library-owned and may evolve safely between
         # engineer_kit versions. Declared API columns are still never ALTERed
         # automatically, preserving the explicit source-schema contract.
         for name, dtype in _INTERNAL_METADATA_TYPES.items():
-            self._conn.execute(
+            self._conn.execute(  # nosec B608
                 f'ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS "{name}" {dtype}'
             )
         self._ensured_tables.add(full_table)
@@ -213,7 +222,9 @@ class DuckDBLoader(Destination):
         self, full_table: str, columns: list[str], rows: list[dict[str, Any]]
     ) -> None:
         column_list = ", ".join(f'"{column}"' for column in columns)
-        self._conn.execute(
+        # Only validated identifiers are interpolated. Row data is bound through
+        # $1 and cannot alter the SQL statement.
+        self._conn.execute(  # nosec B608
             f"INSERT INTO {full_table} ({column_list}) "
             f"SELECT unnest(row, recursive := true) "
             f"FROM (SELECT unnest($1) AS row FROM range(1))",
