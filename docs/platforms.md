@@ -202,7 +202,7 @@ Delta transaction
 StateStore commit
 ```
 
-Se o commit do StateStore falhar, a mesma janela é repetida. `DeltaDestination` usa predicate overwrite da `_ingestion_key` daquela janela, evitando duplicar o retry.
+Se o commit do StateStore falhar, a mesma **transição de checkpoint** é repetida. `DeltaDestination` usa predicate overwrite da `_ingestion_key` calculada a partir de connector + janela + checkpoint anterior, evitando duplicar o retry. Depois de um checkpoint bem-sucedido, uma execução posterior recebe outra chave mesmo que ocorra no mesmo dia.
 
 ## Orquestração
 
@@ -212,6 +212,12 @@ O objeto `Pipeline` é a unidade que o orquestrador chama:
 result = pipeline.run()
 if not result.success:
     raise RuntimeError(result.steps)
+```
+
+Também é possível executar um YAML diretamente:
+
+```bash
+engineer_kit run-config pipelines/orders.yaml
 ```
 
 Isso permite integração com:
@@ -233,7 +239,8 @@ A suíte do projeto cobre DuckDB, Parquet e Delta em filesystem local, incluindo
 - batches;
 - falha no meio do stream;
 - checkpoint posterior ao load;
-- retry idempotente da mesma janela;
+- retry idempotente da mesma transição de checkpoint;
+- execuções bem-sucedidas subsequentes no mesmo dia;
 - append/overwrite;
 - state e run log separados.
 
