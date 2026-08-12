@@ -1,11 +1,14 @@
 """Backend-agnostic orchestration for one complete ingestion attempt.
 
 The Pipeline coordinates extraction, Bronze persistence, checkpoint commit and
-optional audit logging. It never imports a concrete storage engine. Because
-Destination and StateStore can be different systems, the cross-system delivery
-guarantee is intentionally *at least once*: the destination is confirmed before
-the watermark advances, so a state-store failure may cause the same window to
-be retried rather than silently losing data.
+optional audit logging. It never imports a concrete storage engine.
+
+Destination and StateStore may be different systems, so there is no universal
+cross-system transaction. Official engineer_kit destinations use a deterministic
+``ingestion_key`` per connector/window to make a retry replace the same Bronze
+window when a checkpoint fails after data persistence. Third-party destinations
+remain compatible through ``Destination.load`` and provide at-least-once
+semantics unless they override ``load_with_context`` with their own idempotency.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import Optional
 from uuid import uuid4
 
 from engineer_kit.connectors.api_connector import APIConnector
-from engineer_kit.storage.destination import Destination
+from engineer_kit.storage.destination import Destination, LoadContext
 from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
 from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.storage.state_store import Watermark
@@ -40,6 +43,7 @@ class StepResult:
     connector_name: str
     rows_loaded: int
     error: Optional[str] = None
+    status: str = "success"
     destination: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -48,10 +52,11 @@ class StepResult:
     watermark_before: Optional[Watermark] = None
     watermark_after: Optional[Watermark] = None
     extra_fields_seen: tuple[str, ...] = ()
+    ingestion_key: Optional[str] = None
 
     @property
     def success(self) -> bool:
-        return self.error is None
+        return self.error is None and self.status == "success"
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,7 @@ class PipelineResult:
 
 
 class Pipeline:
-    """Atomic *ingestion unit* callable by local or external orchestrators."""
+    """Atomic ingestion unit callable by local or external orchestrators."""
 
     def __init__(
         self,
@@ -142,106 +147,197 @@ class Pipeline:
         connector = source.connector
         started_at = datetime.now(timezone.utc)
         visual_logger.info("'{}': iniciando extracao e carga.", connector.name)
-        window = None
-        destination_label: str | None = None
 
+        window = None
+        context = LoadContext.adhoc(
+            connector.name,
+            run_id=run_id,
+            started_at=started_at,
+        )
+
+        # Phase 1: extraction + destination transaction.
         try:
             records = connector.extract()
-            window = connector.current_window
-            result = self._destination.load(
+            window = getattr(connector, "current_window", None)
+            if window is not None:
+                context = LoadContext.for_window(
+                    connector.name,
+                    window.start,
+                    window.end,
+                    started_at=started_at,
+                    run_id=run_id,
+                )
+
+            result = self._destination.load_with_context(
                 connector_name=connector.name,
                 endpoint=connector.name,
                 schema=source.schema,
                 records=records,
-            )
-            destination_label = result.table
-            watermark_after = connector.commit_watermark()
-            finished_at = datetime.now(timezone.utc)
-
-            logger.info(
-                "Conector '%s': %d linha(s) carregada(s).",
-                connector.name,
-                result.rows_loaded,
-            )
-            visual_logger.success(
-                "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
-                connector.name,
-                result.rows_loaded,
-                started_at.isoformat(timespec="seconds"),
-                finished_at.isoformat(timespec="seconds"),
-            )
-            self._record_run_safely(
-                RunLogEntry(
-                    connector_name=connector.name,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    status="success",
-                    rows_loaded=result.rows_loaded,
-                    extra_fields_seen=result.extra_fields_seen,
-                    run_id=run_id,
-                    destination=result.table,
-                    window_start=window.start if window else None,
-                    window_end=window.end if window else None,
-                    watermark_before=_watermark_json(
-                        window.watermark_before if window else None
-                    ),
-                    watermark_after=_watermark_json(watermark_after),
-                )
-            )
-            return StepResult(
-                connector_name=connector.name,
-                rows_loaded=result.rows_loaded,
-                destination=result.table,
-                started_at=started_at,
-                finished_at=finished_at,
-                window_start=window.start if window else None,
-                window_end=window.end if window else None,
-                watermark_before=window.watermark_before if window else None,
-                watermark_after=watermark_after,
-                extra_fields_seen=tuple(result.extra_fields_seen),
+                context=context,
             )
         except Exception as exc:
             finished_at = datetime.now(timezone.utc)
             logger.exception(
-                "Conector '%s' falhou; watermark nao avancado quando a falha ocorreu antes do commit.",
+                "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado.",
                 connector.name,
             )
             visual_logger.error(
-                "'{}': falhou -- inicio {} fim {}. Motivo: {}",
+                "'{}': carga falhou. Motivo: {}",
                 connector.name,
-                started_at.isoformat(timespec="seconds"),
-                finished_at.isoformat(timespec="seconds"),
                 exc,
             )
             self._record_run_safely(
-                RunLogEntry(
+                self._run_log_entry(
                     connector_name=connector.name,
+                    context=context,
                     started_at=started_at,
                     finished_at=finished_at,
                     status="error",
                     rows_loaded=0,
                     extra_fields_seen=[],
                     error_message=str(exc),
-                    run_id=run_id,
-                    destination=destination_label,
-                    window_start=window.start if window else None,
-                    window_end=window.end if window else None,
-                    watermark_before=_watermark_json(
-                        window.watermark_before if window else None
-                    ),
+                    destination=None,
+                    window=window,
+                    watermark_after=None,
                 )
             )
             return StepResult(
                 connector_name=connector.name,
                 rows_loaded=0,
                 error=str(exc),
-                destination=destination_label,
+                status="error",
                 started_at=started_at,
                 finished_at=finished_at,
                 window_start=window.start if window else None,
                 window_end=window.end if window else None,
                 watermark_before=window.watermark_before if window else None,
+                ingestion_key=context.ingestion_key,
             )
+
+        # Phase 2: state checkpoint. Data is already committed here.
+        try:
+            watermark_after = connector.commit_watermark()
+        except Exception as exc:
+            finished_at = datetime.now(timezone.utc)
+            error_message = f"checkpoint falhou apos a carga: {exc}"
+            logger.exception(
+                "Conector '%s': destino confirmado, mas checkpoint falhou. "
+                "A mesma janela sera tentada novamente.",
+                connector.name,
+            )
+            visual_logger.error(
+                "'{}': dados gravados, mas checkpoint falhou; retry reutilizara a mesma janela. Motivo: {}",
+                connector.name,
+                exc,
+            )
+            self._record_run_safely(
+                self._run_log_entry(
+                    connector_name=connector.name,
+                    context=context,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    status="checkpoint_error",
+                    rows_loaded=result.rows_loaded,
+                    extra_fields_seen=result.extra_fields_seen,
+                    error_message=error_message,
+                    destination=result.table,
+                    window=window,
+                    watermark_after=None,
+                )
+            )
+            return StepResult(
+                connector_name=connector.name,
+                rows_loaded=result.rows_loaded,
+                error=error_message,
+                status="checkpoint_error",
+                destination=result.table,
+                started_at=started_at,
+                finished_at=finished_at,
+                window_start=window.start if window else None,
+                window_end=window.end if window else None,
+                watermark_before=window.watermark_before if window else None,
+                watermark_after=None,
+                extra_fields_seen=tuple(result.extra_fields_seen),
+                ingestion_key=context.ingestion_key,
+            )
+
+        # Phase 3: audit is best-effort and cannot invalidate committed data/state.
+        finished_at = datetime.now(timezone.utc)
+        logger.info(
+            "Conector '%s': %d linha(s) carregada(s).",
+            connector.name,
+            result.rows_loaded,
+        )
+        visual_logger.success(
+            "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
+            connector.name,
+            result.rows_loaded,
+            started_at.isoformat(timespec="seconds"),
+            finished_at.isoformat(timespec="seconds"),
+        )
+        self._record_run_safely(
+            self._run_log_entry(
+                connector_name=connector.name,
+                context=context,
+                started_at=started_at,
+                finished_at=finished_at,
+                status="success",
+                rows_loaded=result.rows_loaded,
+                extra_fields_seen=result.extra_fields_seen,
+                error_message=None,
+                destination=result.table,
+                window=window,
+                watermark_after=watermark_after,
+            )
+        )
+        return StepResult(
+            connector_name=connector.name,
+            rows_loaded=result.rows_loaded,
+            status="success",
+            destination=result.table,
+            started_at=started_at,
+            finished_at=finished_at,
+            window_start=window.start if window else None,
+            window_end=window.end if window else None,
+            watermark_before=window.watermark_before if window else None,
+            watermark_after=watermark_after,
+            extra_fields_seen=tuple(result.extra_fields_seen),
+            ingestion_key=context.ingestion_key,
+        )
+
+    @staticmethod
+    def _run_log_entry(
+        *,
+        connector_name: str,
+        context: LoadContext,
+        started_at: datetime,
+        finished_at: datetime,
+        status: str,
+        rows_loaded: int,
+        extra_fields_seen: list[str],
+        error_message: str | None,
+        destination: str | None,
+        window,
+        watermark_after: Watermark | None,
+    ) -> RunLogEntry:
+        return RunLogEntry(
+            connector_name=connector_name,
+            started_at=started_at,
+            finished_at=finished_at,
+            status=status,
+            rows_loaded=rows_loaded,
+            extra_fields_seen=extra_fields_seen,
+            error_message=error_message,
+            run_id=context.run_id,
+            ingestion_key=context.ingestion_key,
+            destination=destination,
+            window_start=window.start if window else None,
+            window_end=window.end if window else None,
+            watermark_before=_watermark_json(
+                window.watermark_before if window else None
+            ),
+            watermark_after=_watermark_json(watermark_after),
+        )
 
     def _record_run_safely(self, entry: RunLogEntry) -> None:
         if self._run_log_store is None:
@@ -249,8 +345,6 @@ class Pipeline:
         try:
             self._run_log_store.record(entry)
         except Exception as exc:
-            # Observability must never turn an already-committed ingestion into
-            # a synthetic extraction failure or mask the original source error.
             logger.exception("Falha ao persistir auditoria da execucao %s", entry.run_id)
             visual_logger.warning(
                 "Auditoria da execucao '{}' nao foi persistida: {}",
