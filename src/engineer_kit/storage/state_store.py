@@ -60,4 +60,6 @@ def __getattr__(name: str):
     return DuckDBStateStore
 
 
-__all__ = ["StateStore", "Watermark", "DuckDBStateStore", "IngestionStateStore"]
+# ``__getattr__`` preserves explicit legacy imports. Wildcard exports remain
+# backend-neutral so static tooling and core-only installations see only ports.
+__all__ = ["StateStore", "Watermark"]
