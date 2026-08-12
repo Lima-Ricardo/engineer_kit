@@ -3,6 +3,8 @@
 The physical Bronze contract is deliberately simple and stable: all declared
 API fields are persisted as strings, missing fields become null, unknown fields
 are preserved in ``_extra``, and the original record is retained in ``_raw``.
+Official destinations also persist run/window metadata so retries are auditable
+and can be made idempotent without inspecting the Bronze payload itself.
 """
 
 from __future__ import annotations
@@ -11,10 +13,21 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from engineer_kit.storage.destination import LoadContext
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.schema import EndpointSchema
 
-METADATA_COLUMNS = ["_source", "_endpoint", "_ingested_at", "_raw", "_extra"]
+METADATA_COLUMNS = [
+    "_source",
+    "_endpoint",
+    "_ingested_at",
+    "_run_id",
+    "_ingestion_key",
+    "_window_start",
+    "_window_end",
+    "_raw",
+    "_extra",
+]
 
 
 def _bronze_scalar(value: Any) -> str | None:
@@ -33,12 +46,14 @@ def build_bronze_rows(
     schema: EndpointSchema,
     batch: list[dict[str, Any]],
     *,
+    context: LoadContext | None = None,
     ingested_at: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """Normalize one batch into the portable Bronze row contract."""
+    load_context = context or LoadContext.adhoc(connector_name)
     column_names = schema.column_names()
     known_columns = set(column_names)
-    timestamp = ingested_at or datetime.now(timezone.utc)
+    timestamp = ingested_at or load_context.started_at or datetime.now(timezone.utc)
     extra_fields: set[str] = set()
     rows: list[dict[str, Any]] = []
 
@@ -51,6 +66,10 @@ def build_bronze_rows(
         row["_source"] = connector_name
         row["_endpoint"] = endpoint
         row["_ingested_at"] = timestamp
+        row["_run_id"] = load_context.run_id
+        row["_ingestion_key"] = load_context.ingestion_key
+        row["_window_start"] = load_context.window_start
+        row["_window_end"] = load_context.window_end
         row["_raw"] = json.dumps(original, ensure_ascii=False, default=str)
         row["_extra"] = json.dumps(extras, ensure_ascii=False, default=str) if extras else None
         rows.append(row)
