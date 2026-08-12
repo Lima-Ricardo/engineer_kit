@@ -23,6 +23,7 @@ from engineer_kit.adapters.registry import (
     build_state_store,
     resolve_auto,
 )
+from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import IncrementalMode
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES, PaginationStrategy
 from engineer_kit.connectors.rest import DateParams, RestConnector
@@ -140,6 +141,7 @@ class ConnectorConfig:
     date_params: DateParamsConfig = field(default_factory=DateParamsConfig)
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
+    extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE
 
 
 @dataclass
@@ -235,6 +237,9 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         date_params=DateParamsConfig(**connector_data.get("date_params", {})),
         records_path=connector_data.get("records_path"),
         static_params=connector_data.get("static_params") or {},
+        extraction_batch_size=connector_data.get(
+            "extraction_batch_size", DEFAULT_EXTRACTION_BATCH_SIZE
+        ),
     )
     columns = [
         ColumnConfig(name=column["name"], dtype=column.get("dtype", "string"))
@@ -270,6 +275,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "date_params": asdict(config.connector.date_params),
             "records_path": config.connector.records_path,
             "static_params": config.connector.static_params,
+            "extraction_batch_size": config.connector.extraction_batch_size,
         },
         "columns": [asdict(column) for column in config.columns],
         "destination": asdict(config.destination),
@@ -364,6 +370,7 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             date_params=config.connector.date_params.build(),
             static_params=config.connector.static_params or None,
             records_path=config.connector.records_path,
+            extraction_batch_size=config.connector.extraction_batch_size,
         )
         schema = EndpointSchema(
             columns=[ColumnSpec(column.name, dtype=column.dtype) for column in config.columns]
