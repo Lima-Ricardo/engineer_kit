@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import duckdb
 
@@ -37,6 +37,34 @@ class WindowConnector:
         )
 
 
+class AdvancingWindowConnector:
+    """Same calendar window, but checkpoint identity advances after each success."""
+
+    def __init__(self):
+        self.name = "events"
+        self.current_window = None
+        self.watermark = None
+        self.run_number = 0
+
+    def extract(self, end="today"):
+        self.run_number += 1
+        self.current_window = IncrementalWindow(
+            start=date(2026, 8, 12),
+            end=date(2026, 8, 12),
+            watermark_before=self.watermark,
+        )
+        return iter([{"id": str(self.run_number)}])
+
+    def commit_watermark(self, max_data_date=None):
+        self.watermark = Watermark(
+            last_run_at=datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+            + timedelta(seconds=self.run_number),
+            last_data_date=date(2026, 8, 12),
+            cursor_value=None,
+        )
+        return self.watermark
+
+
 class FailingRunLog(RunLogBackend):
     def __init__(self):
         self.calls = 0
@@ -66,6 +94,26 @@ def test_checkpoint_failure_reports_committed_rows_and_retry_does_not_duplicate(
     assert second.success
     assert conn.execute("SELECT count(*) FROM bronze.events").fetchone()[0] == 1
     assert first.steps[0].ingestion_key == second.steps[0].ingestion_key
+
+
+def test_successful_same_day_runs_get_different_ingestion_keys_after_checkpoint_advances():
+    conn = duckdb.connect()
+    connector = AdvancingWindowConnector()
+    pipeline = Pipeline(
+        connector=connector,
+        schema=EndpointSchema.from_names(["id"]),
+        destination=DuckDBLoader(conn),
+        run_log=False,
+    )
+
+    first = pipeline.run()
+    second = pipeline.run()
+
+    assert first.success and second.success
+    assert first.steps[0].window_start == second.steps[0].window_start
+    assert first.steps[0].window_end == second.steps[0].window_end
+    assert first.steps[0].ingestion_key != second.steps[0].ingestion_key
+    assert conn.execute("SELECT id FROM bronze.events ORDER BY id").fetchall() == [("1",), ("2",)]
 
 
 def test_audit_failure_is_non_fatal_after_data_and_checkpoint_commit():
