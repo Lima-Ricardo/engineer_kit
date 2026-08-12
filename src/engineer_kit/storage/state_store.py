@@ -1,11 +1,8 @@
-"""Contratos e implementacoes para persistir o estado incremental.
+"""Backend-agnostic contracts for incremental ingestion state.
 
-O core da ingestao depende apenas de :class:`StateStore`. Onde o
-watermark vive e uma decisao de infraestrutura: DuckDB no modo local,
-Delta/Lakehouse em plataformas de dados, ou uma implementacao customizada.
-
-`IngestionStateStore` e mantido como alias compativel da implementacao
-DuckDB para nao quebrar codigo existente.
+The ingestion core depends only on :class:`StateStore`. Concrete storage
+backends (DuckDB locally, Delta/Lakehouse, or user-defined implementations)
+live outside this module so importing the core does not require DuckDB.
 """
 
 from __future__ import annotations
@@ -15,12 +12,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
-import duckdb
-
 
 @dataclass(frozen=True)
 class Watermark:
-    """Checkpoint persistido depois de uma carga concluida com sucesso."""
+    """Checkpoint persisted only after a load is confirmed successful."""
 
     last_run_at: datetime
     last_data_date: Optional[date]
@@ -28,84 +23,41 @@ class Watermark:
 
 
 class StateStore(ABC):
-    """Porta de persistencia usada pelo incremental.
+    """Persistence port used by incremental strategies.
 
-    Implementacoes precisam apenas ler e substituir atomicamente o
-    watermark de um conector. Isso mantem APIConnector e
-    IncrementalStrategy independentes de DuckDB, Delta ou qualquer
-    plataforma especifica.
+    Implementations only need to read and atomically replace the watermark
+    for a connector. The connector therefore never needs to know whether
+    state lives in DuckDB, Delta, a SQL table, or another service.
     """
 
     @abstractmethod
     def get_watermark(self, connector_name: str) -> Watermark | None:
-        """Retorna o ultimo checkpoint do conector ou ``None`` no primeiro run."""
+        """Return the last checkpoint or ``None`` for the first run."""
 
     @abstractmethod
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
-        """Persiste o checkpoint somente depois que a carga foi confirmada."""
+        """Persist a checkpoint after the destination has confirmed the load."""
 
 
-class DuckDBStateStore(StateStore):
-    """StateStore zero-infra persistido na area `_meta` do DuckDB."""
-
-    _SCHEMA = "_meta"
-    _TABLE = "ingestion_state"
-
-    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-        self._conn = conn
-        self._ensure_table()
-
-    def _ensure_table(self) -> None:
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._SCHEMA}")
-        self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self._SCHEMA}.{self._TABLE} (
-                connector_name VARCHAR PRIMARY KEY,
-                last_run_at TIMESTAMP,
-                last_data_date DATE,
-                cursor_value VARCHAR
-            )
-            """
-        )
-
-    def get_watermark(self, connector_name: str) -> Watermark | None:
-        row = self._conn.execute(
-            f"SELECT last_run_at, last_data_date, cursor_value "
-            f"FROM {self._SCHEMA}.{self._TABLE} WHERE connector_name = ?",
-            [connector_name],
-        ).fetchone()
-        if row is None:
-            return None
-        last_run_at, last_data_date, cursor_value = row
-        return Watermark(
-            last_run_at=last_run_at,
-            last_data_date=last_data_date,
-            cursor_value=cursor_value,
-        )
-
-    def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
-        """Substitui o checkpoint numa unica transacao."""
-        self._conn.execute("BEGIN TRANSACTION")
-        try:
-            self._conn.execute(
-                f"DELETE FROM {self._SCHEMA}.{self._TABLE} WHERE connector_name = ?",
-                [connector_name],
-            )
-            self._conn.execute(
-                f"INSERT INTO {self._SCHEMA}.{self._TABLE} VALUES (?, ?, ?, ?)",
-                [
-                    connector_name,
-                    watermark.last_run_at,
-                    watermark.last_data_date,
-                    watermark.cursor_value,
-                ],
-            )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
+_DUCKDB_EXPORTS = {"DuckDBStateStore", "IngestionStateStore"}
 
 
-# Compatibilidade com a API 0.1: codigo existente continua funcionando,
-# enquanto codigo novo pode usar o nome que explicita o backend.
-IngestionStateStore = DuckDBStateStore
+def __getattr__(name: str):
+    """Keep 0.1 DuckDB imports compatible without making DuckDB a core dependency."""
+    if name not in _DUCKDB_EXPORTS:
+        raise AttributeError(name)
+
+    try:
+        from engineer_kit.adapters.duckdb.state_store import DuckDBStateStore
+    except ModuleNotFoundError as exc:
+        if exc.name == "duckdb":
+            raise ModuleNotFoundError(
+                "DuckDB support is optional. Install it with "
+                "`pip install \"engineer_kit[duckdb]\"`."
+            ) from None
+        raise
+
+    return DuckDBStateStore
+
+
+__all__ = ["StateStore", "Watermark", "DuckDBStateStore", "IngestionStateStore"]
