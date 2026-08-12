@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Execução {{ state.pipeline_name }} - engineer_kit{% endblock %}
+{% block content %}
+<h1>Rodando: {{ state.pipeline_name }}</h1>
+<p class="subtitle">Execução <code>{{ state.run_id }}</code> — <span id="status-badge" class="badge badge-running">running</span></p>
+
+<div id="log-output"></div>
+
+<p style="margin-top:16px">
+    <a href="/pipelines/{{ state.pipeline_name }}" class="btn">Voltar para o pipeline</a>
+</p>
+
+<script>
+const logEl = document.getElementById('log-output');
+const badgeEl = document.getElementById('status-badge');
+const source = new EventSource('/runs/{{ state.run_id }}/stream');
+
+source.onmessage = function (event) {
+    logEl.textContent += event.data + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+};
+source.addEventListener('done', function (event) {
+    badgeEl.textContent = event.data;
+    badgeEl.className = 'badge badge-' + event.data;
+    source.close();
+});
+source.onerror = function () {
+    source.close();
+};
+</script>
+{% endblock %}

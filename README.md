@@ -12,6 +12,7 @@ The goal is to be the easy-to-use bridge between a REST API and an analytics pip
 - **Python writes the raw load (bronze)**, already flattened, with everything as `VARCHAR` by default, using DuckDB as the execution engine underneath (never exposed directly — you configure `DuckDBLoader`, not raw SQL). It never breaks on schema drift: any new field the API sends goes into an `_extra` column, with a log warning — the load never fails because of it. Writes happen in batches, not all at once.
 - **dbt does the real transformation** (staging → silver → gold), also running on DuckDB via the `dbt-duckdb` adapter. Staging (type casting) is generated automatically from the declared schema; business rules are still written by hand — dbt is the only place transformation logic lives.
 - **Visual log + run table**: every load shows a terminal progress bar and records start/end/status/row count in `_meta.run_log` inside DuckDB itself — queryable from dbt like any other source.
+- **Optional local web UI** (`engineer_kit ui`): configure connectors through a form, run and monitor pipelines with a live log, browse the warehouse — see [Web UI](#web-ui-optional) below.
 
 DuckDB itself is never a third thing you manage — it's the engine both Python and dbt run on, invisible the same way `libpq` is invisible when you say "I use Postgres."
 
@@ -175,6 +176,23 @@ venv/Scripts/python.exe examples/github_commits.py
 
 Extracts recent commits from `psf/requests`, loads them into bronze in batches, generates dbt staging, materializes a silver model (`commits_daily_summary`) and records the run in `_meta.run_log` — all against the public GitHub API, no token needed for this example's volume.
 
+## Web UI (optional)
+
+A local dashboard for configuring and monitoring pipelines without writing Python — install with `pip install "engineer_kit[ui]"`, then:
+
+```bash
+engineer_kit ui --workspace .
+```
+
+Opens on `http://127.0.0.1:8000` with HTTP Basic Auth (`admin`/`admin` by default — override with `ENGINEER_KIT_UI_USER`/`ENGINEER_KIT_UI_PASSWORD`, or with `--username`/`--password`). It only binds to localhost by default; exposing it elsewhere is your responsibility.
+
+The "workspace" is a folder with `pipelines/*.yaml`, a `warehouse.duckdb` file, and a `dbt_project/` — the same layout as the example above. From the UI you can:
+
+- **Create/edit a connector** through a form (base URL, auth, pagination, incremental, schema) — this builds a `RestConnector` under the hood via a new declarative YAML config (`PipelineConfig`/`build_pipeline`, also usable directly from Python without the UI). Custom `APIConnector` subclasses still require Python code — the form covers the same ground as `RestConnector`, not arbitrary connectors.
+- **Run a pipeline** and watch its log live (Server-Sent Events, same visual log described above) instead of waiting for a blocking command to finish.
+- **Browse the DuckDB warehouse**: every schema/table with row counts, and a row preview.
+- **See the dbt models** across staging/silver/gold.
+
 ## Scope
 
 Focused on **API ingestion**. Database sources and cloud warehouse destinations (Redshift, Snowflake, Data Lake) were deliberately left out — not due to a technical limitation, but because joining data across different database engines in a single query is a query-federation problem (Trino/Presto), not something a Python abstraction layer solves.
@@ -196,6 +214,7 @@ O objetivo é ser a ponte fácil de usar entre uma API REST e um pipeline analí
 - **O Python grava a carga bruta (bronze)**, já desaninhada, com tudo como `VARCHAR` por padrão, usando o DuckDB como motor de execução por baixo (nunca exposto direto — você configura o `DuckDBLoader`, não escreve SQL). Nunca quebra por schema drift: campo novo que a API mandar vai para uma coluna `_extra`, com aviso no log — a carga nunca falha por isso. A gravação acontece em blocos, não tudo de uma vez.
 - **O dbt faz a transformação de verdade** (staging → silver → gold), também rodando em cima do DuckDB via o adapter `dbt-duckdb`. O staging (cast de tipo) é gerado automaticamente a partir do schema declarado; as regras de negócio continuam sendo escritas à mão — o dbt é o único lugar onde mora lógica de transformação.
 - **Log visual + tabela de execução**: cada carga mostra uma barra de progresso no terminal e registra início/fim/status/quantidade em `_meta.run_log` no próprio DuckDB — consultável pelo dbt como qualquer outra fonte.
+- **Interface web local opcional** (`engineer_kit ui`): configura conector pelo formulário, roda e acompanha pipelines com log ao vivo, navega o warehouse — ver [Interface web](#interface-web-opcional) abaixo.
 
 O DuckDB nunca é uma terceira coisa que você gerencia — é o motor sobre o qual Python e dbt rodam, invisível do mesmo jeito que o `libpq` é invisível quando você diz "eu uso Postgres".
 
@@ -358,6 +377,23 @@ venv/Scripts/python.exe examples/github_commits.py
 ```
 
 Extrai commits recentes de `psf/requests`, carrega no bronze em blocos, gera o staging do dbt, materializa um modelo de silver (`commits_daily_summary`) e registra a execução em `_meta.run_log` — tudo contra a API pública do GitHub, sem precisar de token para o volume desse exemplo.
+
+## Interface web (opcional)
+
+Um painel local pra configurar e monitorar pipelines sem escrever Python — instale com `pip install "engineer_kit[ui]"` e rode:
+
+```bash
+engineer_kit ui --workspace .
+```
+
+Abre em `http://127.0.0.1:8000` com autenticação básica (`admin`/`admin` por padrão — troque via `ENGINEER_KIT_UI_USER`/`ENGINEER_KIT_UI_PASSWORD`, ou `--username`/`--password`). Só faz bind em localhost por padrão; expor em outro endereço é responsabilidade de quem estiver rodando.
+
+O "workspace" é uma pasta com `pipelines/*.yaml`, um arquivo `warehouse.duckdb` e um `dbt_project/` — o mesmo layout do exemplo acima. Pela interface dá pra:
+
+- **Criar/editar um conector** por formulário (URL base, autenticação, paginação, incremental, schema) — isso monta um `RestConnector` por baixo, através de uma nova configuração declarativa em YAML (`PipelineConfig`/`build_pipeline`, também usável direto em Python sem a interface). Conector customizado (subclasse de `APIConnector`) continua exigindo código Python — o formulário cobre o mesmo terreno do `RestConnector`, não qualquer conector possível.
+- **Rodar um pipeline** e acompanhar o log ao vivo (Server-Sent Events, o mesmo log visual descrito acima), em vez de esperar um comando bloqueante terminar.
+- **Navegar o warehouse DuckDB**: todo schema/tabela com contagem de linhas, e uma amostra dos dados.
+- **Ver os modelos dbt** em staging/silver/gold.
 
 ## Escopo
 

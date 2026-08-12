@@ -7,6 +7,9 @@ usuario (ex.: "pipelines.commits:pipeline") — a CLI nunca sabe o que
 tem dentro do pipeline, so o executa. Isso e o que permite qualquer
 orquestrador externo (Airflow, cron, GitHub Actions) chamar a mesma
 unidade sem precisar conhecer o codigo Python por dentro.
+
+`engineer_kit ui` sobe a interface web local (opcional -- precisa de
+`pip install "engineer_kit[ui]"`).
 """
 
 from __future__ import annotations
@@ -61,6 +64,36 @@ def schedule(
     scheduler = Scheduler()
     scheduler.schedule(pipeline, CronTrigger(cron), job_id=target)
     scheduler.start()
+
+
+@app.command()
+def ui(
+    workspace: str = typer.Option(
+        ".", help="Pasta do workspace: pipelines/*.yaml, warehouse.duckdb, dbt_project/."
+    ),
+    host: str = typer.Option("127.0.0.1", help="Endereco para bind. Nao exponha fora de localhost."),
+    port: int = typer.Option(8000, help="Porta."),
+    username: str = typer.Option("admin", envvar="ENGINEER_KIT_UI_USER"),
+    password: str = typer.Option("admin", envvar="ENGINEER_KIT_UI_PASSWORD"),
+) -> None:
+    """Sobe a interface web local: dashboard de pipelines, navegador de dados, modelos dbt."""
+    try:
+        import uvicorn
+
+        from engineer_kit.ui.app import create_app
+    except ImportError as exc:
+        typer.echo("A interface web precisa de dependencias extras: pip install \"engineer_kit[ui]\"")
+        raise typer.Exit(code=1) from exc
+
+    if host not in ("127.0.0.1", "localhost"):
+        typer.echo(
+            "Aviso: a autenticacao aqui e basica (usuario/senha simples), pensada so para uso em "
+            "localhost. Expor em outro endereco e responsabilidade de quem estiver rodando."
+        )
+
+    web_app = create_app(workspace_dir=workspace, username=username, password=password)
+    typer.echo(f"Subindo em http://{host}:{port} (usuario: {username})")
+    uvicorn.run(web_app, host=host, port=port)
 
 
 if __name__ == "__main__":

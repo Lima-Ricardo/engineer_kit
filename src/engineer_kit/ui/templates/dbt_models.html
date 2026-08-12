@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}dbt - engineer_kit{% endblock %}
+{% block content %}
+<h1>Modelos dbt</h1>
+<p class="subtitle">staging → silver → gold, na ordem em que os dados fluem.</p>
+
+{% for layer, models in layers.items() %}
+<h2>{{ layer }}</h2>
+{% if models %}
+<table>
+    <tbody>
+        {% for model in models %}
+        <tr><td>{{ model }}</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">Nenhum modelo em <code>models/{{ layer }}/</code> ainda.</div>
+{% endif %}
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Pipelines - engineer_kit{% endblock %}
+{% block content %}
+<h1>Pipelines</h1>
+<p class="subtitle">Conectores configurados neste workspace.</p>
+
+{% if pipelines %}
+<table>
+    <thead>
+        <tr>
+            <th>Nome</th>
+            <th>Endpoint</th>
+            <th>Última execução</th>
+            <th>Status</th>
+            <th>Registros</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in pipelines %}
+        <tr>
+            <td><a href="/pipelines/{{ item.config.name }}">{{ item.config.name }}</a></td>
+            <td>{{ item.config.connector.base_url }}</td>
+            <td>{{ item.last_run.finished_at if item.last_run else "nunca rodou" }}</td>
+            <td>
+                {% if item.last_run %}
+                    <span class="badge badge-{{ item.last_run.status }}">{{ item.last_run.status }}</span>
+                {% else %}
+                    <span class="badge badge-none">—</span>
+                {% endif %}
+            </td>
+            <td>{{ item.last_run.rows_loaded if item.last_run else "—" }}</td>
+            <td><a href="/pipelines/{{ item.config.name }}" class="btn btn-sm">Ver</a></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">Nenhum pipeline configurado ainda. <a href="/pipelines/new">Criar o primeiro</a>.</div>
+{% endif %}
+{% endblock %}

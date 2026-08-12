@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}engineer_kit{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="layout">
+        <nav class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">⚙</span>
+                <span class="brand-name">engineer_kit</span>
+            </div>
+            <a href="/" class="nav-link">Pipelines</a>
+            <a href="/data" class="nav-link">Dados</a>
+            <a href="/dbt" class="nav-link">dbt</a>
+            <div class="sidebar-footer">
+                <a href="/pipelines/new" class="btn btn-primary btn-block">+ Novo pipeline</a>
+            </div>
+        </nav>
+        <main class="content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>

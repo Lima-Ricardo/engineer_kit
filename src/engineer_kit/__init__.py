@@ -18,6 +18,22 @@ from engineer_kit.connectors.api_connector import (
     VALID_HTTP_METHODS,
 )
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
+from engineer_kit.config.pipeline_config import (
+    AuthConfig,
+    ColumnConfig,
+    ConnectorConfig,
+    DateParamsConfig,
+    DestinationConfig,
+    IncrementalConfig,
+    PaginationConfig,
+    PipelineConfig,
+    PipelineConfigError,
+    SecretsConfig,
+    build_pipeline,
+    list_pipeline_configs,
+    load_pipeline_config,
+    save_pipeline_config,
+)
 from engineer_kit.connectors.incremental import (
     IncrementalMode,
     IncrementalStrategy,
@@ -84,6 +100,21 @@ __all__ = [
     "DateFieldSpec",
     "extract_date_value",
     "stringify",
+    # config declarativo
+    "PipelineConfig",
+    "ConnectorConfig",
+    "ColumnConfig",
+    "DestinationConfig",
+    "SecretsConfig",
+    "AuthConfig",
+    "PaginationConfig",
+    "IncrementalConfig",
+    "DateParamsConfig",
+    "PipelineConfigError",
+    "load_pipeline_config",
+    "save_pipeline_config",
+    "list_pipeline_configs",
+    "build_pipeline",
     # paginacao
     "PaginationStrategy",
     "ParsedPage",

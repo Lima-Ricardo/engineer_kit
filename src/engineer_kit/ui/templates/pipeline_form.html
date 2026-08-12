@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}{{ "Editar" if config else "Novo" }} pipeline - engineer_kit{% endblock %}
+{% block content %}
+<h1>{{ "Editar pipeline" if config else "Novo pipeline" }}</h1>
+<p class="subtitle">Configura um conector REST comum — sem escrever código Python.</p>
+
+{% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+
+<form method="post" action="/pipelines/save" id="pipeline-form">
+
+    <fieldset>
+        <legend>Identificação</legend>
+        <div class="field">
+            <label>Nome do pipeline</label>
+            <input type="text" name="name" value="{{ config.name if config else '' }}" {{ "readonly" if config else "" }} required>
+            <div class="field-hint">Usado como identificador único (nome da tabela no bronze, chave do watermark).</div>
+        </div>
+        <div class="field-row">
+            <div class="field">
+                <label>URL base</label>
+                <input type="text" name="base_url" value="{{ config.connector.base_url if config else '' }}" placeholder="https://api.exemplo.com/recurso" required>
+            </div>
+            <div class="field">
+                <label>Método HTTP</label>
+                <select name="method">
+                    <option value="GET" {{ "selected" if config and config.connector.method == "GET" else "" }}>GET</option>
+                    <option value="POST" {{ "selected" if config and config.connector.method == "POST" else "" }}>POST</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Autenticação</legend>
+        <div class="field">
+            <label>Tipo</label>
+            <select name="auth_type" id="auth_type">
+                <option value="none" {{ "selected" if config and config.connector.auth.type == "none" else "" }}>Nenhuma (API pública)</option>
+                <option value="bearer" {{ "selected" if config and config.connector.auth.type == "bearer" else "" }}>Bearer token</option>
+                <option value="api_key" {{ "selected" if config and config.connector.auth.type == "api_key" else "" }}>API key</option>
+            </select>
+        </div>
+        <div class="field-row">
+            <div class="field">
+                <label>Nome da variável de segredo</label>
+                <input type="text" name="auth_secret_key" value="{{ config.connector.auth.secret_key if config and config.connector.auth.secret_key else '' }}" placeholder="GITHUB_TOKEN">
+                <div class="field-hint">Nome da variável de ambiente que guarda o token/chave — o valor nunca é digitado aqui.</div>
+            </div>
+            <div class="field">
+                <label>Nome do parâmetro (API key)</label>
+                <input type="text" name="auth_param_name" value="{{ config.connector.auth.param_name if config else 'api_key' }}">
+            </div>
+            <div class="field">
+                <label>Local da API key</label>
+                <select name="auth_location">
+                    <option value="query" {{ "selected" if config and config.connector.auth.location == "query" else "" }}>Query param</option>
+                    <option value="header" {{ "selected" if config and config.connector.auth.location == "header" else "" }}>Header</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Paginação</legend>
+        <div class="field">
+            <label>Tipo</label>
+            <select name="pagination_type" id="pagination_type">
+                {% for ptype in pagination_types %}
+                <option value="{{ ptype }}" {{ "selected" if config and config.connector.pagination.type == ptype else "" }}>{{ ptype }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        {% set p = config.connector.pagination.params if config else {} %}
+        <div class="pagination-fields" data-type="page">
+            <div class="field-row">
+                <div class="field"><label>Parâmetro de página</label><input type="text" name="page_param" value="{{ p.get('page_param', 'page') }}"></div>
+                <div class="field"><label>Parâmetro de tamanho</label><input type="text" name="page_size_param" value="{{ p.get('page_size_param', 'per_page') }}"></div>
+                <div class="field"><label>Registros por página</label><input type="number" name="page_size" value="{{ p.get('page_size', 100) }}"></div>
+            </div>
+        </div>
+        <div class="pagination-fields" data-type="offset">
+            <div class="field-row">
+                <div class="field"><label>Parâmetro de offset</label><input type="text" name="offset_param" value="{{ p.get('offset_param', 'offset') }}"></div>
+                <div class="field"><label>Parâmetro de limite</label><input type="text" name="limit_param" value="{{ p.get('limit_param', 'limit') }}"></div>
+                <div class="field"><label>Limite</label><input type="number" name="limit" value="{{ p.get('limit', 100) }}"></div>
+            </div>
+        </div>
+        <div class="pagination-fields" data-type="cursor">
+            <div class="field-row">
+                <div class="field"><label>Parâmetro de cursor (request)</label><input type="text" name="cursor_param" value="{{ p.get('cursor_param', 'cursor') }}"></div>
+                <div class="field"><label>Campo de cursor (na resposta)</label><input type="text" name="cursor_field" value="{{ p.get('cursor_field', 'next_cursor') }}"></div>
+            </div>
+        </div>
+        <div class="pagination-fields" data-type="link_header">
+            <div class="field"><label>Nome do header</label><input type="text" name="header_name" value="{{ p.get('header_name', 'Link') }}"></div>
+        </div>
+        <div class="pagination-fields" data-type="next_url">
+            <div class="field"><label>Campo de próxima URL (na resposta)</label><input type="text" name="next_url_field" value="{{ p.get('next_url_field', 'next') }}"></div>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Incremental</legend>
+        <div class="field-row">
+            <div class="field">
+                <label>Modo</label>
+                <select name="incremental_mode" id="incremental_mode">
+                    <option value="data_date" {{ "selected" if config and config.connector.incremental.mode == "data_date" else "" }}>Pela data do dado</option>
+                    <option value="ingestion_date" {{ "selected" if config and config.connector.incremental.mode == "ingestion_date" else "" }}>Pela data de ingestão</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Data inicial (primeira execução)</label>
+                <input type="date" name="initial_start" value="{{ config.connector.incremental.initial_start if config and config.connector.incremental.initial_start else '' }}">
+            </div>
+        </div>
+        <div class="field" id="date_field_wrapper">
+            <label>Campo de data (caminho no JSON bruto, ex: commit.author.date)</label>
+            <input type="text" name="date_field" value="{{ config.connector.incremental.date_field if config and config.connector.incremental.date_field else '' }}">
+            <div class="field-hint">Obrigatório no modo "pela data do dado". Separado por ponto, olhando a resposta crua da API (antes de achatar).</div>
+        </div>
+        <div class="field-row">
+            <div class="field"><label>Parâmetro de data inicial na URL</label><input type="text" name="date_param_start" value="{{ config.connector.date_params.start if config and config.connector.date_params.start else '' }}" placeholder="since"></div>
+            <div class="field"><label>Parâmetro de data final na URL</label><input type="text" name="date_param_end" value="{{ config.connector.date_params.end if config and config.connector.date_params.end else '' }}" placeholder="until"></div>
+            <div class="field"><label>Formato de data</label><input type="text" name="date_param_format" value="{{ config.connector.date_params.format if config else '%Y-%m-%d' }}"></div>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Schema (colunas esperadas)</legend>
+        <div id="columns-container">
+            {% if config and config.columns %}
+                {% for col in config.columns %}
+                <div class="field-row column-row">
+                    <div class="field"><input type="text" name="column_name" value="{{ col.name }}" placeholder="nome_da_coluna"></div>
+                    <div class="field"><input type="text" name="column_dtype" value="{{ col.dtype }}" placeholder="VARCHAR"></div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="field-row column-row">
+                    <div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div>
+                    <div class="field"><input type="text" name="column_dtype" placeholder="VARCHAR" value="VARCHAR"></div>
+                </div>
+            {% endif %}
+        </div>
+        <button type="button" class="btn btn-sm" id="add-column">+ Adicionar coluna</button>
+        <div class="field-hint">Campo que a API mandar fora dessas colunas cai em <code>_extra</code>, sem quebrar a carga.</div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Destino</legend>
+        <div class="field-row">
+            <div class="field"><label>Schema no DuckDB</label><input type="text" name="destination_schema" value="{{ config.destination.schema if config else 'bronze' }}"></div>
+            <div class="field"><label>Registros por bloco</label><input type="number" name="batch_size" value="{{ config.destination.batch_size if config else 1000 }}"></div>
+        </div>
+    </fieldset>
+
+    <button type="submit" class="btn btn-primary">Salvar pipeline</button>
+    <a href="/" class="btn">Cancelar</a>
+</form>
+
+<script>
+function updatePaginationFields() {
+    const type = document.getElementById('pagination_type').value;
+    document.querySelectorAll('.pagination-fields').forEach(function (el) {
+        el.classList.toggle('active', el.dataset.type === type);
+    });
+}
+function updateDateField() {
+    const mode = document.getElementById('incremental_mode').value;
+    document.getElementById('date_field_wrapper').style.display = mode === 'data_date' ? 'block' : 'none';
+}
+document.getElementById('pagination_type').addEventListener('change', updatePaginationFields);
+document.getElementById('incremental_mode').addEventListener('change', updateDateField);
+document.getElementById('add-column').addEventListener('click', function () {
+    const container = document.getElementById('columns-container');
+    const row = document.createElement('div');
+    row.className = 'field-row column-row';
+    row.innerHTML = '<div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div>' +
+                    '<div class="field"><input type="text" name="column_dtype" placeholder="VARCHAR" value="VARCHAR"></div>';
+    container.appendChild(row);
+});
+updatePaginationFields();
+updateDateField();
+</script>
+{% endblock %}

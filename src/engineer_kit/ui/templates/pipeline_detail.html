@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ config.name }} - engineer_kit{% endblock %}
+{% block content %}
+<h1>{{ config.name }}</h1>
+<p class="subtitle">{{ config.connector.method }} {{ config.connector.base_url }}</p>
+
+<div class="card">
+    <form method="post" action="/pipelines/{{ config.name }}/run" style="display:inline">
+        <button type="submit" class="btn btn-primary">▶ Rodar agora</button>
+    </form>
+    <a href="/pipelines/{{ config.name }}/edit" class="btn">Editar</a>
+    <a href="/data/{{ config.destination.schema }}/{{ config.name }}" class="btn">Ver dados</a>
+</div>
+
+<h2>Configuração</h2>
+<table>
+    <tbody>
+        <tr><td>Paginação</td><td>{{ config.connector.pagination.type }}</td></tr>
+        <tr><td>Incremental</td><td>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %} (campo: {{ config.connector.incremental.date_field }}){% endif %}</td></tr>
+        <tr><td>Autenticação</td><td>{{ config.connector.auth.type }}</td></tr>
+        <tr><td>Schema destino</td><td>{{ config.destination.schema }}</td></tr>
+        <tr><td>Registros por bloco</td><td>{{ config.destination.batch_size }}</td></tr>
+        <tr><td>Colunas declaradas</td><td>{{ config.columns | map(attribute="name") | join(", ") }}</td></tr>
+    </tbody>
+</table>
+
+<h2>Histórico de execuções</h2>
+{% if history %}
+<table>
+    <thead><tr><th>Início</th><th>Fim</th><th>Status</th><th>Registros</th><th>Erro</th></tr></thead>
+    <tbody>
+        {% for run in history %}
+        <tr>
+            <td>{{ run.started_at }}</td>
+            <td>{{ run.finished_at }}</td>
+            <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+            <td>{{ run.rows_loaded }}</td>
+            <td>{{ run.error_message or "" }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">Ainda não rodou.</div>
+{% endif %}
+{% endblock %}
