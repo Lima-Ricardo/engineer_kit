@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import secrets
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ app = typer.Typer(add_completion=False)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_MIN_REMOTE_PASSWORD_LENGTH = 12
 
 
 def _load_pipeline(target: str) -> Pipeline:
@@ -68,6 +70,10 @@ def _validate_ui_exposure(
         raise ValueError(
             "Exposicao remota recusa as credenciais padrao. Defina "
             "ENGINEER_KIT_UI_USER e ENGINEER_KIT_UI_PASSWORD (ou --username/--password)."
+        )
+    if len(password) < _MIN_REMOTE_PASSWORD_LENGTH:
+        raise ValueError(
+            f"Senha de UI remota deve ter pelo menos {_MIN_REMOTE_PASSWORD_LENGTH} caracteres."
         )
 
 
@@ -141,7 +147,11 @@ def ui(
     host: str = typer.Option("127.0.0.1", help="Endereco para bind."),
     port: int = typer.Option(8000, min=1, max=65535, help="Porta."),
     username: str = typer.Option("admin", envvar="ENGINEER_KIT_UI_USER"),
-    password: str = typer.Option("admin", envvar="ENGINEER_KIT_UI_PASSWORD"),
+    password: str | None = typer.Option(
+        None,
+        envvar="ENGINEER_KIT_UI_PASSWORD",
+        help="Senha HTTP Basic. No localhost, uma senha aleatoria e gerada se omitida.",
+    ),
     allow_remote: bool = typer.Option(
         False,
         "--allow-remote",
@@ -149,6 +159,18 @@ def ui(
     ),
 ) -> None:
     """Sobe o lab web local: pipelines, dados e modelos dbt."""
+    if password is None:
+        if host not in _LOOPBACK_HOSTS:
+            raise typer.BadParameter(
+                "Exposicao remota exige ENGINEER_KIT_UI_PASSWORD/--password explicita.",
+                param_hint="--password",
+            )
+        password = secrets.token_urlsafe(24)
+        typer.echo(
+            "Senha temporaria da UI local (nao persistida; muda a cada inicializacao): "
+            f"{password}"
+        )
+
     try:
         _validate_ui_exposure(
             host,
