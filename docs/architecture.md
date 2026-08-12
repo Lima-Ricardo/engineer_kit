@@ -159,9 +159,14 @@ A ordem é proposital:
 3. avança watermark
 ```
 
-Isso impede perda silenciosa de dados. Existe, porém, uma janela em que o Destination pode confirmar e o StateStore falhar. Nesse caso, a próxima execução repete a mesma janela.
+Isso impede perda silenciosa de dados. Existe, porém, uma janela em que o Destination pode confirmar e o StateStore falhar. Nesse caso, a próxima execução repete a mesma transição de checkpoint.
 
-Para os adapters oficiais, o `Pipeline` calcula uma `ingestion_key` determinística usando connector + janela incremental. Assim, o retry substitui a representação anterior daquela mesma janela:
+Para os adapters oficiais, o `Pipeline` calcula uma `ingestion_key` determinística usando **connector + janela incremental + checkpoint anterior**. Assim:
+
+- um retry após falha do StateStore recebe a mesma chave e substitui a representação anterior daquela tentativa;
+- depois de um checkpoint bem-sucedido, o checkpoint anterior muda, então uma nova execução recebe outra chave mesmo quando acontece no mesmo dia e resolve as mesmas datas de janela.
+
+Implementação por adapter:
 
 - DuckDB: `DELETE _ingestion_key` + INSERT dentro da mesma transação;
 - Parquet: arquivo final determinístico por `ingestion_key`, promovido apenas no sucesso;
@@ -190,6 +195,16 @@ register_destination("my_backend", "my_package.runtime:build_destination")
 ```
 
 O mesmo mecanismo existe para `StateStore` e `RunLogBackend`.
+
+`auto` não escolhe um fallback arbitrário para adapters customizados. Ele só funciona quando existe uma relação natural conhecida:
+
+```text
+DuckDB destination  → DuckDB state/audit
+Parquet destination → file state/audit
+Delta destination   → Delta state/audit
+```
+
+Um adapter customizado deve registrar state/audit compatíveis ou exigir configuração explícita. Isso evita que uma plataforma corporativa passe a salvar checkpoint local por acidente.
 
 ## Configuração declarativa
 
@@ -227,7 +242,7 @@ transform:
   type: none
 ```
 
-`auto` resolve state/auditoria para o backend natural do destination. Os três componentes continuam configuráveis separadamente.
+Os componentes continuam configuráveis separadamente.
 
 ## Transformação
 
@@ -246,6 +261,17 @@ engineer_kit → Bronze Delta/Parquet → Spark/dbt/SQL da plataforma
 A UI é um **local lab**, instalada via extra e voltada a aprendizado, desenvolvimento e pequenos projetos locais. Ela usa DuckDB para oferecer navegação e execução zero-infra, mas documenta os mesmos contratos usados pelos adapters Parquet/Delta.
 
 Ela não é um scheduler distribuído, catálogo corporativo ou substituto de Databricks/Fabric.
+
+## CLI declarativa
+
+Pipelines YAML podem ser executados sem módulo Python intermediário:
+
+```bash
+engineer_kit run-config pipelines/orders.yaml
+engineer_kit adapters
+```
+
+Para DuckDB o comando abre `destination.path` (ou `warehouse.duckdb` quando omitido). Parquet e Delta não exigem conexão de runtime.
 
 ## Não objetivos
 
