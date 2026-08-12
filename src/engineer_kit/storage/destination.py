@@ -38,9 +38,11 @@ class LoadContext:
     """Identity and incremental window for one ingestion attempt.
 
     ``run_id`` identifies an individual Pipeline execution. ``ingestion_key``
-    is deterministic for a connector/window, allowing official destinations
-    to replace a previously committed retry when the state checkpoint fails
-    after the data transaction has already succeeded.
+    identifies the *uncommitted checkpoint transition*: connector + window +
+    checkpoint-before. A retry after a destination commit/state failure sees
+    the same checkpoint-before and therefore replaces the same Bronze window.
+    After a successful checkpoint, even a second run on the same calendar day
+    receives a different key because the checkpoint-before has advanced.
     """
 
     run_id: str
@@ -56,12 +58,16 @@ class LoadContext:
         window_start: date | None,
         window_end: date,
         *,
+        checkpoint_identity: str | None = None,
         started_at: datetime | None = None,
         run_id: str | None = None,
     ) -> "LoadContext":
         started = started_at or datetime.now(timezone.utc)
         start_text = window_start.isoformat() if window_start else ""
-        identity = f"{connector_name}\n{start_text}\n{window_end.isoformat()}"
+        checkpoint_text = checkpoint_identity or "<first-run>"
+        identity = (
+            f"{connector_name}\n{start_text}\n{window_end.isoformat()}\n{checkpoint_text}"
+        )
         ingestion_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         return cls(
             run_id=run_id or uuid4().hex,
