@@ -29,10 +29,12 @@ class DuckDBRunLogStore(RunLogBackend):
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._SCHEMA}")
+        # The metadata schema/table are library-owned constants. Keeping their
+        # primary statements static also makes the trust boundary explicit.
+        self._conn.execute("CREATE SCHEMA IF NOT EXISTS _meta")
         self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self._SCHEMA}.{self._TABLE} (
+            """
+            CREATE TABLE IF NOT EXISTS _meta.run_log (
                 connector_name VARCHAR,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP,
@@ -61,13 +63,13 @@ class DuckDBRunLogStore(RunLogBackend):
         for column, dtype in self._OPTIONAL_COLUMNS.items():
             if column not in existing:
                 self._conn.execute(
-                    f"ALTER TABLE {self._SCHEMA}.{self._TABLE} ADD COLUMN {column} {dtype}"
+                    f"ALTER TABLE _meta.run_log ADD COLUMN {column} {dtype}"
                 )
 
     def record(self, entry: RunLogEntry) -> None:
         self._conn.execute(
-            f"""
-            INSERT INTO {self._SCHEMA}.{self._TABLE} (
+            """
+            INSERT INTO _meta.run_log (
                 connector_name, started_at, finished_at, status, rows_loaded,
                 extra_fields_seen, error_message, run_id, ingestion_key,
                 destination, window_start, window_end, watermark_before,
