@@ -1,46 +1,50 @@
 {% extends "base.html" %}
 {% block title %}{{ config.name }} - engineer_kit{% endblock %}
 {% block content %}
-<h1>{{ config.name }}</h1>
-<p class="subtitle">{{ config.connector.method }} {{ config.connector.base_url }}</p>
-
-<div class="card">
-    <form method="post" action="/pipelines/{{ config.name }}/run" style="display:inline">
-        <button type="submit" class="btn btn-primary">▶ Rodar agora</button>
-    </form>
-    <a href="/pipelines/{{ config.name }}/edit" class="btn">Editar</a>
-    <a href="/data/{{ config.destination.schema }}/{{ config.name }}" class="btn">Ver dados</a>
+<div class="page-heading">
+    <div><h1>{{ config.name }}</h1><p class="subtitle">{{ config.connector.method }} {{ config.connector.base_url }}</p></div>
+    <div><form method="post" action="/pipelines/{{ config.name }}/run" style="display:inline"><button type="submit" class="btn btn-primary">▶ Rodar agora</button></form> <a href="/pipelines/{{ config.name }}/edit" class="btn">Editar</a></div>
 </div>
 
-<h2>Configuração</h2>
-<table>
-    <tbody>
-        <tr><td>Paginação</td><td>{{ config.connector.pagination.type }}</td></tr>
-        <tr><td>Incremental</td><td>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %} (campo: {{ config.connector.incremental.date_field }}){% endif %}</td></tr>
-        <tr><td>Autenticação</td><td>{{ config.connector.auth.type }}</td></tr>
-        <tr><td>Schema destino</td><td>{{ config.destination.schema }}</td></tr>
-        <tr><td>Registros por bloco</td><td>{{ config.destination.batch_size }}</td></tr>
-        <tr><td>Colunas declaradas</td><td>{{ config.columns | map(attribute="name") | join(", ") }}</td></tr>
-    </tbody>
-</table>
+<h2>Fluxo</h2>
+<div class="flow-strip">
+    <div class="flow-node active"><strong>REST API</strong><span>RestConnector</span><small>{{ config.connector.pagination.type }} pagination</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Watermark</strong><span>StateStore</span><small>DuckDBStateStore local</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>{{ config.destination.type }} / {{ config.destination.schema }}</small></div>
+    {% if config.transform.type == 'dbt' %}
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>dbt</strong><span>Transform</span><small>staging → silver → gold</small></div>
+    {% endif %}
+</div>
+<div class="architecture-note">O fluxo visual mostra contratos, não dependências internas. Neste laboratório local, <code>StateStore</code>, <code>Destination</code> e <code>RunLogBackend</code> usam adapters DuckDB; em Lakehouse os mesmos contratos podem apontar para outros backends.</div>
+
+<div class="grid-2">
+    <div class="card">
+        <h3>Ingestão</h3>
+        <dl class="facts">
+            <dt>Paginação</dt><dd>{{ config.connector.pagination.type }}</dd>
+            <dt>Incremental</dt><dd>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %}<br><code>{{ config.connector.incremental.date_field }}</code>{% endif %}</dd>
+            <dt>Autenticação</dt><dd>{{ config.connector.auth.type }}</dd>
+            <dt>Schema Bronze</dt><dd>{{ config.destination.schema }}</dd>
+            <dt>Batch</dt><dd>{{ config.destination.batch_size }}</dd>
+        </dl>
+    </div>
+    <div class="card">
+        <h3>Pós-ingestão</h3>
+        <dl class="facts">
+            <dt>Run log</dt><dd>{{ "RunLogBackend ativo" if config.run_log else "desligado" }}</dd>
+            <dt>Transformação</dt><dd>{{ config.transform.type }}</dd>
+            {% if config.transform.type == 'dbt' %}<dt>dbt select</dt><dd>{{ config.transform.select or "todos os modelos" }}</dd><dt>Projeto local</dt><dd>{{ "encontrado" if dbt_available else "não encontrado" }}</dd>{% endif %}
+        </dl>
+        {% if config.transform.type == 'dbt' %}<a href="/dbt" class="btn">Ver modelos dbt</a>{% endif %}
+        <a href="/architecture" class="btn">Entender abstrações</a>
+    </div>
+</div>
 
 <h2>Histórico de execuções</h2>
 {% if history %}
-<table>
-    <thead><tr><th>Início</th><th>Fim</th><th>Status</th><th>Registros</th><th>Erro</th></tr></thead>
-    <tbody>
-        {% for run in history %}
-        <tr>
-            <td>{{ run.started_at }}</td>
-            <td>{{ run.finished_at }}</td>
-            <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
-            <td>{{ run.rows_loaded }}</td>
-            <td>{{ run.error_message or "" }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<div class="empty">Ainda não rodou.</div>
-{% endif %}
+<table><thead><tr><th>Início</th><th>Fim</th><th>Status</th><th>Registros</th><th>Erro</th></tr></thead><tbody>{% for run in history %}<tr><td>{{ run.started_at }}</td><td>{{ run.finished_at }}</td><td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td><td>{{ run.rows_loaded }}</td><td>{{ run.error_message or "" }}</td></tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty">Ainda não rodou.</div>{% endif %}
 {% endblock %}
