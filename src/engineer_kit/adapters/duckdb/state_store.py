@@ -18,10 +18,12 @@ class DuckDBStateStore(StateStore):
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._SCHEMA}")
+        # This table is library-owned; keeping its identifiers static avoids an
+        # unnecessary dynamic-SQL surface while values remain parameterized.
+        self._conn.execute("CREATE SCHEMA IF NOT EXISTS _meta")
         self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self._SCHEMA}.{self._TABLE} (
+            """
+            CREATE TABLE IF NOT EXISTS _meta.ingestion_state (
                 connector_name VARCHAR PRIMARY KEY,
                 last_run_at TIMESTAMP,
                 last_data_date DATE,
@@ -32,8 +34,8 @@ class DuckDBStateStore(StateStore):
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
         row = self._conn.execute(
-            f"SELECT last_run_at, last_data_date, cursor_value "
-            f"FROM {self._SCHEMA}.{self._TABLE} WHERE connector_name = ?",
+            "SELECT last_run_at, last_data_date, cursor_value "
+            "FROM _meta.ingestion_state WHERE connector_name = ?",
             [connector_name],
         ).fetchone()
         if row is None:
@@ -50,11 +52,11 @@ class DuckDBStateStore(StateStore):
         self._conn.execute("BEGIN TRANSACTION")
         try:
             self._conn.execute(
-                f"DELETE FROM {self._SCHEMA}.{self._TABLE} WHERE connector_name = ?",
+                "DELETE FROM _meta.ingestion_state WHERE connector_name = ?",
                 [connector_name],
             )
             self._conn.execute(
-                f"INSERT INTO {self._SCHEMA}.{self._TABLE} VALUES (?, ?, ?, ?)",
+                "INSERT INTO _meta.ingestion_state VALUES (?, ?, ?, ?)",
                 [
                     connector_name,
                     watermark.last_run_at,
