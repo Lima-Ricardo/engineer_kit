@@ -45,11 +45,12 @@ from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Tri
 from engineer_kit.security.secrets import (
     EnvSecretProvider,
     FileSecretProvider,
+    InvalidSecretKeyError,
     SecretNotFoundError,
     SecretProvider,
     StaticSecretProvider,
 )
-from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
+from engineer_kit.storage.destination import Destination, LoadContext, LoadResult, WriteMode
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import InvalidIdentifierError
 from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
@@ -224,12 +225,14 @@ __all__ = [
     "StaticSecretProvider",
     "FileSecretProvider",
     "SecretNotFoundError",
+    "InvalidSecretKeyError",
     "EndpointSchema",
     "ColumnSpec",
     "LogicalType",
     "render_sql_type",
     "resolve_logical_type",
     "Destination",
+    "LoadContext",
     "LoadResult",
     "WriteMode",
     "DuckDBLoader",
