@@ -29,11 +29,7 @@ from engineer_kit.config.pipeline_config import (
     load_pipeline_config,
     save_pipeline_config,
 )
-from engineer_kit.connectors.incremental import (
-    IncrementalMode,
-    IncrementalStrategy,
-    IncrementalWindow,
-)
+from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import (
     NEXT_URL_KEY,
@@ -70,21 +66,17 @@ from engineer_kit.storage.duckdb_loader import (
 )
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import InvalidIdentifierError
-from engineer_kit.storage.run_log import RunLogEntry, RunLogStore
-from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
-from engineer_kit.storage.state_store import (
-    DuckDBStateStore,
-    IngestionStateStore,
-    StateStore,
-    Watermark,
+from engineer_kit.storage.run_log import (
+    DuckDBRunLogStore,
+    RunLogBackend,
+    RunLogEntry,
+    RunLogStore,
 )
+from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
+from engineer_kit.storage.state_store import DuckDBStateStore, IngestionStateStore, StateStore, Watermark
 from engineer_kit.terminal_log import visual_logger
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
-from engineer_kit.transform.scaffold import (
-    generate_sources_yml,
-    generate_staging_model,
-    write_staging_scaffold,
-)
+from engineer_kit.transform.scaffold import generate_sources_yml, generate_staging_model, write_staging_scaffold
 
 __version__ = "0.1.0"
 
@@ -151,6 +143,8 @@ __all__ = [
     "DuckDBStateStore",
     "IngestionStateStore",
     "Watermark",
+    "RunLogBackend",
+    "DuckDBRunLogStore",
     "RunLogStore",
     "RunLogEntry",
     "flatten_record",
