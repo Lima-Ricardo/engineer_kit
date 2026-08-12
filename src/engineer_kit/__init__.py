@@ -1,13 +1,20 @@
 """engineer_kit: reliable API ingestion for analytical destinations.
 
 The top-level package exposes the backend-agnostic core eagerly and loads
-optional/local integrations only when the user asks for them. This keeps the
-simple ``from engineer_kit import RestConnector`` ergonomics without forcing
-DuckDB, Arrow, Delta or dbt into every installation.
+optional integrations only when requested. DuckDB, PyArrow, Delta and the web
+UI therefore remain installation choices rather than core requirements.
 """
 
 from __future__ import annotations
 
+from engineer_kit.adapters.registry import (
+    AdapterContext,
+    AdapterNotFoundError,
+    available_adapters,
+    register_destination,
+    register_run_log,
+    register_state_store,
+)
 from engineer_kit.connectors.api_connector import (
     APIConnector,
     InvalidHttpMethodError,
@@ -15,11 +22,7 @@ from engineer_kit.connectors.api_connector import (
     VALID_HTTP_METHODS,
 )
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
-from engineer_kit.connectors.incremental import (
-    IncrementalMode,
-    IncrementalStrategy,
-    IncrementalWindow,
-)
+from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import (
     NEXT_URL_KEY,
@@ -36,12 +39,7 @@ from engineer_kit.connectors.pagination import (
 from engineer_kit.connectors.rest import DateParams, RestConnector
 from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, NoAuth
 from engineer_kit.http.client import HttpClient, HttpRequestError, InsecureUrlError
-from engineer_kit.orchestration.pipeline import (
-    Pipeline,
-    PipelineResult,
-    PipelineSource,
-    StepResult,
-)
+from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult, PipelineSource, StepResult
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Trigger
 from engineer_kit.security.secrets import (
@@ -51,19 +49,16 @@ from engineer_kit.security.secrets import (
     SecretProvider,
     StaticSecretProvider,
 )
-from engineer_kit.storage.destination import Destination, LoadResult
+from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
 from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import InvalidIdentifierError
 from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 from engineer_kit.storage.state_store import StateStore, Watermark
+from engineer_kit.storage.types import LogicalType, render_sql_type, resolve_logical_type
 from engineer_kit.terminal_log import visual_logger
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
-from engineer_kit.transform.scaffold import (
-    generate_sources_yml,
-    generate_staging_model,
-    write_staging_scaffold,
-)
+from engineer_kit.transform.scaffold import generate_sources_yml, generate_staging_model, write_staging_scaffold
 
 __version__ = "0.1.0"
 
@@ -77,7 +72,9 @@ _CONFIG_EXPORTS = {
     "PaginationConfig",
     "PipelineConfig",
     "PipelineConfigError",
+    "RunLogConfig",
     "SecretsConfig",
+    "StateConfig",
     "TransformConfig",
     "build_pipeline",
     "list_pipeline_configs",
@@ -97,9 +94,9 @@ _DUCKDB_EXPORTS = {
     "DuckDBRunLogStore",
     "RunLogStore",
 }
-
 _PARQUET_EXPORTS = {"ParquetDestination"}
 _DELTA_EXPORTS = {"DeltaDestination", "DeltaStateStore", "DeltaRunLogStore"}
+_FILE_EXPORTS = {"JsonFileStateStore", "JsonLinesRunLogStore"}
 
 
 def __getattr__(name: str):
@@ -108,14 +105,18 @@ def __getattr__(name: str):
 
         return getattr(pipeline_config, name)
 
+    if name in _FILE_EXPORTS:
+        from engineer_kit.adapters import files
+
+        return getattr(files, name)
+
     if name in _PARQUET_EXPORTS:
         try:
             from engineer_kit.adapters.parquet import ParquetDestination
         except ModuleNotFoundError as exc:
             if exc.name == "pyarrow":
                 raise ModuleNotFoundError(
-                    "Parquet support is optional. Install it with "
-                    "`pip install \"engineer_kit[parquet]\"`."
+                    'Parquet support is optional. Install `pip install "engineer_kit[parquet]"`.'
                 ) from None
             raise
         return ParquetDestination
@@ -126,8 +127,7 @@ def __getattr__(name: str):
         except ModuleNotFoundError as exc:
             if exc.name in {"deltalake", "pyarrow"}:
                 raise ModuleNotFoundError(
-                    "Delta support is optional. Install it with "
-                    "`pip install \"engineer_kit[delta]\"`."
+                    'Delta support is optional. Install `pip install "engineer_kit[delta]"`.'
                 ) from None
             raise
         return getattr(delta, name)
@@ -145,23 +145,20 @@ def __getattr__(name: str):
                 from engineer_kit.storage import duckdb_loader
 
                 if name == "DuckDBDestination":
-                    return duckdb_loader.DuckDBLoader
+                    return duckdb_loader.DuckDBDestination
                 return getattr(duckdb_loader, name)
-
             if name in {"DuckDBStateStore", "IngestionStateStore"}:
                 from engineer_kit.adapters.duckdb.state_store import DuckDBStateStore
 
                 return DuckDBStateStore
-
             from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
 
             return DuckDBRunLogStore
         except ModuleNotFoundError as exc:
             if exc.name == "duckdb":
                 raise ModuleNotFoundError(
-                    "DuckDB support is optional. Install it with "
-                    "`pip install \"engineer_kit[duckdb]\"` or use "
-                    "`engineer_kit[local]` for DuckDB + dbt."
+                    'DuckDB support is optional. Install `pip install "engineer_kit[duckdb]"` '
+                    'or `pip install "engineer_kit[local]"`.'
                 ) from None
             raise
 
@@ -183,6 +180,8 @@ __all__ = [
     "ConnectorConfig",
     "ColumnConfig",
     "DestinationConfig",
+    "StateConfig",
+    "RunLogConfig",
     "TransformConfig",
     "SecretsConfig",
     "AuthConfig",
@@ -194,6 +193,12 @@ __all__ = [
     "save_pipeline_config",
     "list_pipeline_configs",
     "build_pipeline",
+    "AdapterContext",
+    "AdapterNotFoundError",
+    "register_destination",
+    "register_state_store",
+    "register_run_log",
+    "available_adapters",
     "PaginationStrategy",
     "ParsedPage",
     "NoPagination",
@@ -221,8 +226,12 @@ __all__ = [
     "SecretNotFoundError",
     "EndpointSchema",
     "ColumnSpec",
+    "LogicalType",
+    "render_sql_type",
+    "resolve_logical_type",
     "Destination",
     "LoadResult",
+    "WriteMode",
     "DuckDBLoader",
     "DuckDBDestination",
     "ParquetDestination",
@@ -235,11 +244,13 @@ __all__ = [
     "DuckDBStateStore",
     "IngestionStateStore",
     "DeltaStateStore",
+    "JsonFileStateStore",
     "Watermark",
     "RunLogBackend",
     "DuckDBRunLogStore",
     "RunLogStore",
     "DeltaRunLogStore",
+    "JsonLinesRunLogStore",
     "RunLogEntry",
     "flatten_record",
     "InvalidIdentifierError",
