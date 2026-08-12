@@ -366,7 +366,7 @@ def create_app(
             columns=columns,
             destination=destination,
             transform=transform,
-            run_log=form.get("run_log") == "on",
+            run_log=(form.get("run_log") or "on") == "on",
         )
 
     return app
