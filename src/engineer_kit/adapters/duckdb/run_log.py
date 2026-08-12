@@ -16,6 +16,7 @@ class DuckDBRunLogStore(RunLogBackend):
     _TABLE = "run_log"
     _OPTIONAL_COLUMNS = {
         "run_id": "VARCHAR",
+        "ingestion_key": "VARCHAR",
         "destination": "VARCHAR",
         "window_start": "DATE",
         "window_end": "DATE",
@@ -40,6 +41,7 @@ class DuckDBRunLogStore(RunLogBackend):
                 extra_fields_seen VARCHAR,
                 error_message VARCHAR,
                 run_id VARCHAR,
+                ingestion_key VARCHAR,
                 destination VARCHAR,
                 window_start DATE,
                 window_end DATE,
@@ -67,9 +69,10 @@ class DuckDBRunLogStore(RunLogBackend):
             f"""
             INSERT INTO {self._SCHEMA}.{self._TABLE} (
                 connector_name, started_at, finished_at, status, rows_loaded,
-                extra_fields_seen, error_message, run_id, destination,
-                window_start, window_end, watermark_before, watermark_after
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extra_fields_seen, error_message, run_id, ingestion_key,
+                destination, window_start, window_end, watermark_before,
+                watermark_after
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 entry.connector_name,
@@ -80,6 +83,7 @@ class DuckDBRunLogStore(RunLogBackend):
                 json.dumps(entry.extra_fields_seen, ensure_ascii=False),
                 entry.error_message,
                 entry.run_id,
+                entry.ingestion_key,
                 entry.destination,
                 entry.window_start,
                 entry.window_end,
