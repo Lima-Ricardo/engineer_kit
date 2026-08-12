@@ -1,5 +1,184 @@
 # engineer_kit
 
+*[Português abaixo](#engineer_kit-pt-br) / Portuguese version below.*
+
+Python library for API ingestion: **connectors → DuckDB (bronze) → dbt (silver/gold)**.
+
+The goal is to be the easy-to-use bridge between a REST API and an analytics pipeline, without hiding what's happening underneath: explicitly declared schema, watermark-based incremental loading, batched writes, everything auditable in bronze.
+
+## Why it exists
+
+- **Connectors** (`APIConnector`/`RestConnector`) abstract `requests`, pagination, HTTP method and the incremental window — you only write what changes from one API to another (endpoint, auth, date format).
+- **DuckDB** holds the raw load (bronze) already flattened, with everything as `VARCHAR` by default. It never breaks on schema drift: any new field the API sends goes into an `_extra` column, with a log warning — the load never fails because of it. Writes happen in batches, not all at once.
+- **dbt** does the real transformation (staging → silver → gold). Staging (type casting) is generated automatically from the declared schema; business rules are still written by hand.
+- **Visual log + run table**: every load shows a terminal progress bar and records start/end/status/row count in `_meta.run_log` inside DuckDB itself — queryable from dbt like any other source.
+
+## Installation
+
+```bash
+python -m venv venv
+venv/Scripts/activate   # or source venv/bin/activate on Linux/Mac
+pip install -e ".[dev]"
+```
+
+License: MIT (see [`LICENSE`](LICENSE)).
+
+## Quickstart
+
+Import directly from the package — no need to know which submodule each class lives in, `import pandas as pd`-style:
+
+```python
+from engineer_kit import (
+    ColumnSpec, DateParams, DuckDBLoader, EndpointSchema, IncrementalMode,
+    IngestionStateStore, NoAuth, PageNumberPagination,
+    Pipeline, PipelineSource, RestConnector, RunLogStore,
+)
+```
+
+See [`examples/github_commits.py`](examples/github_commits.py) for a full pipeline running against the public GitHub API. Summary:
+
+```python
+from datetime import date, timedelta
+import duckdb
+
+conn = duckdb.connect("warehouse.duckdb")
+
+connector = RestConnector(
+    name="github_commits",
+    base_url="https://api.github.com/repos/psf/requests/commits",
+    state_store=IngestionStateStore(conn),  # the incremental strategy is built automatically from "name" above
+    incremental_mode=IncrementalMode.DATA_DATE,
+    initial_start=date.today() - timedelta(days=30),
+    date_field="commit.author.date",  # date field in the raw API JSON (required in DATA_DATE mode)
+    pagination=PageNumberPagination(page_size=20),  # every other parameter already has a sensible default
+    method="GET",  # required: GET or POST, no implicit default
+    auth=NoAuth(),
+    date_params=DateParams(start="since", end="until", date_format="%Y-%m-%dT%H:%M:%SZ"),
+)
+
+schema = EndpointSchema.from_names(["sha", "commit_author_name", "commit_author_date", "commit_message"])
+
+pipeline = Pipeline(
+    sources=[PipelineSource(connector=connector, schema=schema)],
+    destination=DuckDBLoader(conn, schema="bronze", batch_size=1000),  # 1000 records per batch
+    run_log_store=RunLogStore(conn),  # optional: records each run in _meta.run_log
+)
+
+result = pipeline.run()
+```
+
+After running the pipeline, generate the dbt staging from the same schema and run it:
+
+```python
+from engineer_kit import write_staging_scaffold, DbtRunner
+
+write_staging_scaffold("dbt_project", {"github_commits": schema}, bronze_schema="bronze")
+DbtRunner(project_dir="dbt_project").run()
+```
+
+## Pagination
+
+`pagination` is always required when creating a connector — there's no implicit type "under the hood," because this changes from API to API. `STANDARD_PAGINATION_TYPES` lists every standard type already supported:
+
+| Type | Class | When to use |
+|---|---|---|
+| `page` | `PageNumberPagination` | `?page=1&per_page=100` |
+| `offset` | `OffsetPagination` | `?offset=0&limit=100` |
+| `cursor` | `CursorPagination` | cursor returned in the response body |
+| `link_header` | `LinkHeaderPagination` | HTTP `Link` header (RFC 5988) — GitHub, Stripe |
+| `next_url` | `NextUrlPagination` | full URL of the next page in a body field |
+| `none` | `NoPagination` | API returns everything in a single response |
+
+Every strategy already has sensible defaults for the most common parameter names — you'll usually only tune `page_size`.
+
+## HTTP method
+
+`method` is also required (`"GET"` or `"POST"`, validated) — no implicit default. On `POST`, the payload (date + pagination params) goes as a JSON body instead of a query string, for APIs that require search via `POST`.
+
+## Incremental: `date_field`
+
+Under `incremental_mode=IncrementalMode.DATA_DATE`, `date_field` is required: it's the dot-separated path to the date field **in the raw API JSON**, before flattening — e.g. `"commit.author.date"`. Note the separator here is `.`, different from the `_` used in the already-flattened column names in the schema (`commit_author_date`) — these are two different points in the pipeline (one reads the API's raw response, the other describes the already-flattened bronze table).
+
+With `date_field` configured, the connector automatically tracks the highest date seen in each run and uses it in the watermark — no need to pass anything manually to `commit_watermark()`. Without `date_field`, `DATA_DATE` would have no way to know the data's real date and would silently fall back to the same behavior as `INGESTION_DATE`; that's why the library requires the field instead of silently ignoring it.
+
+For non-standard cases, `date_field` also accepts a function: `date_field=lambda record: record["some_computed_field"]`.
+
+You no longer need to build a separate `IncrementalStrategy`: `RestConnector` takes `state_store`/`incremental_mode`/`initial_start`/`date_field` directly and builds the incremental strategy internally, using the connector's own `name` — without duplicating that identifier in two places. Anyone who needs a custom `IncrementalStrategy` can still pass a ready-made one via `incremental=`.
+
+## Architecture
+
+```
+Connector (RestConnector : APIConnector)
+  ├─ PaginationStrategy   (page/offset/cursor/link_header/next_url/none)
+  ├─ IncrementalStrategy  (watermark read/written in IngestionStateStore)
+  └─ HttpClient           (retry+backoff, HTTPS required, auth via SecretProvider)
+        ↓ extract() -> Iterator[dict]  (everything already as string)
+DuckDBLoader (implements Destination)
+  ├─ flatten_record()     (flattens nested JSON, full-path column names)
+  ├─ EndpointSchema       (schema declared by hand — columns outside it go to _extra)
+  ├─ writes in `batch_size` chunks (default 1000; never materializes everything in memory)
+  ├─ progress bar (tqdm) + visual log (loguru) during the write
+  └─ bronze.<endpoint>    (DuckDB table: schema columns + _source/_endpoint/_ingested_at/_raw/_extra)
+        ↓
+dbt (generated scaffold + hand-written models)
+  ├─ models/staging/stg_<endpoint>.sql   (generated: type casting)
+  ├─ models/silver/*.sql                 (hand-written: business rules)
+  └─ models/gold/*.sql                   (hand-written: denormalization)
+        ↓
+Pipeline -> _meta.run_log (optional, via RunLogStore)
+         -> Scheduler (thin wrapper over APScheduler) / CLI (`engineer_kit run module:attribute`)
+```
+
+### Design decisions worth explaining
+
+- **Everything comes out of the connector as a string.** Prevents schema drift at the source from breaking ingestion — proper typing happens in dbt staging, deliberately, not automatically.
+- **Schema is declared, not inferred.** The loader never runs `ALTER TABLE` on its own. A field outside the declared schema becomes an entry in `_extra` (JSON) plus a warning — the load never fails because of it.
+- **Flattening is done in Python, not with DuckDB's native `unnest`.** DuckDB's `unnest(recursive := true)` resolves field-name collisions (e.g. `commit.author.date` vs `commit.committer.date`) by order of appearance, not by path — unpredictable. The flatten here always names by full path (`commit_author_date`), so it never collides.
+- **`DATA_DATE` requires `date_field`.** Without it, the incremental logic has no way to know the data's real date — and before this check existed, `DATA_DATE` silently behaved exactly like `INGESTION_DATE`, because nothing extracted the record's own date. Forcing the field prevents that kind of silent bug.
+- **Batched writes, not everything at once.** `DuckDBLoader` consumes the record generator in `batch_size` slices (default 1000), writing each one and releasing memory — an extraction of millions of records doesn't need to fit in memory before the first row is written.
+- **The watermark only advances after the load succeeds.** `commit_watermark()` is an explicit call, separate from `extract()` — a failure partway through redoes the same window on the next run, without duplicating or losing data.
+- **Method and pagination are always explicit, never implicit.** Neither has a hidden "default" behavior — it's one of the things that varies most from API to API, and an implicit choice here is an easy source of silent bugs.
+- **The library doesn't replace an orchestrator or dbt.** `Pipeline` is the atomic unit that any external orchestrator (Airflow, cron, GitHub Actions) can call via the CLI; the built-in `Scheduler` is only for those without (or who don't want) an external orchestrator.
+
+## Visual log and run table
+
+During writes, the terminal shows a progress bar (tqdm, with elapsed time and record count) and a narrative log (loguru) of each connector's start/end/success/error. If a `RunLogStore` is passed to `Pipeline`, the same information — connector, start, end, status, row count and new columns outside the schema — gets recorded in `_meta.run_log` in DuckDB, queryable from dbt.
+
+This visual log (loguru) is separate from the library's internal technical logging (standard `logging`, used in `HttpClient`/auditing) — they serve different purposes: one is for human reading in the terminal, the other is what the security tests audit (see below).
+
+## Security
+
+- Secrets are never hardcoded: they go through a `SecretProvider` (`EnvSecretProvider` by default).
+- HTTPS is required by default (`allow_http=True` must be explicit).
+- Schema/table/column names are validated against a safe identifier pattern before entering any dynamically-built SQL — including files generated for dbt.
+- No log or error message ever exposes a secret, even when authentication is done via a query param: the URL used in logs and exception messages is always the pre-auth version, or redacted.
+- See `tests/test_http_client.py` for the tests that lock in this behavior.
+
+## Running the tests
+
+```bash
+venv/Scripts/python.exe -m pytest tests/ -v
+```
+
+## Running the end-to-end example
+
+```bash
+venv/Scripts/python.exe examples/github_commits.py
+```
+
+Extracts recent commits from `psf/requests`, loads them into bronze in batches, generates dbt staging, materializes a silver model (`commits_daily_summary`) and records the run in `_meta.run_log` — all against the public GitHub API, no token needed for this example's volume.
+
+## Scope
+
+Focused on **API ingestion**. Database sources and cloud warehouse destinations (Redshift, Snowflake, Data Lake) were deliberately left out — not due to a technical limitation, but because joining data across different database engines in a single query is a query-federation problem (Trino/Presto), not something a Python abstraction layer solves.
+
+---
+
+<a name="engineer_kit-pt-br"></a>
+# engineer_kit (PT-BR)
+
+*[English version above](#engineer_kit).*
+
 Biblioteca Python para ingestão de APIs: **conectores → DuckDB (bronze) → dbt (silver/gold)**.
 
 O objetivo é ser a ponte fácil de usar entre uma API REST e um pipeline analítico, sem esconder o que está acontecendo por baixo: schema declarado explicitamente, incremental por watermark, gravação em blocos, tudo auditável no bronze.
