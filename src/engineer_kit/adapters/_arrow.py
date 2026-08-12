@@ -21,6 +21,10 @@ def bronze_arrow_schema(schema: EndpointSchema) -> pa.Schema:
             pa.field("_source", pa.string(), nullable=False),
             pa.field("_endpoint", pa.string(), nullable=False),
             pa.field("_ingested_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("_run_id", pa.string(), nullable=False),
+            pa.field("_ingestion_key", pa.string(), nullable=False),
+            pa.field("_window_start", pa.date32()),
+            pa.field("_window_end", pa.date32()),
             pa.field("_raw", pa.string(), nullable=False),
             pa.field("_extra", pa.string()),
         ]
@@ -28,7 +32,9 @@ def bronze_arrow_schema(schema: EndpointSchema) -> pa.Schema:
     return pa.schema(fields)
 
 
-def rows_to_record_batch(rows: list[dict[str, Any]], schema: EndpointSchema) -> pa.RecordBatch:
+def rows_to_record_batch(
+    rows: list[dict[str, Any]], schema: EndpointSchema
+) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist(rows, schema=bronze_arrow_schema(schema))
 
 
