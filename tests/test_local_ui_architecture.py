@@ -62,3 +62,22 @@ def test_form_persists_transform_and_run_log(client, tmp_path):
     assert config.transform.type == "dbt"
     assert config.transform.select == "tag:daily"
     assert config.run_log is True
+
+
+def test_form_can_disable_run_log(client, tmp_path):
+    response = client.post(
+        "/pipelines/save",
+        data={
+            "name": "no_log",
+            "base_url": "https://example.test/items",
+            "method": "GET",
+            "pagination_type": "none",
+            "incremental_mode": "ingestion_date",
+            "run_log": "off",
+        },
+        headers=AUTH_HEADER,
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    config = load_pipeline_config(tmp_path / "pipelines" / "no_log.yaml")
+    assert config.run_log is False
