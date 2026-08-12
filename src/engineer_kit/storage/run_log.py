@@ -1,15 +1,16 @@
-"""Registra cada execucao de conector: quando comecou, quando terminou,
-status (sucesso/erro), quantidade de registros e quais campos novos
-apareceram fora do schema declarado.
+"""Contratos e implementacoes para registrar execucoes de ingestao.
 
-Fica em `_meta.run_log`, ao lado de `_meta.ingestion_state` -- o dbt
-pode ler essa tabela como qualquer outra fonte. Gravar aqui e opcional:
-o Pipeline so grava se receber um RunLogStore; quem nao passar nenhum,
-simplesmente nao tem essa tabela.
+O core do Pipeline depende apenas de :class:`RunLogBackend`. Onde os
+logs persistem e uma decisao de infraestrutura: DuckDB no modo local,
+Delta/Lakehouse em plataformas de dados, ou uma implementacao customizada.
+
+`RunLogStore` e mantido como alias compativel da implementacao DuckDB
+para nao quebrar codigo existente.
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,8 +19,10 @@ from typing import Optional
 import duckdb
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunLogEntry:
+    """Evento auditavel produzido ao final de uma tentativa de carga."""
+
     connector_name: str
     started_at: datetime
     finished_at: datetime
@@ -29,7 +32,22 @@ class RunLogEntry:
     error_message: Optional[str] = None
 
 
-class RunLogStore:
+class RunLogBackend(ABC):
+    """Porta de observabilidade usada pelo Pipeline.
+
+    Uma implementacao precisa apenas persistir um :class:`RunLogEntry`.
+    Isso permite trocar DuckDB por Delta, uma tabela SQL, um servico de
+    observabilidade ou um backend em memoria sem alterar a orquestracao.
+    """
+
+    @abstractmethod
+    def record(self, entry: RunLogEntry) -> None:
+        """Persiste um evento de execucao."""
+
+
+class DuckDBRunLogStore(RunLogBackend):
+    """RunLogBackend zero-infra persistido em `_meta.run_log` no DuckDB."""
+
     _SCHEMA = "_meta"
     _TABLE = "run_log"
 
@@ -66,3 +84,9 @@ class RunLogStore:
                 entry.error_message,
             ],
         )
+
+
+# Compatibilidade com a API 0.1: codigo existente que instancia
+# RunLogStore(conn) continua usando DuckDB, enquanto codigo novo pode
+# explicitar o backend.
+RunLogStore = DuckDBRunLogStore
