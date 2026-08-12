@@ -37,10 +37,10 @@ class WriteMode(str, Enum):
 class LoadContext:
     """Identity and incremental window for one ingestion attempt.
 
-    ``run_id`` identifies an individual attempt. ``ingestion_key`` is stable
-    for the same connector/window, allowing official destinations to replace a
-    previously committed retry instead of appending duplicates when a state
-    checkpoint fails after the data transaction has already succeeded.
+    ``run_id`` identifies an individual Pipeline execution. ``ingestion_key``
+    is deterministic for a connector/window, allowing official destinations
+    to replace a previously committed retry when the state checkpoint fails
+    after the data transaction has already succeeded.
     """
 
     run_id: str
@@ -57,13 +57,14 @@ class LoadContext:
         window_end: date,
         *,
         started_at: datetime | None = None,
+        run_id: str | None = None,
     ) -> "LoadContext":
         started = started_at or datetime.now(timezone.utc)
         start_text = window_start.isoformat() if window_start else ""
         identity = f"{connector_name}\n{start_text}\n{window_end.isoformat()}"
         ingestion_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         return cls(
-            run_id=uuid4().hex,
+            run_id=run_id or uuid4().hex,
             ingestion_key=ingestion_key,
             window_start=window_start,
             window_end=window_end,
@@ -71,17 +72,23 @@ class LoadContext:
         )
 
     @classmethod
-    def adhoc(cls, connector_name: str) -> "LoadContext":
+    def adhoc(
+        cls,
+        connector_name: str,
+        *,
+        run_id: str | None = None,
+        started_at: datetime | None = None,
+    ) -> "LoadContext":
         """Create a unique non-retry context for direct Destination.load calls."""
-        now = datetime.now(timezone.utc)
-        run_id = uuid4().hex
-        identity = f"{connector_name}\nadhoc\n{run_id}"
+        started = started_at or datetime.now(timezone.utc)
+        execution_id = run_id or uuid4().hex
+        identity = f"{connector_name}\nadhoc\n{execution_id}"
         return cls(
-            run_id=run_id,
+            run_id=execution_id,
             ingestion_key=hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
             window_start=None,
             window_end=None,
-            started_at=now,
+            started_at=started,
         )
 
 
