@@ -1,10 +1,9 @@
-"""Configuracao declarativa de pipeline (YAML) -> Pipeline de verdade.
+"""Configuracao declarativa de pipeline (YAML) -> Pipeline de ingestao.
 
-Cobre o caso comum (RestConnector + DuckDBLoader) -- o mesmo que ja e
-possivel montar em Python, so que descrito em arquivo em vez de codigo.
-Serve pra interface web salvar/carregar pipelines sem gerar codigo
-Python. Conector customizado (subclasse de APIConnector) continua
-sendo Python puro -- este modulo nao tenta cobrir esse caso.
+O formato descreve o caso local comum sem obrigar a arquitetura do core
+a conhecer DuckDB ou dbt. `destination` e `transform` sao escolhas de
+adapter/integracao; hoje o builder local implementa DuckDB e a UI pode
+opcionalmente executar dbt depois da ingestao.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from engineer_kit.orchestration.pipeline import Pipeline
 from engineer_kit.security.secrets import EnvSecretProvider, FileSecretProvider, SecretProvider
 from engineer_kit.storage.duckdb_loader import DuckDBLoader
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
-from engineer_kit.storage.state_store import IngestionStateStore
+from engineer_kit.storage.state_store import DuckDBStateStore
 
 logger = logging.getLogger("engineer_kit.config")
 
@@ -37,8 +36,8 @@ class PipelineConfigError(ValueError):
 
 @dataclass
 class SecretsConfig:
-    type: str = "env"  # "env" ou "file"
-    path: Optional[str] = None  # obrigatorio se type == "file"
+    type: str = "env"
+    path: Optional[str] = None
 
     def build(self) -> SecretProvider:
         if self.type == "env":
@@ -52,10 +51,10 @@ class SecretsConfig:
 
 @dataclass
 class AuthConfig:
-    type: str = "none"  # none | bearer | api_key
+    type: str = "none"
     secret_key: Optional[str] = None
     param_name: str = "api_key"
-    location: str = "query"  # query | header
+    location: str = "query"
 
     def build(self, secret_provider: SecretProvider) -> AuthStrategy:
         if self.type == "none":
@@ -89,8 +88,8 @@ class PaginationConfig:
 
 @dataclass
 class IncrementalConfig:
-    mode: str = "data_date"  # data_date | ingestion_date
-    initial_start: Optional[str] = None  # "YYYY-MM-DD"
+    mode: str = "data_date"
+    initial_start: Optional[str] = None
     date_field: Optional[str] = None
 
     def resolve_mode(self) -> IncrementalMode:
@@ -144,11 +143,25 @@ class DestinationConfig:
 
 
 @dataclass
+class TransformConfig:
+    """Transformacao opcional executada depois da Bronze.
+
+    `none` termina o fluxo na ingestao. `dbt` e uma integracao local;
+    plataformas maiores podem executar dbt/Spark externamente sem mudar
+    o Pipeline de ingestao.
+    """
+
+    type: str = "none"  # none | dbt
+    select: Optional[str] = None
+
+
+@dataclass
 class PipelineConfig:
     name: str
     connector: ConnectorConfig
     columns: list[ColumnConfig] = field(default_factory=list)
     destination: DestinationConfig = field(default_factory=DestinationConfig)
+    transform: TransformConfig = field(default_factory=TransformConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     run_log: bool = True
 
@@ -177,6 +190,7 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         connector=connector,
         columns=columns,
         destination=DestinationConfig(**data.get("destination", {})),
+        transform=TransformConfig(**data.get("transform", {})),
         secrets=SecretsConfig(**data.get("secrets", {})),
         run_log=data.get("run_log", True),
     )
@@ -197,6 +211,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
         },
         "columns": [asdict(c) for c in config.columns],
         "destination": asdict(config.destination),
+        "transform": asdict(config.transform),
         "secrets": asdict(config.secrets),
         "run_log": config.run_log,
     }
@@ -213,8 +228,6 @@ def save_pipeline_config(config: PipelineConfig, path: Union[str, Path]) -> None
 
 
 def list_pipeline_configs(directory: Union[str, Path]) -> list[tuple[Path, PipelineConfig]]:
-    """Le todo *.yaml de `directory`. Arquivo invalido e pulado (com
-    aviso no log), nao derruba a listagem inteira."""
     directory = Path(directory)
     if not directory.exists():
         return []
@@ -228,14 +241,19 @@ def list_pipeline_configs(directory: Union[str, Path]) -> list[tuple[Path, Pipel
 
 
 def build_pipeline(config: PipelineConfig, conn: duckdb.DuckDBPyConnection) -> Pipeline:
-    """Constroi um Pipeline de verdade a partir da config. Qualquer erro
-    de validacao (do config em si, ou vindo das classes que ele monta —
-    method invalido, date_field faltando etc.) sobe sempre como
-    PipelineConfigError, pra quem chama (ex: a UI) so precisar tratar
-    um tipo de excecao."""
+    """Builder do runtime local atual.
+
+    O contrato do Pipeline e agnostico; este helper ainda monta os adapters
+    DuckDB porque recebe uma conexao DuckDB. Builders/factories de Delta
+    podem ser adicionados sem alterar Connector, StateStore ou Pipeline.
+    """
     if config.destination.type != "duckdb":
         raise PipelineConfigError(
-            f"destination.type '{config.destination.type}' nao suportado (so 'duckdb' por enquanto)."
+            f"destination.type '{config.destination.type}' nao suportado pelo builder local (use 'duckdb')."
+        )
+    if config.transform.type not in {"none", "dbt"}:
+        raise PipelineConfigError(
+            f"transform.type '{config.transform.type}' desconhecido (use 'none' ou 'dbt')."
         )
 
     try:
@@ -243,7 +261,7 @@ def build_pipeline(config: PipelineConfig, conn: duckdb.DuckDBPyConnection) -> P
         connector = RestConnector(
             name=config.name,
             base_url=config.connector.base_url,
-            state_store=IngestionStateStore(conn),
+            state_store=DuckDBStateStore(conn),
             incremental_mode=config.connector.incremental.resolve_mode(),
             initial_start=config.connector.incremental.resolve_initial_start(),
             date_field=config.connector.incremental.date_field,
