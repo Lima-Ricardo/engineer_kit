@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from engineer_kit.security.redaction import redact_text
+
 logger = logging.getLogger("engineer_kit.dbt")
+DEFAULT_DBT_TIMEOUT_SECONDS = 60 * 60
 
 
 @dataclass
@@ -27,11 +30,7 @@ class DbtResult:
 
 
 def _default_dbt_executable() -> str:
-    """Acha o dbt sem depender do venv estar ativado: primeiro tenta o
-    PATH (respeita venv ativado ou instalacao global), depois olha o
-    mesmo diretorio do interpretador Python em uso (venv/Scripts/dbt.exe
-    -- o caso comum quando o script roda via `venv/Scripts/python.exe`
-    sem ativar o venv antes)."""
+    """Acha o dbt sem depender do venv estar ativado."""
     found = shutil.which("dbt")
     if found:
         return found
@@ -39,7 +38,7 @@ def _default_dbt_executable() -> str:
     candidate = Path(sys.executable).parent / f"dbt{suffix}"
     if candidate.exists():
         return str(candidate)
-    return "dbt"  # deixa falhar com uma mensagem clara do proprio SO se nao existir
+    return "dbt"
 
 
 class DbtRunner:
@@ -50,17 +49,16 @@ class DbtRunner:
         target: str = "dev",
         dbt_executable: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
+        timeout_seconds: float = DEFAULT_DBT_TIMEOUT_SECONDS,
     ) -> None:
-        self._project_dir = project_dir
-        self._profiles_dir = profiles_dir or project_dir
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds deve ser maior que zero.")
+        self._project_dir = str(Path(project_dir).resolve())
+        self._profiles_dir = str(Path(profiles_dir or project_dir).resolve())
         self._target = target
         self._dbt_executable = dbt_executable or _default_dbt_executable()
-        # variaveis extras passadas ao subprocesso do dbt -- usar para
-        # caminhos absolutos referenciados via env_var() no profiles.yml,
-        # em vez de path relativo (a resolucao de relativo no dbt-duckdb
-        # depende do cwd de onde o dbt foi chamado, nao do profiles.yml,
-        # o que e uma fonte facil de bug silencioso).
         self._env = env or {}
+        self._timeout_seconds = timeout_seconds
 
     def run(self, select: Optional[str] = None) -> DbtResult:
         args = [
@@ -78,12 +76,28 @@ class DbtRunner:
         return self._invoke(args)
 
     def _invoke(self, args: list[str]) -> DbtResult:
-        logger.info("Executando: %s", " ".join(args))
-        completed = subprocess.run(
-            args, capture_output=True, text=True, env={**os.environ, **self._env}
-        )
+        logger.info("Executando dbt: %s", redact_text(" ".join(args)))
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                env={**os.environ, **self._env},
+                stdin=subprocess.DEVNULL,
+                shell=False,
+                check=False,
+                timeout=self._timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            partial = (exc.stdout or "") + (exc.stderr or "")
+            output = redact_text(
+                f"dbt excedeu timeout de {self._timeout_seconds:g}s.\n{partial}"
+            )
+            logger.error("dbt falhou: %s", output)
+            return DbtResult(success=False, output=output)
+
         success = completed.returncode == 0
-        output = completed.stdout + completed.stderr
+        output = redact_text(completed.stdout + completed.stderr)
         if not success:
             logger.error("dbt falhou:\n%s", output)
         return DbtResult(success=success, output=output)
