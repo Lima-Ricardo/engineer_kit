@@ -2,8 +2,7 @@
 
 O formato descreve o caso local comum sem obrigar a arquitetura do core
 a conhecer DuckDB ou dbt. `destination` e `transform` sao escolhas de
-adapter/integracao; hoje o builder local implementa DuckDB e a UI pode
-opcionalmente executar dbt depois da ingestao.
+adapter/integracao; o builder local carrega DuckDB somente quando chamado.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional, Union
 
-import duckdb
 import yaml
 
 from engineer_kit.connectors.incremental import IncrementalMode
@@ -23,9 +21,7 @@ from engineer_kit.connectors.rest import DateParams, RestConnector
 from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, NoAuth
 from engineer_kit.orchestration.pipeline import Pipeline
 from engineer_kit.security.secrets import EnvSecretProvider, FileSecretProvider, SecretProvider
-from engineer_kit.storage.duckdb_loader import DuckDBLoader
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
-from engineer_kit.storage.state_store import DuckDBStateStore
 
 logger = logging.getLogger("engineer_kit.config")
 
@@ -151,7 +147,7 @@ class TransformConfig:
     o Pipeline de ingestao.
     """
 
-    type: str = "none"  # none | dbt
+    type: str = "none"
     select: Optional[str] = None
 
 
@@ -240,12 +236,12 @@ def list_pipeline_configs(directory: Union[str, Path]) -> list[tuple[Path, Pipel
     return results
 
 
-def build_pipeline(config: PipelineConfig, conn: duckdb.DuckDBPyConnection) -> Pipeline:
-    """Builder do runtime local atual.
+def build_pipeline(config: PipelineConfig, conn: Any) -> Pipeline:
+    """Build the current zero-infrastructure DuckDB runtime.
 
-    O contrato do Pipeline e agnostico; este helper ainda monta os adapters
-    DuckDB porque recebe uma conexao DuckDB. Builders/factories de Delta
-    podem ser adicionados sem alterar Connector, StateStore ou Pipeline.
+    DuckDB is imported only here, so parsing/editing YAML and importing the
+    engineer_kit core remain available without the optional DuckDB extra.
+    Platform-specific builders can implement the same contracts later.
     """
     if config.destination.type != "duckdb":
         raise PipelineConfigError(
@@ -255,6 +251,17 @@ def build_pipeline(config: PipelineConfig, conn: duckdb.DuckDBPyConnection) -> P
         raise PipelineConfigError(
             f"transform.type '{config.transform.type}' desconhecido (use 'none' ou 'dbt')."
         )
+
+    try:
+        from engineer_kit.adapters.duckdb.state_store import DuckDBStateStore
+        from engineer_kit.storage.duckdb_loader import DuckDBLoader
+    except ModuleNotFoundError as exc:
+        if exc.name == "duckdb":
+            raise PipelineConfigError(
+                "O builder local usa DuckDB. Instale `engineer_kit[duckdb]` "
+                "ou `engineer_kit[local]`."
+            ) from None
+        raise
 
     try:
         secret_provider = config.secrets.build()
