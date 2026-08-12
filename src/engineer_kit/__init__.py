@@ -1,12 +1,7 @@
-"""engineer_kit: conectores de API -> DuckDB (bronze) -> dbt (silver/gold).
+"""engineer_kit: ingestao de APIs para destinos analiticos.
 
 Import direto das classes principais, sem precisar conhecer a
-estrutura interna de modulos:
-
-    from engineer_kit import RestConnector, PageNumberPagination, EndpointSchema
-
-Veja o README para o guia rapido e `examples/github_commits.py` para
-um pipeline completo.
+estrutura interna de modulos.
 """
 
 from __future__ import annotations
@@ -77,7 +72,12 @@ from engineer_kit.storage.flatten import flatten_record
 from engineer_kit.storage.identifiers import InvalidIdentifierError
 from engineer_kit.storage.run_log import RunLogEntry, RunLogStore
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
-from engineer_kit.storage.state_store import IngestionStateStore, Watermark
+from engineer_kit.storage.state_store import (
+    DuckDBStateStore,
+    IngestionStateStore,
+    StateStore,
+    Watermark,
+)
 from engineer_kit.terminal_log import visual_logger
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
 from engineer_kit.transform.scaffold import (
@@ -90,7 +90,6 @@ __version__ = "0.1.0"
 
 __all__ = [
     "__version__",
-    # conectores
     "APIConnector",
     "RestConnector",
     "DateParams",
@@ -100,7 +99,6 @@ __all__ = [
     "DateFieldSpec",
     "extract_date_value",
     "stringify",
-    # config declarativo
     "PipelineConfig",
     "ConnectorConfig",
     "ColumnConfig",
@@ -115,7 +113,6 @@ __all__ = [
     "save_pipeline_config",
     "list_pipeline_configs",
     "build_pipeline",
-    # paginacao
     "PaginationStrategy",
     "ParsedPage",
     "NoPagination",
@@ -126,11 +123,9 @@ __all__ = [
     "NextUrlPagination",
     "STANDARD_PAGINATION_TYPES",
     "NEXT_URL_KEY",
-    # incremental
     "IncrementalMode",
     "IncrementalStrategy",
     "IncrementalWindow",
-    # http
     "HttpClient",
     "HttpRequestError",
     "InsecureUrlError",
@@ -138,13 +133,11 @@ __all__ = [
     "NoAuth",
     "BearerAuth",
     "ApiKeyAuth",
-    # seguranca
     "SecretProvider",
     "EnvSecretProvider",
     "StaticSecretProvider",
     "FileSecretProvider",
     "SecretNotFoundError",
-    # storage
     "EndpointSchema",
     "ColumnSpec",
     "Destination",
@@ -154,6 +147,8 @@ __all__ = [
     "MIN_BATCH_SIZE",
     "MAX_BATCH_SIZE",
     "InvalidBatchSizeError",
+    "StateStore",
+    "DuckDBStateStore",
     "IngestionStateStore",
     "Watermark",
     "RunLogStore",
@@ -161,13 +156,11 @@ __all__ = [
     "flatten_record",
     "InvalidIdentifierError",
     "visual_logger",
-    # transform / dbt
     "DbtRunner",
     "DbtResult",
     "write_staging_scaffold",
     "generate_sources_yml",
     "generate_staging_model",
-    # orquestracao
     "Pipeline",
     "PipelineSource",
     "PipelineResult",
