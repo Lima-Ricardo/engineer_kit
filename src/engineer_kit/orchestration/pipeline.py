@@ -8,7 +8,7 @@ cross-system transaction. Official engineer_kit destinations use a deterministic
 ``ingestion_key`` per connector/window to make a retry replace the same Bronze
 window when a checkpoint fails after data persistence. Third-party destinations
 remain compatible through ``Destination.load`` and provide at-least-once
-semantics unless they override ``load_with_context`` with their own idempotency.
+semantics unless they implement ``load_with_context`` with their own idempotency.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from engineer_kit.connectors.api_connector import APIConnector
@@ -168,9 +168,8 @@ class Pipeline:
                     run_id=run_id,
                 )
 
-            result = self._destination.load_with_context(
+            result = self._load_destination(
                 connector_name=connector.name,
-                endpoint=connector.name,
                 schema=source.schema,
                 records=records,
                 context=context,
@@ -181,11 +180,7 @@ class Pipeline:
                 "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado.",
                 connector.name,
             )
-            visual_logger.error(
-                "'{}': carga falhou. Motivo: {}",
-                connector.name,
-                exc,
-            )
+            visual_logger.error("'{}': carga falhou. Motivo: {}", connector.name, exc)
             self._record_run_safely(
                 self._run_log_entry(
                     connector_name=connector.name,
@@ -208,11 +203,15 @@ class Pipeline:
                 status="error",
                 started_at=started_at,
                 finished_at=finished_at,
-                window_start=window.start if window else None,
-                window_end=window.end if window else None,
-                watermark_before=window.watermark_before if window else None,
+                window_start=_window_start(window),
+                window_end=_window_end(window),
+                watermark_before=_window_watermark_before(window),
                 ingestion_key=context.ingestion_key,
             )
+
+        rows_loaded = int(getattr(result, "rows_loaded", 0))
+        extra_fields_seen = list(getattr(result, "extra_fields_seen", []) or [])
+        destination_label = getattr(result, "table", None)
 
         # Phase 2: state checkpoint. Data is already committed here.
         try:
@@ -237,41 +236,37 @@ class Pipeline:
                     started_at=started_at,
                     finished_at=finished_at,
                     status="checkpoint_error",
-                    rows_loaded=result.rows_loaded,
-                    extra_fields_seen=result.extra_fields_seen,
+                    rows_loaded=rows_loaded,
+                    extra_fields_seen=extra_fields_seen,
                     error_message=error_message,
-                    destination=result.table,
+                    destination=destination_label,
                     window=window,
                     watermark_after=None,
                 )
             )
             return StepResult(
                 connector_name=connector.name,
-                rows_loaded=result.rows_loaded,
+                rows_loaded=rows_loaded,
                 error=error_message,
                 status="checkpoint_error",
-                destination=result.table,
+                destination=destination_label,
                 started_at=started_at,
                 finished_at=finished_at,
-                window_start=window.start if window else None,
-                window_end=window.end if window else None,
-                watermark_before=window.watermark_before if window else None,
+                window_start=_window_start(window),
+                window_end=_window_end(window),
+                watermark_before=_window_watermark_before(window),
                 watermark_after=None,
-                extra_fields_seen=tuple(result.extra_fields_seen),
+                extra_fields_seen=tuple(extra_fields_seen),
                 ingestion_key=context.ingestion_key,
             )
 
         # Phase 3: audit is best-effort and cannot invalidate committed data/state.
         finished_at = datetime.now(timezone.utc)
-        logger.info(
-            "Conector '%s': %d linha(s) carregada(s).",
-            connector.name,
-            result.rows_loaded,
-        )
+        logger.info("Conector '%s': %d linha(s) carregada(s).", connector.name, rows_loaded)
         visual_logger.success(
             "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
             connector.name,
-            result.rows_loaded,
+            rows_loaded,
             started_at.isoformat(timespec="seconds"),
             finished_at.isoformat(timespec="seconds"),
         )
@@ -282,27 +277,51 @@ class Pipeline:
                 started_at=started_at,
                 finished_at=finished_at,
                 status="success",
-                rows_loaded=result.rows_loaded,
-                extra_fields_seen=result.extra_fields_seen,
+                rows_loaded=rows_loaded,
+                extra_fields_seen=extra_fields_seen,
                 error_message=None,
-                destination=result.table,
+                destination=destination_label,
                 window=window,
                 watermark_after=watermark_after,
             )
         )
         return StepResult(
             connector_name=connector.name,
-            rows_loaded=result.rows_loaded,
+            rows_loaded=rows_loaded,
             status="success",
-            destination=result.table,
+            destination=destination_label,
             started_at=started_at,
             finished_at=finished_at,
-            window_start=window.start if window else None,
-            window_end=window.end if window else None,
-            watermark_before=window.watermark_before if window else None,
+            window_start=_window_start(window),
+            window_end=_window_end(window),
+            watermark_before=_window_watermark_before(window),
             watermark_after=watermark_after,
-            extra_fields_seen=tuple(result.extra_fields_seen),
+            extra_fields_seen=tuple(extra_fields_seen),
             ingestion_key=context.ingestion_key,
+        )
+
+    def _load_destination(
+        self,
+        *,
+        connector_name: str,
+        schema: EndpointSchema,
+        records,
+        context: LoadContext,
+    ) -> Any:
+        contextual_load = getattr(self._destination, "load_with_context", None)
+        if callable(contextual_load):
+            return contextual_load(
+                connector_name=connector_name,
+                endpoint=connector_name,
+                schema=schema,
+                records=records,
+                context=context,
+            )
+        return self._destination.load(
+            connector_name=connector_name,
+            endpoint=connector_name,
+            schema=schema,
+            records=records,
         )
 
     @staticmethod
@@ -331,11 +350,9 @@ class Pipeline:
             run_id=context.run_id,
             ingestion_key=context.ingestion_key,
             destination=destination,
-            window_start=window.start if window else None,
-            window_end=window.end if window else None,
-            watermark_before=_watermark_json(
-                window.watermark_before if window else None
-            ),
+            window_start=_window_start(window),
+            window_end=_window_end(window),
+            watermark_before=_watermark_json(_window_watermark_before(window)),
             watermark_after=_watermark_json(watermark_after),
         )
 
@@ -351,6 +368,18 @@ class Pipeline:
                 entry.run_id or "sem-id",
                 exc,
             )
+
+
+def _window_start(window) -> date | None:
+    return getattr(window, "start", None) if window is not None else None
+
+
+def _window_end(window) -> date | None:
+    return getattr(window, "end", None) if window is not None else None
+
+
+def _window_watermark_before(window) -> Watermark | None:
+    return getattr(window, "watermark_before", None) if window is not None else None
 
 
 def _watermark_json(watermark: Watermark | None) -> str | None:
