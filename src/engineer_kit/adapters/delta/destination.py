@@ -7,14 +7,19 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import pyarrow as pa
-from deltalake import write_deltalake
+from deltalake import DeltaTable, write_deltalake
 
 from engineer_kit.adapters._arrow import bronze_arrow_schema, rows_to_record_batch
 from engineer_kit.adapters.delta._paths import join_table_uri
 from engineer_kit.adapters.delta.run_log import DeltaRunLogStore
 from engineer_kit.storage.batching import DEFAULT_BATCH_SIZE, iter_in_batches, validate_batch_size
 from engineer_kit.storage.bronze import build_bronze_rows
-from engineer_kit.storage.destination import Destination, LoadResult, WriteMode
+from engineer_kit.storage.destination import (
+    Destination,
+    LoadContext,
+    LoadResult,
+    WriteMode,
+)
 from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.run_log import RunLogBackend
 from engineer_kit.storage.schema import EndpointSchema
@@ -26,9 +31,10 @@ logger = logging.getLogger("engineer_kit.storage.delta")
 class DeltaDestination(Destination):
     """Stream one ingestion run into one atomic Delta Lake transaction.
 
-    ``base_uri`` may be a local directory or an object-store URI supported by
-    delta-rs. A RecordBatchReader keeps memory bounded while Delta commits the
-    whole stream transactionally. Partitioning is explicit and never inferred.
+    In APPEND mode a Pipeline retry uses Delta predicate overwrite on the
+    deterministic ``_ingestion_key``. A new key behaves like an append; the
+    same key replaces only that previously committed window. This closes the
+    gap between a successful data commit and a failed StateStore checkpoint.
     """
 
     def __init__(
@@ -57,7 +63,8 @@ class DeltaDestination(Destination):
 
     def default_run_log_backend(self) -> RunLogBackend:
         return DeltaRunLogStore(
-            self._metadata_base_uri, storage_options=self._storage_options
+            self._metadata_base_uri,
+            storage_options=self._storage_options,
         )
 
     def load(
@@ -67,6 +74,32 @@ class DeltaDestination(Destination):
         schema: EndpointSchema,
         records: Iterable[dict[str, Any]],
     ) -> LoadResult:
+        return self._load(
+            connector_name,
+            endpoint,
+            schema,
+            records,
+            LoadContext.adhoc(connector_name),
+        )
+
+    def load_with_context(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
+        return self._load(connector_name, endpoint, schema, records, context)
+
+    def _load(
+        self,
+        connector_name: str,
+        endpoint: str,
+        schema: EndpointSchema,
+        records: Iterable[dict[str, Any]],
+        context: LoadContext,
+    ) -> LoadResult:
         endpoint_name = validate_identifier(endpoint, "endpoint")
         table_uri = join_table_uri(self._base_uri, endpoint_name)
         batches = iter(iter_in_batches(records, self._batch_size))
@@ -74,9 +107,7 @@ class DeltaDestination(Destination):
         arrow_schema = bronze_arrow_schema(schema)
 
         if first_batch is None:
-            if self._write_mode is WriteMode.OVERWRITE:
-                empty = pa.Table.from_batches([], schema=arrow_schema)
-                self._write(table_uri, empty)
+            self._commit_empty(table_uri, arrow_schema, context)
             return LoadResult(table=table_uri, rows_loaded=0, extra_fields_seen=[])
 
         total_rows = 0
@@ -86,7 +117,11 @@ class DeltaDestination(Destination):
             nonlocal total_rows
             for batch in _with_first(first_batch, batches):
                 rows, extra_fields = build_bronze_rows(
-                    connector_name, endpoint_name, schema, batch
+                    connector_name,
+                    endpoint_name,
+                    schema,
+                    batch,
+                    context=context,
                 )
                 all_extra_fields.update(extra_fields)
                 total_rows += len(rows)
@@ -94,7 +129,7 @@ class DeltaDestination(Destination):
 
         reader = pa.RecordBatchReader.from_batches(arrow_schema, record_batches())
         try:
-            self._write(table_uri, reader)
+            self._write(table_uri, reader, context)
         finally:
             reader.close()
 
@@ -111,16 +146,56 @@ class DeltaDestination(Destination):
             extra_fields_seen=sorted(all_extra_fields),
         )
 
-    def _write(self, table_uri: str, data: Any) -> None:
-        kwargs: dict[str, Any] = {
-            "mode": self._write_mode.value,
-            "storage_options": self._storage_options or None,
-        }
-        if self._partition_by:
-            kwargs["partition_by"] = self._partition_by
+    def _write(self, table_uri: str, data: Any, context: LoadContext) -> None:
+        options = self._storage_options or None
+        exists = DeltaTable.is_deltatable(table_uri, storage_options=options)
+        kwargs: dict[str, Any] = {"storage_options": options}
+
         if self._target_file_size is not None:
             kwargs["target_file_size"] = self._target_file_size
+
+        if self._write_mode is WriteMode.OVERWRITE:
+            kwargs["mode"] = "overwrite"
+            if self._partition_by:
+                kwargs["partition_by"] = self._partition_by
+            write_deltalake(table_uri, data, **kwargs)
+            return
+
+        if exists:
+            escaped_key = context.ingestion_key.replace("'", "''")
+            kwargs["mode"] = "overwrite"
+            kwargs["predicate"] = f"_ingestion_key = '{escaped_key}'"
+        else:
+            kwargs["mode"] = "append"
+            if self._partition_by:
+                kwargs["partition_by"] = self._partition_by
         write_deltalake(table_uri, data, **kwargs)
+
+    def _commit_empty(
+        self,
+        table_uri: str,
+        arrow_schema: pa.Schema,
+        context: LoadContext,
+    ) -> None:
+        options = self._storage_options or None
+        exists = DeltaTable.is_deltatable(table_uri, storage_options=options)
+
+        if self._write_mode is WriteMode.OVERWRITE:
+            empty = pa.Table.from_batches([], schema=arrow_schema)
+            kwargs: dict[str, Any] = {
+                "mode": "overwrite",
+                "storage_options": options,
+            }
+            if self._partition_by:
+                kwargs["partition_by"] = self._partition_by
+            write_deltalake(table_uri, empty, **kwargs)
+            return
+
+        if exists:
+            escaped_key = context.ingestion_key.replace("'", "''")
+            DeltaTable(table_uri, storage_options=options).delete(
+                predicate=f"_ingestion_key = '{escaped_key}'"
+            )
 
     @staticmethod
     def _report_extra_fields(
