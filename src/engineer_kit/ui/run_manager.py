@@ -18,6 +18,7 @@ from typing import Optional
 import duckdb
 
 from engineer_kit.config.pipeline_config import PipelineConfig, build_pipeline
+from engineer_kit.security.redaction import redact_text
 from engineer_kit.terminal_log import visual_logger
 from engineer_kit.transform.dbt_runner import DbtRunner
 
@@ -64,7 +65,7 @@ class RunManager:
     def _execute(self, run_id: str, config: PipelineConfig) -> None:
         state = self._runs[run_id]
         sink_id = visual_logger.add(
-            lambda message: state.log_queue.put(message),
+            lambda message: state.log_queue.put(redact_text(message)),
             filter=lambda record: record["extra"].get("run_id") == run_id,
             format="{time:HH:mm:ss} | {level: <8} | {message}",
         )
@@ -73,7 +74,9 @@ class RunManager:
                 result = self._run_ingestion(config, run_id)
                 if not result.success:
                     state.status = "error"
-                    state.error = "; ".join(step.error for step in result.steps if step.error)
+                    state.error = redact_text(
+                        "; ".join(step.error for step in result.steps if step.error)
+                    )
                     return
 
                 state.rows_loaded = result.rows_loaded
@@ -96,8 +99,8 @@ class RunManager:
                 state.status = "success"
         except Exception as exc:
             state.status = "error"
-            state.error = str(exc)
-            visual_logger.error("'{}': {}", config.name, exc)
+            state.error = redact_text(exc)
+            visual_logger.error("'{}': {}", config.name, state.error)
         finally:
             visual_logger.remove(sink_id)
             state.log_queue.put(_STREAM_END)
@@ -131,7 +134,7 @@ class RunManager:
 
         for line in dbt_result.output.splitlines():
             if line.strip():
-                visual_logger.info("dbt | {}", line)
+                visual_logger.info("dbt | {}", redact_text(line))
 
         if dbt_result.success:
             state.transform_status = "success"
