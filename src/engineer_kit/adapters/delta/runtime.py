@@ -16,9 +16,13 @@ def _root(context) -> str:
     return str(path)
 
 
-def _storage_options(context) -> dict[str, str]:
-    options = getattr(context.destination_config, "options", {}) or {}
-    return dict(options.get("storage_options", {}) or {})
+def _storage_options(config, context) -> dict[str, str]:
+    """Merge destination credentials/options with state/audit-specific overrides."""
+    destination_options = getattr(context.destination_config, "options", {}) or {}
+    specific_options = getattr(config, "options", {}) or {}
+    merged = dict(destination_options.get("storage_options", {}) or {})
+    merged.update(specific_options.get("storage_options", {}) or {})
+    return {str(key): str(value) for key, value in merged.items()}
 
 
 def build_destination(config, context):
@@ -28,7 +32,7 @@ def build_destination(config, context):
     return DeltaDestination(
         join_table_uri(root, schema_name),
         batch_size=getattr(config, "batch_size", 5000),
-        storage_options=_storage_options(context),
+        storage_options=_storage_options(config, context),
         partition_by=list(getattr(config, "partition_by", []) or []),
         write_mode=WriteMode.parse(getattr(config, "write_mode", "append")),
         target_file_size=options.get("target_file_size"),
@@ -38,9 +42,15 @@ def build_destination(config, context):
 
 def build_state_store(config, context):
     base_uri = getattr(config, "path", None) or _root(context)
-    return DeltaStateStore(base_uri, storage_options=_storage_options(context))
+    return DeltaStateStore(
+        base_uri,
+        storage_options=_storage_options(config, context),
+    )
 
 
 def build_run_log(config, context):
     base_uri = getattr(config, "path", None) or _root(context)
-    return DeltaRunLogStore(base_uri, storage_options=_storage_options(context))
+    return DeltaRunLogStore(
+        base_uri,
+        storage_options=_storage_options(config, context),
+    )
