@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Arquitetura - engineer_kit{% endblock %}
+{% block content %}
+<h1>Arquitetura do engineer_kit</h1>
+<p class="subtitle">A interface local serve para aprender e testar os mesmos contratos usados pelo core.</p>
+
+<div class="flow-strip architecture-flow">
+    <div class="flow-node active"><strong>Source</strong><span>RestConnector</span><small>HTTP, auth, paginação</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Incremental</strong><span>StateStore</span><small>watermark/checkpoint</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>persistência em batches</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node"><strong>Transform</strong><span>opcional</span><small>dbt, Spark ou SQL</small></div>
+</div>
+
+<div class="grid-2 docs-grid">
+    <section class="card"><h3>RestConnector</h3><p>Transforma uma API REST em uma fonte previsível. O usuário declara apenas o que varia: URL, método, autenticação, paginação, caminho dos registros e filtros de data.</p><code>API → Iterator[dict]</code></section>
+    <section class="card"><h3>StateStore</h3><p>Persiste o checkpoint incremental. O connector pergunta pelo último watermark sem saber se ele vive em DuckDB, Delta ou outro backend.</p><code>get_watermark / set_watermark</code></section>
+    <section class="card"><h3>Destination</h3><p>Recebe registros e materializa a Bronze. O core não conhece SQL de DuckDB nem detalhes de Lakehouse.</p><code>load(...) → LoadResult</code></section>
+    <section class="card"><h3>RunLogBackend</h3><p>Registra a execução de forma auditável sem amarrar o Pipeline a uma tabela específica. No local, o adapter é <code>DuckDBRunLogStore</code>.</p><code>record(RunLogEntry)</code></section>
+    <section class="card"><h3>Pipeline</h3><p>Coordena a unidade atômica: extrai, grava, confirma o watermark e registra auditoria. Pode ser chamado pela UI, Scheduler, Airflow ou outro orquestrador.</p><code>state → extract → load → commit</code></section>
+    <section class="card"><h3>Transform</h3><p>É deliberadamente pós-ingestão. dbt é uma integração opcional no laboratório local; em uma plataforma robusta, Spark/dbt/SQL podem rodar externamente.</p><code>Bronze → staging → silver → gold</code></section>
+</div>
+
+<h2>Runtime local</h2>
+<div class="card">
+    <p>A instalação da UI é opcional e faz sentido para desenvolvimento, treinamento e pequenos projetos locais.</p>
+    <pre class="code-block">pip install "engineer_kit[ui]"
+engineer_kit ui --workspace .</pre>
+    <p>Nesse modo, o mapa de adapters é:</p>
+    <table><thead><tr><th>Contrato</th><th>Adapter local</th><th>Futuro em plataforma</th></tr></thead><tbody>
+        <tr><td>StateStore</td><td>DuckDBStateStore</td><td>Delta/Lakehouse StateStore</td></tr>
+        <tr><td>Destination</td><td>DuckDBLoader</td><td>Parquet/Delta Destination</td></tr>
+        <tr><td>RunLogBackend</td><td>DuckDBRunLogStore</td><td>Delta/SQL/observability backend</td></tr>
+        <tr><td>Transform</td><td>{{ "dbt disponível" if dbt_available else "dbt opcional" }}</td><td>dbt / Spark / SQL</td></tr>
+    </tbody></table>
+</div>
+
+<h2>Regra de segurança do incremental</h2>
+<div class="card"><pre class="code-block">read watermark
+      ↓
+extract API
+      ↓
+write Bronze
+   ┌──┴──┐
+ fail  success
+   │      │
+   │    commit watermark
+   │      │
+retry    transform opcional</pre></div>
+{% endblock %}
