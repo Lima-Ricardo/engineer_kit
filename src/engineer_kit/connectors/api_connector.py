@@ -6,6 +6,7 @@ import json
 from abc import abstractmethod
 from datetime import date
 from typing import Any, Iterator, Optional, Union
+from urllib.parse import urlsplit
 
 import requests
 
@@ -41,6 +42,20 @@ class PaginationLoopError(RuntimeError):
     """Raised when the same pagination request state repeats."""
 
 
+class CrossOriginPaginationError(RuntimeError):
+    """Raised before pagination can forward connector auth to another origin."""
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, host, port
+
+
 class APIConnector(Connector):
     """Base for API connectors with reusable pagination and incremental state.
 
@@ -63,6 +78,7 @@ class APIConnector(Connector):
         incremental: Optional[IncrementalStrategy] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
+        allow_cross_origin_pagination: bool = False,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -79,6 +95,7 @@ class APIConnector(Connector):
         self._date_field = date_field
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
+        self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
         self._legacy_session: ExtractionSession | None = None
 
         if incremental is not None:
@@ -185,6 +202,7 @@ class APIConnector(Connector):
         next_url: Optional[str] = None
         seen_requests: set[str] = set()
         pages_requested = 0
+        initial_origin: tuple[str, str, int | None] | None = None
 
         while True:
             if pages_requested >= self._max_pages:
@@ -202,9 +220,24 @@ class APIConnector(Connector):
             seen_requests.add(fingerprint)
 
             if next_url is not None:
+                if (
+                    initial_origin is not None
+                    and not self._allow_cross_origin_pagination
+                    and _url_origin(next_url) != initial_origin
+                ):
+                    raise CrossOriginPaginationError(
+                        f"'{self.name}' recebeu URL de proxima pagina em outra origem. "
+                        "A requisicao foi bloqueada para evitar vazamento de credenciais. "
+                        "Use allow_cross_origin_pagination=True somente se a API documentar "
+                        "explicitamente esse comportamento."
+                    )
                 request_kwargs: dict[str, Any] = {"url": next_url}
             else:
                 request_kwargs = self.build_request(window, page_params)
+
+            request_url = str(request_kwargs.get("url") or "")
+            if initial_origin is None:
+                initial_origin = _url_origin(request_url)
 
             response = self._http.request(self._method, **request_kwargs)
             pages_requested += 1
