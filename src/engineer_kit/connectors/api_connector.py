@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from abc import abstractmethod
 from datetime import date
-from typing import Any, Iterator, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Union
 from urllib.parse import urlsplit
 
 import requests
@@ -79,6 +79,7 @@ class APIConnector(Connector):
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
         allow_cross_origin_pagination: bool = False,
+        record_transform: Callable[[dict], dict] | None = None,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -93,6 +94,7 @@ class APIConnector(Connector):
         self._pagination = pagination
         self._method = method
         self._date_field = date_field
+        self._record_transform = record_transform
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
         self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
@@ -173,6 +175,7 @@ class APIConnector(Connector):
             incremental=self._incremental,
             date_field=self._date_field,
             batch_size=resolved_batch_size,
+            record_transform=self._record_transform,
         )
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
