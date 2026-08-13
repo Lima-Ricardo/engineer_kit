@@ -4,7 +4,12 @@ import pytest
 import responses
 
 from engineer_kit.http.auth import ApiKeyAuth, BearerAuth
-from engineer_kit.http.client import HttpClient, HttpRequestError, InsecureUrlError
+from engineer_kit.http.client import (
+    HttpClient,
+    HttpRequestError,
+    InsecureTlsError,
+    InsecureUrlError,
+)
 from engineer_kit.security.secrets import StaticSecretProvider
 
 
@@ -42,6 +47,22 @@ def test_allow_http_override_permits_plain_http():
     with responses.RequestsMock() as rsps:
         rsps.add(responses.GET, "http://example.test/data", json={"ok": True})
         response = client.get("http://example.test/data")
+    assert response.json() == {"ok": True}
+
+
+@responses.activate
+def test_disabling_tls_verification_requires_explicit_opt_in():
+    client = HttpClient()
+    with pytest.raises(InsecureTlsError, match="verify=False"):
+        client.get("https://example.test/data", verify=False)
+    assert not responses.calls
+
+
+@responses.activate
+def test_insecure_tls_override_is_explicit_and_functional_for_labs():
+    client = HttpClient(allow_insecure_tls=True)
+    responses.add(responses.GET, "https://example.test/data", json={"ok": True})
+    response = client.get("https://example.test/data", verify=False)
     assert response.json() == {"ok": True}
 
 
