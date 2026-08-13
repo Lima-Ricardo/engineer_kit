@@ -74,6 +74,7 @@ def test_metadata_permissions_are_repaired_if_existing_file_is_too_open(tmp_path
         Watermark(
             last_run_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
             last_data_date=date(2026, 8, 12),
+            cursor_value=None,
         ),
     )
     assert state_path.stat().st_mode & 0o777 == 0o600
