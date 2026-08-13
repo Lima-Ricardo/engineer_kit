@@ -1,0 +1,82 @@
+site_name: engineer_kit
+site_description: Reliable, streaming-first REST API ingestion for analytical destinations
+site_url: https://lima-ricardo.github.io/engineer_kit/
+repo_url: https://github.com/Lima-Ricardo/engineer_kit
+repo_name: Lima-Ricardo/engineer_kit
+edit_uri: edit/main/docs/
+
+nav:
+  - Início: index.md
+  - Notícias: news.md
+  - Começando:
+      - Instalação: getting-started/installation.md
+      - Modelo mental: getting-started/mental-model.md
+      - Primeiro pipeline: getting-started/first-pipeline.md
+  - Guias:
+      - Autenticação & secrets: guides/authentication.md
+      - Paginação: guides/pagination.md
+      - Incremental & watermark: guides/incremental.md
+      - Streaming & batching: guides/streaming.md
+      - Managed mode: guides/managed-mode.md
+      - Embedded mode / Spark: guides/embedded-mode.md
+      - Destinos: guides/destinations.md
+      - AWS / GCP / Azure: guides/platforms.md
+      - Local Lab / UI: guides/ui.md
+      - dbt: guides/dbt.md
+  - Arquitetura: architecture.md
+  - Referência:
+      - YAML: reference/configuration.md
+      - Python API: reference/python-api.md
+      - CLI: reference/cli.md
+      - Segurança: reference/security.md
+      - Troubleshooting: reference/troubleshooting.md
+      - FAQ: reference/faq.md
+      - Publicação (mantenedor): reference/releasing.md
+
+theme:
+  name: material
+  language: pt-BR
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-sunny
+        name: Modo claro
+    - scheme: default
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-night
+        name: Modo escuro
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
