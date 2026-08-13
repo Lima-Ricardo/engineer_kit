@@ -34,9 +34,10 @@ def _path_token(value: str) -> str:
 class ParquetDestination(Destination):
     """Write bounded-memory Parquet Bronze files.
 
-    APPEND writes one file per ingestion window. Its final filename uses the
-    deterministic ``ingestion_key`` supplied by Pipeline, so retrying a window
-    atomically replaces that window's previous file instead of duplicating it.
+    APPEND writes one file per ingestion window. Its final filename uses a
+    deterministic token derived from ``ingestion_key`` supplied by Pipeline,
+    so retrying a window atomically replaces that window's previous file instead
+    of duplicating it. Raw run/key values never participate in filesystem paths.
     OVERWRITE stages a complete replacement directory before promotion.
     """
 
@@ -98,6 +99,7 @@ class ParquetDestination(Destination):
         total_rows = 0
         all_extra_fields: set[str] = set()
         run_token = _path_token(context.run_id)
+        ingestion_token = _path_token(context.ingestion_key)
 
         if self._write_mode is WriteMode.OVERWRITE:
             staged_dir = staging_root / f"replace-{run_token}"
@@ -107,7 +109,7 @@ class ParquetDestination(Destination):
         else:
             endpoint_dir.mkdir(parents=True, exist_ok=True)
             temp_path = staging_root / f"{run_token}.parquet.tmp"
-            final_path = endpoint_dir / f"part-{context.ingestion_key}.parquet"
+            final_path = endpoint_dir / f"part-{ingestion_token}.parquet"
 
         writer: pq.ParquetWriter | None = None
         try:
