@@ -93,16 +93,19 @@ def _is_blocked_literal_ip(host: str) -> bool:
 
     RFC1918/private addresses remain allowed because internal enterprise APIs
     are a first-class use case. Link-local/cloud-metadata, multicast,
-    unspecified and reserved literal IPs are rejected. Hostname resolution is
-    deliberately not performed here so normal corporate DNS/proxy setups keep
-    working; deployments that execute untrusted configs should additionally
-    enforce egress policy at the runtime/network layer.
+    unspecified and reserved literal IPs are rejected. IPv4-mapped IPv6 is
+    normalized first so address notation cannot bypass the same checks.
+    Hostname resolution is deliberately not performed here so normal corporate
+    DNS/proxy setups keep working; deployments that execute untrusted configs
+    should additionally enforce egress policy at the runtime/network layer.
     """
     candidate = host.split("%", 1)[0]
     try:
         address = ipaddress.ip_address(candidate)
     except ValueError:
         return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return bool(
         address.is_link_local
         or address.is_multicast
