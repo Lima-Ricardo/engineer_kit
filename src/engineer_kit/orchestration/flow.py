@@ -1,4 +1,4 @@
-"""High-level managed flow for intent-driven destinations."""
+"""High-level source -> destination -> optional dbt flow."""
 
 from __future__ import annotations
 
@@ -11,15 +11,18 @@ from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult
 from engineer_kit.storage.destination import Destination
 from engineer_kit.storage.inferred_destination import InferredSchemaDestination
 from engineer_kit.storage.schema import EndpointSchema
+from engineer_kit.transform.dbt_easy import Dbt
+from engineer_kit.transform.dbt_runner import DbtResult
 
 
 @dataclass(frozen=True)
 class FlowResult:
     pipeline: PipelineResult
+    transform: DbtResult | None = None
 
     @property
     def success(self) -> bool:
-        return self.pipeline.success
+        return self.pipeline.success and (self.transform is None or self.transform.success)
 
     @property
     def rows_loaded(self) -> int:
@@ -32,13 +35,31 @@ class ManagedFlow:
         self._destination = destination
         self._target = target
         self._options = dict(options)
+        self._dbt: dict[str, Any] | None = None
+
+    def dbt(
+        self,
+        select: str | None = None,
+        *,
+        project_dir: str | None = None,
+        profiles_dir: str | None = None,
+        target: str = "dev",
+    ) -> "ManagedFlow":
+        self._dbt = {
+            "select": select,
+            "project_dir": project_dir,
+            "profiles_dir": profiles_dir,
+            "target": target,
+        }
+        return self
 
     @staticmethod
     def _target_parts(value: str | None, default_table: str, default_schema: str) -> tuple[str, str]:
         if not value:
             return default_schema, default_table
         if "." in value:
-            return tuple(value.rsplit(".", 1))
+            schema, table = value.rsplit(".", 1)
+            return schema, table
         return default_schema, value
 
     def _resolve(self):
@@ -80,14 +101,21 @@ class ManagedFlow:
 
     def run(self, run_id: str | None = None) -> FlowResult:
         destination, owned = self._resolve()
+        transform = None
         try:
-            result = Pipeline(
+            pipeline_result = Pipeline(
                 connector=self._connector,
                 schema=EndpointSchema(),
                 destination=destination,
                 run_log=False,
             ).run(run_id=run_id)
-            return FlowResult(result)
+            if pipeline_result.success and self._dbt is not None:
+                transform = Dbt(
+                    project_dir=self._dbt["project_dir"],
+                    profiles_dir=self._dbt["profiles_dir"],
+                    target=self._dbt["target"],
+                ).run(select=self._dbt["select"])
+            return FlowResult(pipeline_result, transform)
         finally:
             if owned is not None:
                 owned.close()
