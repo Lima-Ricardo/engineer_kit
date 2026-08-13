@@ -71,18 +71,26 @@ class ManagedFlow:
             return schema, table
         return default_schema, value
 
-    def _resolve_custom(self, sample_size: int):
+    def _resolve_custom(self, sample_size: int, run_log_enabled: bool):
         endpoint = self._target or self._connector.name
         destination = InferredSchemaDestination(
             self._destination,
             endpoint=endpoint,
             sample_size=sample_size,
         )
-        factory = getattr(self._destination, "default_run_log_backend", None)
-        run_log = factory() if callable(factory) else None
+        run_log = None
+        if run_log_enabled:
+            factory = getattr(self._destination, "default_run_log_backend", None)
+            run_log = factory() if callable(factory) else None
         return destination, run_log, None
 
-    def _resolve_builtin(self, kind: str, options: dict[str, Any], sample_size: int):
+    def _resolve_builtin(
+        self,
+        kind: str,
+        options: dict[str, Any],
+        sample_size: int,
+        run_log_enabled: bool,
+    ):
         schema, endpoint = self._target_parts(
             self._target,
             self._connector.name,
@@ -121,32 +129,37 @@ class ManagedFlow:
             sample_size=sample_size,
         )
 
-        state_config = SimpleNamespace(path=None, options={})
-        state_type = resolve_auto("auto", destination_type=kind, kind="state")
-        state_store = build_state_store(state_type, state_config, context)
-        binder = getattr(self._connector, "_bind_auto_state_store", None)
-        if callable(binder):
-            binder(state_store)
+        # State is lazy: do not create metadata files/tables when incrementality
+        # is disabled or the caller supplied an explicit StateStore.
+        if bool(getattr(self._connector, "needs_auto_state", False)):
+            state_config = SimpleNamespace(path=None, options={})
+            state_type = resolve_auto("auto", destination_type=kind, kind="state")
+            state_store = build_state_store(state_type, state_config, context)
+            binder = getattr(self._connector, "_bind_auto_state_store", None)
+            if callable(binder):
+                binder(state_store)
 
         run_log = None
-        try:
-            audit_type = resolve_auto("auto", destination_type=kind, kind="run_log")
-            run_log = build_run_log(audit_type, SimpleNamespace(path=None, options={}), context)
-        except AdapterNotFoundError:
-            factory = getattr(raw_destination, "default_run_log_backend", None)
-            run_log = factory() if callable(factory) else None
+        if run_log_enabled:
+            try:
+                audit_type = resolve_auto("auto", destination_type=kind, kind="run_log")
+                run_log = build_run_log(audit_type, SimpleNamespace(path=None, options={}), context)
+            except AdapterNotFoundError:
+                factory = getattr(raw_destination, "default_run_log_backend", None)
+                run_log = factory() if callable(factory) else None
 
         return destination, run_log, owned
 
     def _resolve(self):
         options = dict(self._options)
         sample_size = int(options.pop("schema_sample_size", 100))
+        run_log_enabled = bool(options.pop("run_log", True))
         if sample_size <= 0:
             raise ValueError("schema_sample_size deve ser maior que zero.")
         if isinstance(self._destination, Destination):
-            return self._resolve_custom(sample_size)
+            return self._resolve_custom(sample_size, run_log_enabled)
         kind = str(self._destination).strip().lower()
-        return self._resolve_builtin(kind, options, sample_size)
+        return self._resolve_builtin(kind, options, sample_size, run_log_enabled)
 
     def run(self, run_id: str | None = None) -> FlowResult:
         destination, run_log, owned = self._resolve()
