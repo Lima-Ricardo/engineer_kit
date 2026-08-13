@@ -1,10 +1,4 @@
-"""Invoca o dbt para materializar silver/gold a partir do bronze.
-
-So dispara o comando via subprocess (mais estavel entre versoes do dbt
-do que acoplar na API interna `dbt.cli.main`, que muda com frequencia
-entre releases) — as regras de transformacao (joins, desnormalizacao)
-ficam nos modelos .sql do projeto dbt, escritos pelo engenheiro.
-"""
+"""Run dbt through its stable CLI boundary without shell coupling."""
 
 from __future__ import annotations
 
@@ -21,6 +15,7 @@ from engineer_kit.security.redaction import redact_text
 
 logger = logging.getLogger("engineer_kit.dbt")
 DEFAULT_DBT_TIMEOUT_SECONDS = 60 * 60
+_DBT_COMMANDS = {"run", "build", "test", "compile", "seed", "snapshot"}
 
 
 @dataclass
@@ -30,7 +25,7 @@ class DbtResult:
 
 
 def _default_dbt_executable() -> str:
-    """Acha o dbt sem depender do venv estar ativado."""
+    """Find dbt without requiring an activated virtualenv."""
     found = shutil.which("dbt")
     if found:
         return found
@@ -61,9 +56,22 @@ class DbtRunner:
         self._timeout_seconds = timeout_seconds
 
     def run(self, select: Optional[str] = None) -> DbtResult:
+        return self.execute("run", select=select)
+
+    def build(self, select: Optional[str] = None) -> DbtResult:
+        return self.execute("build", select=select)
+
+    def test(self, select: Optional[str] = None) -> DbtResult:
+        return self.execute("test", select=select)
+
+    def execute(self, command: str = "run", *, select: Optional[str] = None) -> DbtResult:
+        command = command.strip().lower()
+        if command not in _DBT_COMMANDS:
+            valid = ", ".join(sorted(_DBT_COMMANDS))
+            raise ValueError(f"Comando dbt '{command}' nao suportado. Use: {valid}.")
         args = [
             self._dbt_executable,
-            "run",
+            command,
             "--project-dir",
             self._project_dir,
             "--profiles-dir",
@@ -88,6 +96,13 @@ class DbtRunner:
                 check=False,
                 timeout=self._timeout_seconds,
             )
+        except FileNotFoundError:
+            output = (
+                "Executavel dbt nao encontrado. Instale o extra apropriado, por exemplo "
+                '`pip install "engineer-kit[dbt]"`, ou passe dbt_executable explicitamente.'
+            )
+            logger.error("dbt falhou: %s", output)
+            return DbtResult(success=False, output=output)
         except subprocess.TimeoutExpired as exc:
             partial = (exc.stdout or "") + (exc.stderr or "")
             output = redact_text(
