@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 from pathlib import Path
@@ -23,6 +24,11 @@ from engineer_kit.storage.schema import EndpointSchema
 from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.storage.parquet")
+
+
+def _path_token(value: str) -> str:
+    """Return a filesystem-safe deterministic token for operator-supplied ids."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
 class ParquetDestination(Destination):
@@ -91,15 +97,16 @@ class ParquetDestination(Destination):
         arrow_schema = bronze_arrow_schema(schema)
         total_rows = 0
         all_extra_fields: set[str] = set()
+        run_token = _path_token(context.run_id)
 
         if self._write_mode is WriteMode.OVERWRITE:
-            staged_dir = staging_root / f"replace-{context.run_id}"
+            staged_dir = staging_root / f"replace-{run_token}"
             staged_dir.mkdir(parents=True, exist_ok=False)
-            temp_path = staged_dir / f"part-{context.run_id}.parquet"
+            temp_path = staged_dir / f"part-{run_token}.parquet"
             final_path = temp_path
         else:
             endpoint_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = staging_root / f"{context.run_id}.parquet.tmp"
+            temp_path = staging_root / f"{run_token}.parquet.tmp"
             final_path = endpoint_dir / f"part-{context.ingestion_key}.parquet"
 
         writer: pq.ParquetWriter | None = None
@@ -129,7 +136,7 @@ class ParquetDestination(Destination):
                 writer = None
 
             if self._write_mode is WriteMode.OVERWRITE:
-                self._promote_overwrite(staged_dir, endpoint_dir, context.run_id)
+                self._promote_overwrite(staged_dir, endpoint_dir, run_token)
             elif total_rows:
                 temp_path.replace(final_path)
             else:
@@ -159,8 +166,8 @@ class ParquetDestination(Destination):
         )
 
     @staticmethod
-    def _promote_overwrite(staged_dir: Path, endpoint_dir: Path, run_id: str) -> None:
-        backup = endpoint_dir.with_name(f".{endpoint_dir.name}.backup-{run_id}")
+    def _promote_overwrite(staged_dir: Path, endpoint_dir: Path, run_token: str) -> None:
+        backup = endpoint_dir.with_name(f".{endpoint_dir.name}.backup-{run_token}")
         had_previous = endpoint_dir.exists()
         try:
             if had_previous:
