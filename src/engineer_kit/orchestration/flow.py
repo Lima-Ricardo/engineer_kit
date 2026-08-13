@@ -37,8 +37,6 @@ class FlowResult:
 
 
 class ManagedFlow:
-    """Resolve destination/state/audit adapters once, then run the typed Pipeline."""
-
     def __init__(self, connector, destination: Any, *, target: str | None, options: dict[str, Any]) -> None:
         self._connector = connector
         self._destination = destination
@@ -129,8 +127,6 @@ class ManagedFlow:
             sample_size=sample_size,
         )
 
-        # State is lazy: do not create metadata files/tables when incrementality
-        # is disabled or the caller supplied an explicit StateStore.
         if bool(getattr(self._connector, "needs_auto_state", False)):
             state_config = SimpleNamespace(path=None, options={})
             state_type = resolve_auto("auto", destination_type=kind, kind="state")
@@ -172,6 +168,9 @@ class ManagedFlow:
                 run_log=run_log is not None,
                 run_log_store=run_log,
             ).run(run_id=run_id)
+            if owned is not None:
+                owned.close()
+                owned = None
             if pipeline_result.success and self._dbt is not None:
                 transform = Dbt(
                     project_dir=self._dbt["project_dir"],
