@@ -1,202 +1,257 @@
 # engineer_kit
 
-**Reliable, streaming-first REST API ingestion for analytical destinations.**
+> **Ingestão confiável de APIs REST para analytics — streaming-first, incremental e backend-agnostic.**
 
-`engineer_kit` handles repetitive ingestion mechanics — HTTP, auth, pagination, incremental windows, bounded-memory batching, checkpoints, schema drift and audit — while letting the data platform remain the data platform.
+[![CI](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml)
+[![Docs](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/docs.yml/badge.svg)](https://lima-ricardo.github.io/engineer_kit/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](#instalação)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Security](https://img.shields.io/badge/security-secure--by--default-success)](SECURITY.md)
+
+`engineer_kit` remove a parte repetitiva e perigosa de integrar APIs em pipelines de dados: HTTP, autenticação, paginação, retries, incremental, batching, checkpoint, schema drift e auditoria. A biblioteca pode **persistir a Bronze por você** ou simplesmente **entregar batches confiáveis para o seu código Spark/Pandas/Polars**.
 
 ```text
 REST API
    │
    ▼
-RestConnector
+RestConnector ── HTTP / auth / retry / pagination
    │
    ▼
-ExtractionSession  ─────► batches (default 25,000)
+ExtractionSession ── streaming-first, 25.000 registros/batch por padrão
    │
-   ├──────────► StateStore / checkpoint
+   ├── embedded mode ──► seu código ──► Spark / Pandas / Polars / Arrow
    │
-   ▼
-Destination (managed mode)  OR  user code (embedded mode)
-   │
-   ▼
-Bronze / Spark / Pandas / Polars / Arrow
-   │
-   ├──────────► RunLogBackend (managed mode)
-   ▼
-optional transform
+   └── managed mode  ──► Destination ──► DuckDB / Parquet / Delta
+                              │
+                              ▼
+                         checkpoint seguro
 ```
 
-The core is backend-agnostic. **DuckDB, Parquet, Delta Lake, dbt and the localhost UI are optional integrations.**
+## 📰 Notícias do projeto
 
-> Portuguese documentation starts at [PT-BR](#pt-br). Detailed architecture: [`docs/architecture.md`](docs/architecture.md). Streaming/batching: [`docs/streaming.md`](docs/streaming.md). Platform guidance: [`docs/platforms.md`](docs/platforms.md).
+### v0.1.0 — release candidate pública
 
-## What the library owns
+A release candidate 0.1.0 consolida a mudança de um pipeline centrado em DuckDB para um toolkit de ingestão **backend-agnostic e streaming-first**:
 
-- platform-neutral `Connector` source contract;
-- REST extraction through `RestConnector` / `APIConnector`;
-- explicit pagination strategies;
-- streaming-first `ExtractionSession`;
-- default extraction batches of **25,000 records**;
-- watermark-based incremental loading;
-- stable Bronze contract with `_raw` and `_extra`;
-- backend-independent `StateStore`, `Destination` and `RunLogBackend` contracts;
-- deterministic checkpoint-transition identity for idempotent retries in official destinations;
-- declarative YAML pipelines;
-- optional dbt/local UI integrations.
+- `Connector` e `ExtractionSession` independentes de plataforma;
+- batches de extração com default de **25.000 registros**;
+- checkpoint explícito e seguro no embedded mode;
+- `StateStore`, `Destination` e `RunLogBackend` desacoplados;
+- adapters oficiais para **DuckDB, Parquet e Delta Lake**;
+- uso direto dentro de **Databricks e Microsoft Fabric**;
+- segurança por padrão em HTTP, secrets, YAML, filesystem, logs e UI;
+- local lab visual para aprender, configurar e inspecionar pipelines;
+- CI em Python 3.10/3.11/3.12, segurança, packaging e stress sintético.
 
-## What it does not try to replace
+Acompanhe detalhes e mudanças em [`CHANGELOG.md`](CHANGELOG.md) e na [documentação completa](https://lima-ricardo.github.io/engineer_kit/).
 
-Spark, Databricks, Microsoft Fabric, AWS, Google Cloud, Airflow, Dagster, dbt, a Lakehouse, a warehouse, a catalog or a distributed worker system.
+## 📸 Local Lab / UI
 
-Cloud/runtime is intentionally separate from source protocol. A REST API remains a `RestConnector` whether the code runs locally, on Databricks, Microsoft Fabric, AWS or Google Cloud.
+A UI é opcional e serve como laboratório local para criar pipelines, entender os contratos e acompanhar execuções.
 
-## Built-in adapters
+### Dashboard
 
-| Mode | Destination | State | Audit | Extra |
-|---|---|---|---|---|
-| local | `DuckDBDestination` | `DuckDBStateStore` | `DuckDBRunLogStore` | `engineer_kit[duckdb]` |
-| files | `ParquetDestination` | `JsonFileStateStore` | `JsonLinesRunLogStore` | `engineer_kit[parquet]` |
-| Lakehouse | `DeltaDestination` | `DeltaStateStore` | `DeltaRunLogStore` | `engineer_kit[delta]` |
+![Dashboard do engineer_kit](docs/assets/ui/dashboard.svg)
 
-`DuckDBLoader`, `IngestionStateStore` and `RunLogStore` remain available as compatibility names for the initial API.
+### Editor visual de pipeline
 
-## Installation
+![Editor visual](docs/assets/ui/pipeline-editor.svg)
+
+### Arquitetura e contratos
+
+![Arquitetura no local lab](docs/assets/ui/architecture.svg)
+
+### Execução e logs
+
+![Execução de pipeline](docs/assets/ui/run.svg)
+
+> As imagens usam dados demonstrativos, mas representam a interface e o fluxo do local lab.
+
+## 🚀 Instalação
+
+O core é leve e não instala DuckDB, PyArrow, Delta, dbt ou UI automaticamente.
 
 ```bash
-# core only — no DuckDB/PyArrow/Delta/dbt/UI
 pip install engineer_kit
-
-# choose only what the runtime needs
-pip install "engineer_kit[duckdb]"
-pip install "engineer_kit[parquet]"
-pip install "engineer_kit[delta]"
-pip install "engineer_kit[platform]"   # Delta/Lakehouse profile
-pip install "engineer_kit[dbt]"
-pip install "engineer_kit[ui]"
-pip install "engineer_kit[local]"      # DuckDB + dbt + localhost UI
 ```
 
-For repository development:
+Escolha somente os extras necessários:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e ".[dev,all]"
-pytest -q
+pip install "engineer_kit[duckdb]"    # DuckDB local
+pip install "engineer_kit[parquet]"   # Parquet / PyArrow
+pip install "engineer_kit[delta]"     # Delta Lake / delta-rs
+pip install "engineer_kit[platform]"  # perfil Lakehouse
+pip install "engineer_kit[ui]"        # interface local
+pip install "engineer_kit[dbt]"       # dbt-duckdb
+pip install "engineer_kit[local]"     # DuckDB + UI + dbt
+pip install "engineer_kit[all]"       # tudo
 ```
 
-## Streaming-first extraction
+O mesmo pacote funciona com `pip`, `pipx`, `uv`, Poetry e outros instaladores que consomem o índice PyPI.
 
-The recommended extraction API does **not** materialize the complete API response by default:
+## ⚡ Primeiro uso: extração streaming-first
+
+O caminho recomendado não coloca a resposta completa da API em memória:
 
 ```python
+from datetime import date
+
+from engineer_kit import (
+    IncrementalMode,
+    NoPagination,
+    RestConnector,
+)
+
+connector = RestConnector(
+    name="customers",
+    base_url="https://api.example.com/customers",
+    pagination=NoPagination(),
+    method="GET",
+    incremental_mode=IncrementalMode.INGESTION_DATE,
+    initial_start=date(2026, 1, 1),
+)
+
 run = connector.extract_incremental()
 
-for batch in run:
+for batch in run:  # default: até 25.000 registros por batch
     process(batch)
 
 run.commit()
 ```
 
-Normal iteration yields `list[dict]` batches. The official default is:
+`collect()` existe, mas é uma escolha explícita para datasets pequenos:
 
 ```python
-DEFAULT_EXTRACTION_BATCH_SIZE = 25_000
+records = connector.extract_incremental().collect()
 ```
 
-`collect()` is deliberately explicit:
+## 🧠 Três tamanhos que não devem ser confundidos
+
+```text
+API page size
+     ↓
+Extraction batch size       default: 25.000
+     ↓
+Destination write batch     adapter-specific
+```
+
+Se a API devolve 1.000 registros por página, um batch de extração pode ser formado depois de aproximadamente 25 páginas. Isso é apenas uma consequência prática; **paginação e batching continuam independentes**.
+
+## 🔐 Autenticação e secrets
+
+### Produção: arquivo ou ambiente
 
 ```python
-records = run.collect()  # complete extraction in RAM; use for small datasets
+from engineer_kit import BearerAuth, FileSecretProvider
+
+secrets = FileSecretProvider("/run/secrets")
+auth = BearerAuth(secrets, "API_TOKEN")
 ```
 
-The session is single-pass and the checkpoint cannot be committed until the stream has been consumed completely.
+Ou use `EnvSecretProvider`.
 
-### Three independent sizes
+### Estudo e laboratório: hardcoded explícito
+
+```python
+from engineer_kit import BearerAuth, StaticSecretProvider
+
+secrets = StaticSecretProvider({"API_TOKEN": "training-only-token"})
+auth = BearerAuth(secrets, "API_TOKEN")
+```
+
+Hardcoded é suportado deliberadamente para aprendizado e testes descartáveis. Para credenciais reais, prefira arquivo, variável de ambiente, workload identity ou um `SecretProvider` integrado ao secret manager da plataforma.
+
+## 📄 Paginação suportada
+
+| Estratégia | Classe | Exemplo típico |
+|---|---|---|
+| sem paginação | `NoPagination` | endpoint pequeno |
+| página | `PageNumberPagination` | `?page=2&per_page=1000` |
+| offset | `OffsetPagination` | `?offset=1000&limit=1000` |
+| cursor | `CursorPagination` | `next_cursor` no JSON |
+| Link header | `LinkHeaderPagination` | GitHub / RFC 5988 |
+| próxima URL | `NextUrlPagination` | `{"next": "https://..."}` |
+
+Para formatos incomuns, implemente `PaginationStrategy`.
+
+## 🧩 Dois modos oficiais
+
+### Managed mode
+
+Use quando a própria biblioteca deve persistir a Bronze e confirmar o checkpoint:
 
 ```text
-API pagination size
-        ↓
-Extraction batch size        default 25,000
-        ↓
-Destination write batch size adapter-specific
+API → Pipeline → Destination → StateStore → RunLogBackend
 ```
 
-For example, an API that returns 1,000 records per page may fill one default extraction batch after roughly 25 pages. This is an illustration, not a coupling: pagination follows the API contract while extraction batching limits the consumer-facing in-memory unit.
+Adapters oficiais:
 
-Rate limits (`429`, `Retry-After`, backoff, requests/minute) belong to the HTTP/retry layer, not to `ExtractionSession`.
+| Uso | Destination | State | Audit |
+|---|---|---|---|
+| local | `DuckDBDestination` | `DuckDBStateStore` | `DuckDBRunLogStore` |
+| arquivos | `ParquetDestination` | `JsonFileStateStore` | `JsonLinesRunLogStore` |
+| Lakehouse | `DeltaDestination` | `DeltaStateStore` | `DeltaRunLogStore` |
 
-See [`docs/streaming.md`](docs/streaming.md).
+### Embedded mode
 
-## Managed mode
-
-Use `Pipeline` when `engineer_kit` should own Bronze persistence:
-
-```text
-API
- ↓
-ExtractionSession record stream
- ↓
-Destination transaction
- ↓
-StateStore checkpoint
- ↓
-RunLogBackend audit
-```
-
-The destination may internally split the stream into smaller write batches. For example, a 25,000-record extraction batch and a 5,000-record destination batch are separate concerns.
-
-## Embedded mode
-
-Inside Databricks, Microsoft Fabric or any Python runtime, you can use only extraction + pagination + incremental state and keep Spark/persistence under application control:
+Use quando você está dentro de Databricks, Fabric ou outro runtime e quer que o `engineer_kit` cuide somente de API + paginação + incremental:
 
 ```python
 run = connector.extract_incremental()
 
 for batch in run:
     df = spark.createDataFrame(batch)
-    # project-specific transformations and persistence
+    df = transform(df)
     persist(df)
 
-run.commit()
+run.commit()  # só depois do downstream terminar com sucesso
 ```
 
-The safe order is:
+O watermark não deve avançar antes da persistência downstream.
 
-```text
-read checkpoint
-      ↓
-extract batches
-      ↓
-user processing / persistence
-      ↓
-success
-      ↓
-run.commit()
-```
+## 🧱 Bronze estável por design
 
-If downstream processing fails, do not commit; the watermark remains unchanged. For very large Spark workloads, staging batches to Parquet/Delta and then letting Spark read them natively may be more efficient than creating many small DataFrames from Python objects.
+A Bronze prioriza **captura confiável** em vez de inferência agressiva de schema:
 
-## Declarative pipeline
+- campos declarados são persistidos como `string/null` nos adapters oficiais;
+- tipos analíticos são lógicos e aplicados no staging/transformação;
+- `_raw` preserva o registro original;
+- campos inesperados vão para `_extra`;
+- `_run_id`, `_window_start`, `_window_end` e `_ingestion_key` dão rastreabilidade e retry seguro.
+
+## 📝 Pipeline declarativo em YAML
 
 ```yaml
 name: orders
 
 connector:
-  base_url: https://api.example.com/orders
+  base_url: https://api.example.com/v1/orders
   method: GET
   extraction_batch_size: 25000
+  max_pages: 10000
+  auth:
+    type: bearer
+    secret_key: API_TOKEN
   pagination:
     type: page
     params:
+      page_param: page
+      page_size_param: per_page
       page_size: 1000
   incremental:
-    mode: ingestion_date
+    mode: data_date
+    initial_start: "2026-01-01"
+    date_field: updated_at
+  date_params:
+    start: updated_from
+    end: updated_to
+    format: "%Y-%m-%d"
 
 columns:
   - name: id
     dtype: bigint
-  - name: created_at
+  - name: updated_at
     dtype: timestamp
 
 destination:
@@ -213,476 +268,118 @@ run_log:
   enabled: true
   type: auto
 
+secrets:
+  type: env
+
 transform:
   type: none
 ```
 
-For Parquet/Delta, no database runtime is required:
-
-```python
-from engineer_kit import build_pipeline, load_pipeline_config
-
-config = load_pipeline_config("pipelines/orders.yaml")
-result = build_pipeline(config).run()
-
-if not result.success:
-    raise RuntimeError(result.steps)
-```
-
-DuckDB uses an existing connection supplied by the caller:
-
-```python
-import duckdb
-from engineer_kit import build_pipeline, load_pipeline_config
-
-config = load_pipeline_config("pipelines/orders.yaml")
-conn = duckdb.connect("warehouse.duckdb")
-result = build_pipeline(config, conn).run()
-conn.close()
-```
-
-Or execute YAML directly from the CLI:
+Execute:
 
 ```bash
 engineer_kit run-config pipelines/orders.yaml
-engineer_kit adapters
 ```
 
-`run-config` opens `destination.path` for DuckDB (falling back to `warehouse.duckdb`) and needs no database runtime object for Parquet/Delta.
-
-## Bronze contract
-
-Official destinations persist declared API fields as strings/null. The declared `dtype` is a **logical analytical type** used by staging/transform tooling rather than a type inferred from every API response.
-
-Known logical types:
-
-```text
-string · integer · bigint · float · decimal · boolean · date · timestamp · json
-```
-
-Every Bronze row also carries:
-
-```text
-_source
-_endpoint
-_ingested_at
-_run_id
-_ingestion_key
-_window_start
-_window_end
-_raw
-_extra
-```
-
-Unexpected API fields are preserved in `_extra` and reported; they do not trigger automatic source-schema mutations.
-
-## Incremental reliability
-
-Managed mode:
-
-```text
-extract
-  ↓
-Destination transaction
-  ↓
-StateStore checkpoint
-  ↓
-RunLogBackend audit
-```
-
-Embedded mode:
-
-```text
-extract batches
-  ↓
-user processing/persistence
-  ↓
-ExtractionSession.commit()
-```
-
-If destination/downstream persistence fails, the checkpoint does not advance. If managed destination persistence succeeds but the state checkpoint fails, the same checkpoint transition is retried.
-
-Official destinations receive a deterministic `ingestion_key` derived from **connector + incremental window + checkpoint-before**. A retry after a state failure therefore gets the same key and replaces the previous representation instead of duplicating it. Once the checkpoint succeeds, the checkpoint-before changes, so a later successful run receives another key even if it occurs on the same calendar day.
-
-- DuckDB: transactional delete/rewrite of that ingestion key;
-- Parquet: deterministic final file promoted only after success;
-- Delta: predicate overwrite in a Delta transaction.
-
-Third-party destinations implementing only `Destination.load()` remain compatible with at-least-once semantics. They can implement `load_with_context()` to use the same retry identity.
-
-## Write modes
-
-`append` is the default Bronze mode. `overwrite` replaces the target using the adapter's transactional/staging guarantees.
-
-A generic merge/upsert is intentionally not guessed by the ingestion layer because it requires explicit business keys and semantics.
-
-## Schema drift
-
-```text
-Declared: A, B
-API sends: A, B, C
-
-A → normal column
-B → normal column
-C → _extra + warning
-```
-
-The original record is retained in `_raw`.
-
-## dbt
-
-`dbt` is optional and **not part of the ingestion transaction**.
-
-The localhost runtime executes:
-
-```text
-Pipeline.run()
-   ↓
-Bronze + watermark confirmed
-   ↓
-DbtRunner.run()
-```
-
-Generated staging models cast Bronze strings using the logical types declared in `ColumnSpec`. Business rules, joins, tests and materializations remain explicit dbt code.
-
-## Local web UI
-
-The web UI is a **local learning/development lab**, not a production control plane.
+## 🖥️ Local Lab
 
 ```bash
 pip install "engineer_kit[local]"
 engineer_kit ui --workspace .
 ```
 
-It provides:
+Por padrão a UI é local/loopback, protegida por autenticação e projetada para desenvolvimento e treinamento. Veja o guia completo de UI antes de expor remotamente.
 
-- pipeline form;
-- API page-size, extraction-batch and destination-write-batch controls;
-- live execution logs;
-- DuckDB data browser;
-- dbt model view;
-- visual Source → Extraction → State → Destination → Transform flow;
-- architecture/documentation pages explaining managed and embedded modes.
+## ☁️ Databricks, Fabric, AWS, Google Cloud e Azure
 
-The visual editor deliberately targets the DuckDB local runtime. Parquet/Delta pipelines and platform embedded mode use the same Python/YAML contracts and are documented inside the UI.
-
-## Databricks / Microsoft Fabric / AWS / Google Cloud
-
-Managed platform boundary:
+Cloud é runtime/storage, não tipo de connector. Uma REST API continua sendo `RestConnector` em qualquer ambiente.
 
 ```text
-API → engineer_kit → Delta/Parquet Bronze → platform Spark/dbt/SQL
-```
-
-Embedded platform boundary:
-
-```text
-API → engineer_kit batches → user/platform code → persistence → checkpoint
-```
-
-The library does not start or replace Spark and does not create one REST connector subclass per cloud. Run the Python extraction from the platform's job/notebook/orchestrator and use paths/storage options available to that runtime.
-
-See [`docs/platforms.md`](docs/platforms.md) for Databricks/Fabric patterns, AWS/GCP/Azure storage boundaries, storage options, state/audit layout and current test boundaries.
-
-## Extending adapters
-
-Built-in adapters are resolved lazily through a registry. Custom packages can register their own destination/state/audit builders:
-
-```python
-from engineer_kit import register_destination
-
-register_destination("company_lake", "company_ingestion.runtime:build_destination")
-```
-
-Equivalent functions exist for state and audit backends. `auto` only resolves known natural relationships (DuckDB→DuckDB, Parquet→file metadata, Delta→Delta); a custom destination must register or explicitly select compatible state/audit backends.
-
-Custom source protocols can derive from the platform-neutral `Connector` contract without knowing the runtime or storage backend.
-
-## Security
-
-- HTTPS is enforced by the HTTP client unless explicitly configured otherwise;
-- API credentials are resolved through `SecretProvider` implementations;
-- the UI never asks users to paste secret values into pipeline YAML;
-- use managed/workload identity, environment variables or the platform's secret manager for Lakehouse credentials;
-- SQL identifiers are validated/quoted before dynamic identifier use;
-- data values are parameterized rather than interpolated into SQL.
-
-## Tests and CI
-
-CI validates:
-
-- core import with no DuckDB/PyArrow/Delta installed;
-- Python 3.10 / 3.11 / 3.12;
-- `ExtractionSession` 25k default, overrides, single-pass behavior and partial-checkpoint protection;
-- DuckDB, Parquet and Delta adapters;
-- checkpoint failure and retry idempotency;
-- successful same-day runs after checkpoint advancement;
-- schema drift and batch behavior;
-- local UI and declarative CLI;
-- dbt optional-extra smoke test;
-- synthetic streaming stress tests;
-- Ruff, Bandit and dependency audit;
-- wheel/sdist build validation.
-
-Local Delta tests validate the Delta format and adapter contract. Cloud-specific authentication, catalog registration and workspace paths must still be verified in the target cloud workspace.
-
-## License
-
-MIT — see [`LICENSE`](LICENSE).
-
----
-
-# PT-BR
-
-## O que é o engineer_kit
-
-`engineer_kit` é uma biblioteca Python para transformar APIs REST em uma **camada de ingestão confiável, portátil e streaming-first**.
-
-O objetivo não é criar um novo Airflow, Databricks ou Fabric. O objetivo é remover o código repetitivo que aparece antes da Bronze:
-
-- requests/auth;
-- paginação;
-- incremental;
-- watermark/checkpoint;
-- retry;
-- flattening;
-- schema drift;
-- batches;
-- auditoria;
-- persistência da Bronze quando desejada.
-
-A plataforma continua cuidando daquilo que ela já faz bem: Spark, catálogo, transformação, governança, jobs e consumo.
-
-## Arquitetura
-
-```text
-                         engineer_kit core
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        │                      │                      │
-    Connector          ExtractionSession         StateStore
-        │                      │                      │
- RestConnector          batches 25k default      checkpoint
-        │                      │                      │
-        └──────────────────────┼──────────────────────┘
-                               │
-               ┌───────────────┴───────────────┐
-               │                               │
-          managed mode                    embedded mode
-               │                               │
-         Destination                      código do usuário
-      ┌────┼─────┐                   Spark/Pandas/Polars
-   DuckDB Parquet Delta                        │
-               │                               │
-               └───────────────┬───────────────┘
-                               ▼
-                          dados persistidos
-```
-
-Detalhes: [`docs/architecture.md`](docs/architecture.md), [`docs/streaming.md`](docs/streaming.md) e [`docs/platforms.md`](docs/platforms.md).
-
-## Streaming-first e default de 25.000
-
-O caminho padrão recomendado é:
-
-```python
-run = connector.extract_incremental()
-
-for batch in run:
-    processar(batch)
-
-run.commit()
-```
-
-Cada iteração entrega até **25.000 registros por padrão**. Isso evita transformar a memória do processo Python no buffer de toda a API.
-
-Para datasets pequenos, existe materialização explícita:
-
-```python
-records = run.collect()
-```
-
-`collect()` traz a extração completa para RAM; por isso não é o comportamento padrão.
-
-### Página da API, batch de extração e batch de escrita são diferentes
-
-```text
-API page size             1.000  (exemplo)
-        ↓
-Extraction batch         25.000  (default)
-        ↓
-Destination write batch   5.000  (exemplo)
-```
-
-Uma API que devolve 1.000 registros por página pode preencher aproximadamente 25 páginas para formar um batch de 25.000, mas esses valores não são acoplados. A paginação respeita a documentação da API; o extraction batch controla memória/entrega; o write batch otimiza o adapter físico.
-
-Rate limit, `429`, `Retry-After` e backoff pertencem ao cliente HTTP/retry.
-
-## Instalação por capacidade
-
-```bash
-pip install engineer_kit             # core
-pip install "engineer_kit[duckdb]"  # local sem UI/dbt
-pip install "engineer_kit[parquet]" # arquivos Bronze
-pip install "engineer_kit[delta]"   # Lakehouse Delta
-pip install "engineer_kit[platform]"# perfil Lakehouse/Delta
-pip install "engineer_kit[local]"   # DuckDB + UI + dbt
-```
-
-Nenhuma dessas integrações é necessária para importar o core.
-
-## DuckDB continua fazendo sentido
-
-Sim — como **adapter zero-infra**.
-
-```text
-API → engineer_kit → DuckDB → dbt
-```
-
-É ótimo para desenvolvimento, aprendizado, CI e projetos locais. Ele deixou de ser uma premissa arquitetural.
-
-## Managed mode em plataforma
-
-```text
-API → engineer_kit → Delta Bronze → Databricks/Fabric/Spark/dbt/SQL
-```
-
-ou:
-
-```text
-API → engineer_kit → Parquet Bronze → lake/filesystem montado
-```
-
-O mesmo `RestConnector` e `Pipeline` continuam válidos. O que muda é o adapter.
-
-## Embedded mode em Fabric/Databricks
-
-O usuário pode instalar a biblioteca e usar apenas extração + paginação + incremental:
-
-```python
-run = connector.extract_incremental()
-
-for batch in run:
-    df = spark.createDataFrame(batch)
-    # lógica do projeto
-    persistir(df)
-
-run.commit()
-```
-
-Assim `engineer_kit` não precisa controlar o Spark nem a escrita final. O checkpoint só avança depois que o usuário confirmar que o downstream terminou com sucesso.
-
-Para volumes muito grandes, staging em Parquet/Delta seguido de `spark.read` pode ser mais eficiente do que criar muitos DataFrames a partir de objetos Python.
-
-## AWS e Google Cloud
-
-Não existe necessidade de `AWSRestConnector` ou `GoogleRestConnector` quando a fonte continua sendo REST.
-
-```text
-Connector / origem
+Source layer
 └── RestConnector
 
 Runtime / storage
-├── local
-├── Databricks
-├── Microsoft Fabric
-├── AWS / S3
-├── Google Cloud / GCS
-└── Azure / ADLS / OneLake
+├── local → DuckDB / Parquet
+├── Databricks → Spark / Delta
+├── Microsoft Fabric → Spark / OneLake / Delta
+├── AWS → S3 / Delta
+├── Google Cloud → GCS / Delta
+└── Azure → ADLS / OneLake / Delta
 ```
 
-Cloud-specific credentials, URIs e `storage_options` pertencem ao adapter/runtime, não ao protocolo de origem.
+Isso evita classes artificiais como `AWSRestConnector` ou `FabricRestConnector` quando o protocolo de origem é o mesmo.
 
-Veja [`docs/platforms.md`](docs/platforms.md).
+## 🛡️ Segurança por padrão
 
-## Estado incremental não depende da Bronze
+A biblioteca inclui proteções de runtime e de supply chain:
 
-O watermark fica em `StateStore`, não em `SELECT MAX(...)` sobre a tabela Bronze.
+- HTTPS obrigatório por padrão e TLS verificado;
+- redaction de secrets em logs e erros;
+- respostas HTTP limitadas em tamanho antes do parse;
+- redirect e paginação cross-origin bloqueados por padrão;
+- bloqueio de alvos link-local/metadata;
+- retry de POST somente com opt-in;
+- proteção contra header injection;
+- YAML com `safe_load`, limite de tamanho e política contra secrets inline;
+- proteção contra traversal/symlink em secrets de arquivo;
+- UI com security headers e controles same-origin;
+- dbt com `shell=False`, timeout e redaction;
+- CI com Ruff, Bandit, `pip-audit`, `pip check`, property tests e stress.
 
-```text
-StateStore
-├── DuckDBStateStore
-├── JsonFileStateStore
-└── DeltaStateStore
-```
+Leia [`SECURITY.md`](SECURITY.md) antes de colocar a biblioteca em produção.
 
-Assim a leitura do checkpoint permanece pequena e previsível mesmo quando a Bronze cresce.
+## ✅ O que é testado
 
-## Destination, State e Audit são separados
+O CI cobre:
 
-```yaml
-destination:
-  type: delta
+- Python 3.10, 3.11 e 3.12;
+- instalação core-only sem backends opcionais;
+- DuckDB, Parquet e Delta;
+- paginação, incremental, checkpoint e retry idempotente;
+- embedded e managed mode;
+- CLI, YAML e UI;
+- segurança e property-based tests;
+- build de wheel/sdist;
+- stress sintético: DuckDB 250k, Parquet 250k, Delta 100k registros.
 
-state:
-  type: auto
+## 📚 Documentação
 
-run_log:
-  enabled: true
-  type: auto
-```
+A documentação completa fica no GitHub Pages:
 
-`auto` usa o backend natural conhecido do destination, mas cada parte pode ser configurada independentemente. Um adapter customizado não cai silenciosamente em arquivos locais: ele deve registrar ou selecionar state/audit compatíveis.
+**https://lima-ricardo.github.io/engineer_kit/**
 
-## Bronze e tipos
+Atalhos:
 
-A Bronze prioriza captura. Campos declarados ficam em string e a tipagem analítica é explícita:
+- [Começando do zero](https://lima-ricardo.github.io/engineer_kit/getting-started/installation/)
+- [Primeiro pipeline](https://lima-ricardo.github.io/engineer_kit/getting-started/first-pipeline/)
+- [Autenticação e secrets](https://lima-ricardo.github.io/engineer_kit/guides/authentication/)
+- [Paginação](https://lima-ricardo.github.io/engineer_kit/guides/pagination/)
+- [Incremental e watermark](https://lima-ricardo.github.io/engineer_kit/guides/incremental/)
+- [Streaming e batching](https://lima-ricardo.github.io/engineer_kit/guides/streaming/)
+- [Databricks e Fabric](https://lima-ricardo.github.io/engineer_kit/guides/embedded-mode/)
+- [Referência YAML](https://lima-ricardo.github.io/engineer_kit/reference/configuration/)
+- [Troubleshooting](https://lima-ricardo.github.io/engineer_kit/reference/troubleshooting/)
 
-```yaml
-columns:
-  - name: amount
-    dtype: decimal
-  - name: created_at
-    dtype: timestamp
-```
-
-O staging/dbt pode transformar isso no tipo físico apropriado. Se a API adicionar um campo novo, ele vai para `_extra` sem derrubar a carga.
-
-## Confiabilidade
-
-No managed mode, o watermark só avança depois da transação da Bronze.
-
-No embedded mode, `ExtractionSession.commit()` exige que o stream tenha sido consumido completamente e deve ser chamado somente depois da persistência downstream.
-
-Os adapters oficiais também tornam o retry idempotente usando `_ingestion_key`. A chave identifica a transição de checkpoint (connector + janela + checkpoint anterior): uma falha de state reutiliza a mesma chave; depois de um checkpoint bem-sucedido, uma nova execução recebe outra chave mesmo no mesmo dia.
-
-## CLI declarativa
-
-Além de pipelines Python, um YAML pode ser executado diretamente:
+## 🧪 Desenvolvimento
 
 ```bash
-engineer_kit run-config pipelines/orders.yaml
-engineer_kit adapters
-```
-
-Isso facilita jobs em Databricks/Fabric, CI e outros orquestradores sem exigir um módulo Python intermediário.
-
-## Interface localhost
-
-A interface é opcional e propositalmente local:
-
-```bash
-pip install "engineer_kit[local]"
-engineer_kit ui --workspace .
-```
-
-Ela serve para aprender, montar e observar pipelines. A tela de arquitetura mostra `Connector`, `RestConnector`, `ExtractionSession`, `StateStore`, `Destination`, `RunLogBackend`, os três níveis de batching, tipos lógicos, retry, embedded mode e dbt.
-
-## Transformação
-
-`Pipeline` termina na ingestão. dbt é uma integração pós-ingestão no local lab. Em ambientes robustos, a transformação pode ser executada pela própria plataforma.
-
-## Escopo
-
-O foco continua sendo **API ingestion**. A biblioteca não quer se transformar em um novo orquestrador, Lakehouse ou framework de infraestrutura.
-
-## Desenvolvimento
-
-```bash
-pip install -e ".[dev,all]"
+git clone https://github.com/Lima-Ricardo/engineer_kit.git
+cd engineer_kit
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev,all,docs]"
 pytest -q
-ruff check src tests
-bandit -q -r src/engineer_kit -ll
+mkdocs serve
 ```
 
-O CI também verifica o core sem backends opcionais, Python 3.10–3.12, adapters, `ExtractionSession`, UI, dbt extra, stress sintético, segurança e build do pacote.
+## 🤝 Contribuição
+
+Issues, documentação e PRs são bem-vindos. Leia [`CONTRIBUTING.md`](CONTRIBUTING.md) antes de contribuir.
+
+## 🔒 Reportar vulnerabilidade
+
+Não publique tokens, exploits ou dados sensíveis em issue pública. Siga [`SECURITY.md`](SECURITY.md).
+
+## 📜 Licença
+
+MIT — veja [`LICENSE`](LICENSE).
