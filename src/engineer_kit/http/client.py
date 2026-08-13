@@ -1,9 +1,9 @@
 """HTTP client with safe defaults for API ingestion.
 
 Guarantees shared by every connector: explicit timeout, bounded retry/backoff,
-HTTPS by default, bounded response bodies, same-origin redirects and
-log/error sanitization that never prints request parameter values, embedded
-URL credentials or response bodies.
+HTTPS by default, TLS certificate verification by default, bounded response
+bodies, same-origin redirects and log/error sanitization that never prints
+request parameter values, embedded URL credentials or response bodies.
 """
 
 from __future__ import annotations
@@ -29,6 +29,10 @@ _BLOCKED_HOSTNAMES = {"metadata.google.internal"}
 
 class InsecureUrlError(ValueError):
     """Raised when a URL does not use HTTPS and HTTP was not opted into."""
+
+
+class InsecureTlsError(ValueError):
+    """Raised when TLS verification is disabled without an explicit opt-in."""
 
 
 class UnsafeUrlError(ValueError):
@@ -122,6 +126,7 @@ class HttpClient:
         max_retries: int = 3,
         backoff_factor: float = 0.5,
         allow_http: bool = False,
+        allow_insecure_tls: bool = False,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         retry_post: bool = False,
@@ -140,6 +145,7 @@ class HttpClient:
         self._auth = auth or NoAuth()
         self._timeout = timeout
         self._allow_http = allow_http
+        self._allow_insecure_tls = allow_insecure_tls
         self._max_response_bytes = max_response_bytes
         self._max_redirects = max_redirects
         self._session = requests.Session()
@@ -227,6 +233,12 @@ class HttpClient:
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         self._check_url(url)
+        if kwargs.get("verify") is False and not self._allow_insecure_tls:
+            raise InsecureTlsError(
+                "verify=False foi recusado. Para um laboratorio com certificado autoassinado, "
+                "crie HttpClient(allow_insecure_tls=True) explicitamente; em uso real prefira "
+                "uma CA/certificado valido ou passe o caminho do CA bundle em verify=."
+            )
         kwargs.setdefault("timeout", self._timeout)
         kwargs["stream"] = True
         kwargs["allow_redirects"] = False
