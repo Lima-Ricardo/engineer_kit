@@ -79,6 +79,7 @@ from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 from engineer_kit.storage.state_store import StateStore, Watermark
 from engineer_kit.storage.types import LogicalType, render_sql_type, resolve_logical_type
 from engineer_kit.terminal_log import visual_logger
+from engineer_kit.transform.dbt_easy import Dbt, discover_dbt_project
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
 from engineer_kit.transform.scaffold import generate_sources_yml, generate_staging_model, write_staging_scaffold
 
@@ -177,7 +178,8 @@ __all__ = [
     "MAX_BATCH_SIZE", "InvalidBatchSizeError", "StateStore", "DuckDBStateStore", "IngestionStateStore",
     "DeltaStateStore", "JsonFileStateStore", "Watermark", "RunLogBackend", "DuckDBRunLogStore",
     "RunLogStore", "DeltaRunLogStore", "JsonLinesRunLogStore", "RunLogEntry", "flatten_record",
-    "InvalidIdentifierError", "visual_logger", "DbtRunner", "DbtResult", "write_staging_scaffold",
-    "generate_sources_yml", "generate_staging_model", "Pipeline", "PipelineSource", "PipelineResult",
-    "StepResult", "Scheduler", "Trigger", "CronTrigger", "IntervalTrigger",
+    "InvalidIdentifierError", "visual_logger", "Dbt", "discover_dbt_project", "DbtRunner", "DbtResult",
+    "write_staging_scaffold", "generate_sources_yml", "generate_staging_model", "Pipeline",
+    "PipelineSource", "PipelineResult", "StepResult", "Scheduler", "Trigger", "CronTrigger",
+    "IntervalTrigger",
 ]
