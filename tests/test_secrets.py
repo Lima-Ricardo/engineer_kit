@@ -3,6 +3,7 @@ import pytest
 from engineer_kit.security.secrets import (
     EnvSecretProvider,
     FileSecretProvider,
+    InvalidSecretKeyError,
     SecretNotFoundError,
     StaticSecretProvider,
 )
@@ -30,13 +31,20 @@ def test_static_secret_provider_raises_when_missing():
         provider.get("MISSING")
 
 
+def test_static_secret_provider_copies_input_mapping():
+    values = {"TOKEN": "original"}
+    provider = StaticSecretProvider(values)
+    values["TOKEN"] = "mutated"
+    assert provider.get("TOKEN") == "original"
+
+
 def test_file_secret_provider_single_file_ignores_key(tmp_path):
     token_file = tmp_path / "token.txt"
     token_file.write_text("meu-token-secreto\n", encoding="utf-8")
 
     provider = FileSecretProvider(token_file)
     assert provider.get("qualquer_coisa") == "meu-token-secreto"
-    assert provider.get("outra_chave") == "meu-token-secreto"
+    assert provider.get("../ignored-in-single-file-mode") == "meu-token-secreto"
 
 
 def test_file_secret_provider_directory_mode_uses_key_as_filename(tmp_path):
@@ -46,6 +54,16 @@ def test_file_secret_provider_directory_mode_uses_key_as_filename(tmp_path):
     provider = FileSecretProvider(tmp_path)
     assert provider.get("GITHUB_TOKEN") == "token-do-github"
     assert provider.get("SLACK_TOKEN") == "token-do-slack"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["../outside", "../../outside", "subdir/token", r"..\outside", "", ".", ".."],
+)
+def test_file_secret_provider_directory_mode_rejects_path_traversal(tmp_path, key):
+    provider = FileSecretProvider(tmp_path)
+    with pytest.raises(InvalidSecretKeyError):
+        provider.get(key)
 
 
 def test_file_secret_provider_raises_when_file_missing(tmp_path):

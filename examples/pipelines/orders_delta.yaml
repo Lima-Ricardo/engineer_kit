@@ -1,0 +1,52 @@
+name: orders
+
+connector:
+  base_url: https://api.example.com/orders
+  method: GET
+  extraction_batch_size: 25000
+  auth:
+    type: bearer
+    secret_key: ORDERS_API_TOKEN
+  pagination:
+    type: page
+    params:
+      page_param: page
+      page_size_param: page_size
+      page_size: 500
+  incremental:
+    mode: ingestion_date
+    initial_start: '2026-01-01'
+  date_params:
+    start: updated_since
+    end: updated_until
+    format: '%Y-%m-%d'
+  records_path: results
+
+columns:
+  - name: id
+    dtype: bigint
+  - name: customer_id
+    dtype: bigint
+  - name: updated_at
+    dtype: timestamp
+  - name: amount
+    dtype: decimal
+
+destination:
+  type: delta
+  path: /lakehouse/engineer_kit
+  schema: bronze
+  batch_size: 5000
+  write_mode: append
+  partition_by:
+    - _window_end
+
+state:
+  type: auto
+
+run_log:
+  enabled: true
+  type: auto
+
+transform:
+  type: none

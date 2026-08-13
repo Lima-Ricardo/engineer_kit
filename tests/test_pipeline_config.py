@@ -10,6 +10,8 @@ from engineer_kit.config.pipeline_config import (
     PaginationConfig,
     PipelineConfig,
     PipelineConfigError,
+    RunLogConfig,
+    StateConfig,
     build_pipeline,
     list_pipeline_configs,
     load_pipeline_config,
@@ -27,11 +29,9 @@ def _minimal_config(name="fake_api") -> PipelineConfig:
             base_url="https://example.test/items",
             method="GET",
             pagination=PaginationConfig(type="page", params={"page_size": 50}),
-            # ingestion_date nao exige date_field -- mantem o fixture minimo
-            # de verdade; o teste de DATA_DATE configura o proprio caso.
             incremental=IncrementalConfig(mode="ingestion_date"),
         ),
-        columns=[ColumnConfig(name="id"), ColumnConfig(name="value", dtype="INTEGER")],
+        columns=[ColumnConfig(name="id"), ColumnConfig(name="value", dtype="integer")],
         destination=DestinationConfig(schema="bronze", batch_size=500),
     )
 
@@ -44,10 +44,30 @@ def test_round_trip_dict_preserves_everything():
 
 def test_round_trip_yaml_file(tmp_path):
     config = _minimal_config()
+    config.state = StateConfig(type="file", path=str(tmp_path / "state.json"))
+    config.run_log = RunLogConfig(
+        enabled=True,
+        type="file",
+        path=str(tmp_path / "audit.jsonl"),
+    )
     path = tmp_path / "fake_api.yaml"
     save_pipeline_config(config, path)
     restored = load_pipeline_config(path)
     assert restored == config
+
+
+def test_old_boolean_run_log_yaml_remains_compatible():
+    config = pipeline_config_from_dict(
+        {
+            "name": "old",
+            "connector": {
+                "base_url": "https://example.test/items",
+                "incremental": {"mode": "ingestion_date"},
+            },
+            "run_log": False,
+        }
+    )
+    assert config.run_log.enabled is False
 
 
 def test_build_pipeline_produces_working_restconnector():
@@ -58,6 +78,30 @@ def test_build_pipeline_produces_working_restconnector():
     assert pipeline._sources[0].connector.name == "fake_api"
 
 
+def test_parquet_pipeline_builds_without_runtime_connection(tmp_path):
+    config = _minimal_config()
+    config.destination = DestinationConfig(
+        type="parquet",
+        path=str(tmp_path / "lake"),
+        schema="bronze",
+    )
+    pipeline = build_pipeline(config)
+    assert type(pipeline._destination).__name__ == "ParquetDestination"
+    assert type(pipeline._run_log_store).__name__ == "JsonLinesRunLogStore"
+
+
+def test_delta_pipeline_builds_without_runtime_connection(tmp_path):
+    config = _minimal_config()
+    config.destination = DestinationConfig(
+        type="delta",
+        path=str(tmp_path / "lake"),
+        schema="bronze",
+    )
+    pipeline = build_pipeline(config)
+    assert type(pipeline._destination).__name__ == "DeltaDestination"
+    assert type(pipeline._run_log_store).__name__ == "DeltaRunLogStore"
+
+
 def test_missing_base_url_raises_clear_error():
     with pytest.raises(PipelineConfigError):
         pipeline_config_from_dict({"name": "x", "connector": {}})
@@ -66,34 +110,30 @@ def test_missing_base_url_raises_clear_error():
 def test_unknown_pagination_type_raises():
     config = _minimal_config()
     config.connector.pagination = PaginationConfig(type="nao_existe")
-    conn = duckdb.connect()
     with pytest.raises(PipelineConfigError):
-        build_pipeline(config, conn)
+        build_pipeline(config, duckdb.connect())
 
 
 def test_bearer_auth_without_secret_key_raises():
     config = _minimal_config()
-    config.connector.auth = AuthConfig(type="bearer")  # sem secret_key
-    conn = duckdb.connect()
+    config.connector.auth = AuthConfig(type="bearer")
     with pytest.raises(PipelineConfigError):
-        build_pipeline(config, conn)
+        build_pipeline(config, duckdb.connect())
 
 
 def test_data_date_mode_without_date_field_raises():
     config = _minimal_config()
     config.connector.incremental.mode = "data_date"
     config.connector.incremental.date_field = None
-    conn = duckdb.connect()
-    with pytest.raises(PipelineConfigError):  # RestConnector levanta MissingDateFieldError, subclasse de ValueError
-        build_pipeline(config, conn)
+    with pytest.raises(PipelineConfigError):
+        build_pipeline(config, duckdb.connect())
 
 
 def test_unsupported_destination_type_raises():
     config = _minimal_config()
     config.destination.type = "redshift"
-    conn = duckdb.connect()
-    with pytest.raises(PipelineConfigError):
-        build_pipeline(config, conn)
+    with pytest.raises(PipelineConfigError, match="nao registrado"):
+        build_pipeline(config)
 
 
 def test_list_pipeline_configs_skips_invalid_and_keeps_valid(tmp_path):
@@ -101,9 +141,7 @@ def test_list_pipeline_configs_skips_invalid_and_keeps_valid(tmp_path):
     (tmp_path / "broken.yaml").write_text("name: sem_connector\n", encoding="utf-8")
 
     results = list_pipeline_configs(tmp_path)
-
-    names = [config.name for _, config in results]
-    assert names == ["good_one"]
+    assert [config.name for _, config in results] == ["good_one"]
 
 
 def test_list_pipeline_configs_on_missing_directory_returns_empty(tmp_path):

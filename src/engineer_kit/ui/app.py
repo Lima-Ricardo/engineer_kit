@@ -1,9 +1,9 @@
-"""Interface web local: monitorar e disparar pipelines, navegar os
-dados do bronze no DuckDB, ver os modelos dbt. So sobe em localhost,
-com usuario/senha (ver `engineer_kit ui --help`).
+"""Interface web local para aprender, configurar e observar pipelines.
 
-O "workspace" e uma pasta com `pipelines/*.yaml`, um arquivo DuckDB e
-(opcional) um projeto dbt -- o mesmo layout dos exemplos da lib.
+A UI e propositalmente um extra opcional e orientado ao runtime local.
+Ela usa DuckDB para permitir uma experiencia zero-infra, mas apresenta
+os mesmos conceitos do core: Connector, StateStore, Destination,
+RunLogBackend e transformacao opcional (dbt).
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import glob
 import secrets
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -30,15 +29,32 @@ from engineer_kit.config.pipeline_config import (
     PaginationConfig,
     PipelineConfig,
     PipelineConfigError,
+    TransformConfig,
     list_pipeline_configs,
     load_pipeline_config,
     save_pipeline_config,
 )
+from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
+from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
 from engineer_kit.ui.run_manager import RunManager
+from engineer_kit.ui.security import (
+    SecurityHeadersMiddleware,
+    enforce_same_origin,
+    validate_resource_name,
+)
 
 BASE_DIR = Path(__file__).parent
 PREVIEW_ROW_LIMIT = 200
+
+
+def _workspace_child(workspace: Path, value: str) -> Path:
+    candidate = (workspace / value).resolve()
+    try:
+        candidate.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError(f"Caminho da UI deve permanecer dentro do workspace: {value!r}") from exc
+    return candidate
 
 
 def create_app(
@@ -47,15 +63,26 @@ def create_app(
     warehouse_filename: str = "warehouse.duckdb",
     dbt_project_dirname: str = "dbt_project",
     username: str = "admin",
-    password: str = "admin",
+    password: str | None = None,
 ) -> FastAPI:
-    workspace = Path(workspace_dir).resolve()
-    pipelines_dir = workspace / pipelines_dirname
-    pipelines_dir.mkdir(parents=True, exist_ok=True)
-    warehouse_path = str(workspace / warehouse_filename)
-    dbt_project_dir = workspace / dbt_project_dirname
+    if not password:
+        raise ValueError(
+            "create_app() exige password explicita. Para uso local pela CLI, execute "
+            "`engineer_kit ui`; ela gera uma senha temporaria quando nenhuma e informada."
+        )
+    if not username:
+        raise ValueError("create_app() exige username nao vazio.")
 
-    run_manager = RunManager(warehouse_path=warehouse_path)
+    workspace = Path(workspace_dir).resolve()
+    pipelines_dir = _workspace_child(workspace, pipelines_dirname)
+    pipelines_dir.mkdir(parents=True, exist_ok=True)
+    warehouse_path = str(_workspace_child(workspace, warehouse_filename))
+    dbt_project_dir = _workspace_child(workspace, dbt_project_dirname)
+
+    run_manager = RunManager(
+        warehouse_path=warehouse_path,
+        dbt_project_dir=str(dbt_project_dir),
+    )
     security = HTTPBasic()
 
     def check_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
@@ -68,7 +95,8 @@ def create_app(
                 headers={"WWW-Authenticate": "Basic"},
             )
 
-    app = FastAPI(title="engineer_kit")
+    app = FastAPI(title="engineer_kit local lab")
+    app.add_middleware(SecurityHeadersMiddleware)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -91,21 +119,40 @@ def create_app(
         finally:
             conn.close()
         return {
-            r[0]: {"status": r[1], "started_at": r[2], "finished_at": r[3], "rows_loaded": r[4]} for r in rows
+            row[0]: {
+                "status": row[1],
+                "started_at": row[2],
+                "finished_at": row[3],
+                "rows_loaded": row[4],
+            }
+            for row in rows
         }
-
-    # ---------- dashboard ----------
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, _: None = Depends(check_auth)):
         configs = list_pipeline_configs(pipelines_dir)
         last_runs = _last_run_by_pipeline()
         pipelines = [
-            {"config": config, "last_run": last_runs.get(config.name)} for _, config in configs
+            {"config": config, "last_run": last_runs.get(config.name)}
+            for _, config in configs
         ]
-        return templates.TemplateResponse(request, "dashboard.html", {"pipelines": pipelines})
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "pipelines": pipelines,
+                "dbt_available": dbt_project_dir.exists(),
+                "runtime": "DuckDB local",
+            },
+        )
 
-    # ---------- pipelines: criar / editar ----------
+    @app.get("/architecture", response_class=HTMLResponse)
+    def architecture(request: Request, _: None = Depends(check_auth)):
+        return templates.TemplateResponse(
+            request,
+            "architecture.html",
+            {"dbt_available": dbt_project_dir.exists()},
+        )
 
     @app.get("/pipelines/new", response_class=HTMLResponse)
     def new_pipeline_form(request: Request, _: None = Depends(check_auth)):
@@ -116,6 +163,7 @@ def create_app(
                 "config": None,
                 "pagination_types": list(STANDARD_PAGINATION_TYPES),
                 "error": None,
+                "dbt_available": dbt_project_dir.exists(),
             },
         )
 
@@ -129,11 +177,13 @@ def create_app(
                 "config": config,
                 "pagination_types": list(STANDARD_PAGINATION_TYPES),
                 "error": None,
+                "dbt_available": dbt_project_dir.exists(),
             },
         )
 
     @app.post("/pipelines/save")
     async def save_pipeline(request: Request, _: None = Depends(check_auth)):
+        enforce_same_origin(request)
         form = await request.form()
         try:
             config = _config_from_form(form)
@@ -146,23 +196,29 @@ def create_app(
                     "config": None,
                     "pagination_types": list(STANDARD_PAGINATION_TYPES),
                     "error": str(exc),
+                    "dbt_available": dbt_project_dir.exists(),
                 },
                 status_code=400,
             )
         return RedirectResponse(url=f"/pipelines/{config.name}", status_code=303)
-
-    # ---------- pipelines: detalhe / rodar ----------
 
     @app.get("/pipelines/{name}", response_class=HTMLResponse)
     def pipeline_detail(request: Request, name: str, _: None = Depends(check_auth)):
         config = _load_or_404(name)
         history = _run_history(name)
         return templates.TemplateResponse(
-            request, "pipeline_detail.html", {"config": config, "history": history}
+            request,
+            "pipeline_detail.html",
+            {
+                "config": config,
+                "history": history,
+                "dbt_available": dbt_project_dir.exists(),
+            },
         )
 
     @app.post("/pipelines/{name}/run")
-    def trigger_run(name: str, _: None = Depends(check_auth)):
+    def trigger_run(request: Request, name: str, _: None = Depends(check_auth)):
+        enforce_same_origin(request)
         config = _load_or_404(name)
         run_id = run_manager.start_run(config)
         return RedirectResponse(url=f"/runs/{run_id}", status_code=303)
@@ -182,13 +238,16 @@ def create_app(
 
         def event_source():
             for line in run_manager.stream_log(run_id):
-                yield f"data: {line}\n\n"
+                # One SSE data line per logical log line. Newlines are split so
+                # log content cannot inject a new event field/type.
+                for part in str(line).replace("\r", "").split("\n"):
+                    yield f"data: {part}\n"
+                yield "\n"
             final_state = run_manager.get_state(run_id)
-            yield f"event: done\ndata: {final_state.status}\n\n"
+            status = final_state.status if final_state is not None else "unknown"
+            yield f"event: done\ndata: {status}\n\n"
 
         return StreamingResponse(event_source(), media_type="text/event-stream")
-
-    # ---------- dados (DuckDB) ----------
 
     @app.get("/data", response_class=HTMLResponse)
     def data_browser(request: Request, _: None = Depends(check_auth)):
@@ -203,49 +262,80 @@ def create_app(
             ).fetchall()
             rows = []
             for schema, table in tables:
-                count = conn.execute(f'SELECT count(*) FROM "{schema}"."{table}"').fetchone()[0]
+                quoted_schema = _quote_duckdb_identifier(schema)
+                quoted_table = _quote_duckdb_identifier(table)
+                count = conn.execute(
+                    f"SELECT count(*) FROM {quoted_schema}.{quoted_table}"  # nosec B608
+                ).fetchone()[0]
                 rows.append({"schema": schema, "table": table, "rows": count})
         finally:
             conn.close()
         return templates.TemplateResponse(request, "data_browser.html", {"tables": rows})
 
     @app.get("/data/{schema}/{table}", response_class=HTMLResponse)
-    def table_preview(request: Request, schema: str, table: str, _: None = Depends(check_auth)):
+    def table_preview(
+        request: Request,
+        schema: str,
+        table: str,
+        _: None = Depends(check_auth),
+    ):
         _validate_identifier(schema)
         _validate_identifier(table)
+        quoted_schema = _quote_duckdb_identifier(schema)
+        quoted_table = _quote_duckdb_identifier(table)
         conn = _warehouse_conn()
         try:
-            result = conn.execute(f'SELECT * FROM "{schema}"."{table}" LIMIT {PREVIEW_ROW_LIMIT}')
-            columns = [d[0] for d in result.description]
+            result = conn.execute(
+                f"SELECT * FROM {quoted_schema}.{quoted_table} "  # nosec B608
+                f"LIMIT {PREVIEW_ROW_LIMIT}"
+            )
+            columns = [description[0] for description in result.description]
             rows = result.fetchall()
         finally:
             conn.close()
         return templates.TemplateResponse(
             request,
             "table_preview.html",
-            {"schema": schema, "table": table, "columns": columns, "rows": rows, "limit": PREVIEW_ROW_LIMIT},
+            {
+                "schema": schema,
+                "table": table,
+                "columns": columns,
+                "rows": rows,
+                "limit": PREVIEW_ROW_LIMIT,
+            },
         )
-
-    # ---------- dbt ----------
 
     @app.get("/dbt", response_class=HTMLResponse)
     def dbt_models(request: Request, _: None = Depends(check_auth)):
         layers = {"staging": [], "silver": [], "gold": []}
         for layer in layers:
             pattern = str(dbt_project_dir / "models" / layer / "*.sql")
-            layers[layer] = sorted(Path(p).stem for p in glob.glob(pattern))
-        return templates.TemplateResponse(request, "dbt_models.html", {"layers": layers})
-
-    # ---------- helpers ----------
+            layers[layer] = sorted(Path(path).stem for path in glob.glob(pattern))
+        return templates.TemplateResponse(
+            request,
+            "dbt_models.html",
+            {
+                "layers": layers,
+                "dbt_available": dbt_project_dir.exists(),
+                "project_dir": dbt_project_dir,
+            },
+        )
 
     def _load_or_404(name: str) -> PipelineConfig:
-        path = pipelines_dir / f"{name}.yaml"
+        try:
+            safe_name = validate_resource_name(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        path = pipelines_dir / f"{safe_name}.yaml"
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Pipeline '{name}' nao encontrado.")
+            raise HTTPException(status_code=404, detail=f"Pipeline '{safe_name}' nao encontrado.")
         try:
             return load_pipeline_config(path)
         except PipelineConfigError as exc:
-            raise HTTPException(status_code=500, detail=f"Configuracao invalida: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=f"Configuracao invalida: {exc}",
+            ) from exc
 
     def _run_history(name: str) -> list[dict]:
         try:
@@ -255,7 +345,8 @@ def create_app(
         try:
             rows = conn.execute(
                 "SELECT started_at, finished_at, status, rows_loaded, error_message "
-                "FROM _meta.run_log WHERE connector_name = ? ORDER BY finished_at DESC LIMIT 20",
+                "FROM _meta.run_log WHERE connector_name = ? "
+                "ORDER BY finished_at DESC LIMIT 20",
                 [name],
             ).fetchall()
         except duckdb.CatalogException:
@@ -263,14 +354,21 @@ def create_app(
         finally:
             conn.close()
         return [
-            {"started_at": r[0], "finished_at": r[1], "status": r[2], "rows_loaded": r[3], "error_message": r[4]}
-            for r in rows
+            {
+                "started_at": row[0],
+                "finished_at": row[1],
+                "status": row[2],
+                "rows_loaded": row[3],
+                "error_message": row[4],
+            }
+            for row in rows
         ]
 
     def _config_from_form(form) -> PipelineConfig:
         name = (form.get("name") or "").strip()
         if not name:
             raise ValueError("O nome do pipeline e obrigatorio.")
+        validate_resource_name(name)
         base_url = (form.get("base_url") or "").strip()
         if not base_url:
             raise ValueError("A URL base e obrigatoria.")
@@ -304,7 +402,12 @@ def create_app(
         col_dtypes = form.getlist("column_dtype") if hasattr(form, "getlist") else []
         for col_name, col_dtype in zip(col_names, col_dtypes):
             if col_name.strip():
-                columns.append(ColumnConfig(name=col_name.strip(), dtype=col_dtype.strip() or "VARCHAR"))
+                columns.append(
+                    ColumnConfig(
+                        name=col_name.strip(),
+                        dtype=col_dtype.strip() or "string",
+                    )
+                )
 
         connector = ConnectorConfig(
             base_url=base_url,
@@ -327,12 +430,29 @@ def create_app(
                 format=form.get("date_param_format") or "%Y-%m-%d",
             ),
             records_path=form.get("records_path") or None,
+            extraction_batch_size=int(
+                form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
+            ),
+            max_pages=int(form.get("max_pages") or DEFAULT_MAX_PAGES),
         )
         destination = DestinationConfig(
+            type=form.get("destination_type") or "duckdb",
             schema=form.get("destination_schema") or "bronze",
             batch_size=int(form.get("batch_size") or 1000),
+            write_mode=form.get("write_mode") or "append",
         )
-        return PipelineConfig(name=name, connector=connector, columns=columns, destination=destination)
+        transform = TransformConfig(
+            type=form.get("transform_type") or "none",
+            select=form.get("dbt_select") or None,
+        )
+        return PipelineConfig(
+            name=name,
+            connector=connector,
+            columns=columns,
+            destination=destination,
+            transform=transform,
+            run_log=(form.get("run_log") or "on") == "on",
+        )
 
     return app
 
@@ -342,3 +462,8 @@ def _validate_identifier(name: str) -> None:
 
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
         raise HTTPException(status_code=400, detail=f"Nome invalido: '{name}'.")
+
+
+def _quote_duckdb_identifier(name: str) -> str:
+    """Quote an identifier using SQL-standard doubled double-quotes."""
+    return '"' + str(name).replace('"', '""') + '"'

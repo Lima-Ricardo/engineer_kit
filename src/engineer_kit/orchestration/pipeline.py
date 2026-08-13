@@ -1,65 +1,86 @@
-"""Une conector(es) -> destino em uma unidade atomica: e essa unidade
-que um scheduler (nosso ou externo, tipo Airflow) chama para rodar uma
-carga completa.
+"""Backend-agnostic orchestration for one complete ingestion attempt.
 
-O watermark de cada conector so e commitado depois que o load no
-destino teve sucesso — uma falha no meio do caminho refaz a mesma
-janela no proximo run, sem duplicar nem perder dado. Uma fonte falhar
-nao impede as outras de rodar: um problema numa API nao deveria travar
-o resto do pipeline.
+The Pipeline coordinates extraction, Bronze persistence, checkpoint commit and
+optional audit logging. It never imports a concrete storage engine.
 
-Caso comum: um conector so. `Pipeline(connector=..., schema=..., destination=...)`
-resolve isso direto, sem precisar montar PipelineSource nem uma lista.
-Para varios conectores no mesmo pipeline, use `sources=[PipelineSource(...), ...]`.
-
-`run_log=True` (padrao) registra cada execucao (inicio, fim, status,
-quantidade de registros, colunas novas fora do schema) em
-`_meta.run_log`, alem de aparecer no log visual do terminal -- as duas
-saidas vem da mesma informacao. So funciona automaticamente quando
-`destination` expoe `.connection` (como o DuckDBLoader); pra outro
-destino, ou pra apontar o run_log em outro lugar, passe
-`run_log_store=` explicitamente.
+Destination and StateStore may be different systems, so there is no universal
+cross-system transaction. Official engineer_kit destinations use a deterministic
+``ingestion_key`` per checkpoint transition to make a retry replace the same
+Bronze window when state persistence fails after data persistence. Third-party
+destinations remain compatible through ``Destination.load`` and provide
+at-least-once semantics unless they implement ``load_with_context``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timezone
+from typing import Any, Optional
+from uuid import uuid4
 
 from engineer_kit.connectors.api_connector import APIConnector
-from engineer_kit.storage.destination import Destination
-from engineer_kit.storage.run_log import RunLogEntry, RunLogStore
+from engineer_kit.security.redaction import redact_text
+from engineer_kit.storage.destination import Destination, LoadContext
+from engineer_kit.storage.run_log import RunLogBackend, RunLogEntry
 from engineer_kit.storage.schema import EndpointSchema
+from engineer_kit.storage.state_store import Watermark
 from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.pipeline")
 
 
-@dataclass
+@dataclass(frozen=True)
 class PipelineSource:
     connector: APIConnector
     schema: EndpointSchema
 
 
-@dataclass
+@dataclass(frozen=True)
 class StepResult:
+    """Result of one source -> destination ingestion step."""
+
     connector_name: str
     rows_loaded: int
     error: Optional[str] = None
-
-
-@dataclass
-class PipelineResult:
-    steps: list[StepResult]
+    status: str = "success"
+    destination: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    window_start: Optional[date] = None
+    window_end: Optional[date] = None
+    watermark_before: Optional[Watermark] = None
+    watermark_after: Optional[Watermark] = None
+    extra_fields_seen: tuple[str, ...] = ()
+    ingestion_key: Optional[str] = None
 
     @property
     def success(self) -> bool:
-        return all(step.error is None for step in self.steps)
+        return self.error is None and self.status == "success"
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """Portable execution result suitable for CLIs and external orchestrators."""
+
+    steps: list[StepResult]
+    run_id: str = ""
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    @property
+    def success(self) -> bool:
+        return all(step.success for step in self.steps)
+
+    @property
+    def rows_loaded(self) -> int:
+        return sum(step.rows_loaded for step in self.steps)
 
 
 class Pipeline:
+    """Atomic ingestion unit callable by local or external orchestrators."""
+
     def __init__(
         self,
         destination: Destination,
@@ -67,11 +88,13 @@ class Pipeline:
         schema: Optional[EndpointSchema] = None,
         sources: Optional[list[PipelineSource]] = None,
         run_log: bool = True,
-        run_log_store: Optional[RunLogStore] = None,
+        run_log_store: Optional[RunLogBackend] = None,
     ) -> None:
         self._sources = self._resolve_sources(connector, schema, sources)
         self._destination = destination
-        self._run_log_store = self._resolve_run_log_store(run_log, run_log_store, destination)
+        self._run_log_store = self._resolve_run_log_store(
+            run_log, run_log_store, destination
+        )
 
     @staticmethod
     def _resolve_sources(
@@ -82,107 +105,308 @@ class Pipeline:
         if sources is not None:
             if connector is not None or schema is not None:
                 raise ValueError(
-                    "Passe connector+schema (um conector) ou sources=[...] (varios) — nao os dois."
+                    "Passe connector+schema (um conector) ou sources=[...] (varios), nao os dois."
                 )
             return sources
         if connector is None or schema is None:
             raise ValueError(
-                "Passe connector=... e schema=... (caso comum, um conector) "
-                "ou sources=[PipelineSource(...), ...] (varios conectores)."
+                "Passe connector=... e schema=... ou sources=[PipelineSource(...), ...]."
             )
         return [PipelineSource(connector=connector, schema=schema)]
 
     @staticmethod
     def _resolve_run_log_store(
         run_log: bool,
-        run_log_store: Optional[RunLogStore],
+        run_log_store: Optional[RunLogBackend],
         destination: Destination,
-    ) -> Optional[RunLogStore]:
+    ) -> Optional[RunLogBackend]:
         if run_log_store is not None:
             return run_log_store
         if not run_log:
             return None
-        connection = getattr(destination, "connection", None)
-        if connection is None:
+        factory = getattr(destination, "default_run_log_backend", None)
+        backend = factory() if callable(factory) else None
+        if backend is None:
             raise ValueError(
-                "run_log=True precisa que destination exponha `.connection` (ex: DuckDBLoader). "
-                "Para outro destino, passe run_log_store=... explicitamente, ou run_log=False "
-                "para desligar o registro de execucao."
+                "run_log=True, mas este destino nao fornece auditoria automaticamente. "
+                "Passe run_log_store=... ou run_log=False."
             )
-        return RunLogStore(connection)
+        return backend
 
-    def run(self) -> PipelineResult:
-        return PipelineResult(steps=[self._run_step(source) for source in self._sources])
+    def run(self, run_id: str | None = None) -> PipelineResult:
+        execution_id = run_id or uuid4().hex
+        started_at = datetime.now(timezone.utc)
+        steps = [self._run_step(source, execution_id) for source in self._sources]
+        return PipelineResult(
+            steps=steps,
+            run_id=execution_id,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+        )
 
-    def _run_step(self, source: PipelineSource) -> StepResult:
+    def _run_step(self, source: PipelineSource, run_id: str) -> StepResult:
         connector = source.connector
         started_at = datetime.now(timezone.utc)
         visual_logger.info("'{}': iniciando extracao e carga.", connector.name)
 
+        window = None
+        extraction_session = None
+        context = LoadContext.adhoc(
+            connector.name,
+            run_id=run_id,
+            started_at=started_at,
+        )
+
         try:
-            records = connector.extract()
-            result = self._destination.load(
+            session_factory = getattr(connector, "extract_incremental", None)
+            if callable(session_factory):
+                extraction_session = session_factory()
+                records = extraction_session.iter_records()
+                window = extraction_session.window
+            else:
+                records = connector.extract()
+                window = getattr(connector, "current_window", None)
+
+            if window is not None:
+                context = LoadContext.for_window(
+                    connector.name,
+                    _window_start(window),
+                    _window_end(window),
+                    checkpoint_identity=_watermark_json(_window_watermark_before(window)),
+                    started_at=started_at,
+                    run_id=run_id,
+                )
+
+            result = self._load_destination(
                 connector_name=connector.name,
-                endpoint=connector.name,
                 schema=source.schema,
                 records=records,
+                context=context,
             )
-            connector.commit_watermark()
+        except Exception as exc:
+            if extraction_session is not None:
+                try:
+                    extraction_session.abort()
+                except Exception:
+                    logger.debug("Falha ao abortar ExtractionSession")
             finished_at = datetime.now(timezone.utc)
-
-            logger.info("Conector '%s': %d linha(s) carregada(s).", connector.name, result.rows_loaded)
-            visual_logger.success(
-                "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
+            safe_error = redact_text(exc)
+            logger.error(
+                "Conector '%s' falhou antes de confirmar o destino; checkpoint nao avancado. "
+                "erro=%s",
                 connector.name,
-                result.rows_loaded,
-                started_at.isoformat(timespec="seconds"),
-                finished_at.isoformat(timespec="seconds"),
+                type(exc).__name__,
+            )
+            visual_logger.error("'{}': carga falhou. Motivo: {}", connector.name, safe_error)
+            self._record_run_safely(
+                self._run_log_entry(
+                    connector_name=connector.name,
+                    context=context,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    status="error",
+                    rows_loaded=0,
+                    extra_fields_seen=[],
+                    error_message=safe_error,
+                    destination=None,
+                    window=window,
+                    watermark_after=None,
+                )
+            )
+            return StepResult(
+                connector_name=connector.name,
+                rows_loaded=0,
+                error=safe_error,
+                status="error",
+                started_at=started_at,
+                finished_at=finished_at,
+                window_start=_window_start(window),
+                window_end=_window_end(window),
+                watermark_before=_window_watermark_before(window),
+                ingestion_key=context.ingestion_key,
             )
 
-            self._record_run(
-                connector.name, started_at, finished_at, "success", result.rows_loaded,
-                result.extra_fields_seen, error_message=None,
-            )
-            return StepResult(connector_name=connector.name, rows_loaded=result.rows_loaded)
+        rows_loaded = int(getattr(result, "rows_loaded", 0))
+        extra_fields_seen = list(getattr(result, "extra_fields_seen", []) or [])
+        destination_label = getattr(result, "table", None)
+
+        try:
+            if extraction_session is not None:
+                watermark_after = extraction_session.commit()
+            else:
+                watermark_after = connector.commit_watermark()
         except Exception as exc:
             finished_at = datetime.now(timezone.utc)
-            logger.exception(
-                "Conector '%s' falhou -- watermark NAO avancado, proximo run refaz a mesma janela.",
+            safe_cause = redact_text(exc)
+            error_message = f"checkpoint falhou apos a carga: {safe_cause}"
+            logger.error(
+                "Conector '%s': destino confirmado, mas checkpoint falhou; erro=%s. "
+                "A mesma janela sera tentada novamente.",
                 connector.name,
+                type(exc).__name__,
             )
             visual_logger.error(
-                "'{}': falhou -- inicio {} fim {}. Motivo: {}",
+                "'{}': dados gravados, mas checkpoint falhou; retry reutilizara a mesma janela. Motivo: {}",
                 connector.name,
-                started_at.isoformat(timespec="seconds"),
-                finished_at.isoformat(timespec="seconds"),
-                exc,
+                safe_cause,
+            )
+            self._record_run_safely(
+                self._run_log_entry(
+                    connector_name=connector.name,
+                    context=context,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    status="checkpoint_error",
+                    rows_loaded=rows_loaded,
+                    extra_fields_seen=extra_fields_seen,
+                    error_message=error_message,
+                    destination=destination_label,
+                    window=window,
+                    watermark_after=None,
+                )
+            )
+            return StepResult(
+                connector_name=connector.name,
+                rows_loaded=rows_loaded,
+                error=error_message,
+                status="checkpoint_error",
+                destination=destination_label,
+                started_at=started_at,
+                finished_at=finished_at,
+                window_start=_window_start(window),
+                window_end=_window_end(window),
+                watermark_before=_window_watermark_before(window),
+                watermark_after=None,
+                extra_fields_seen=tuple(extra_fields_seen),
+                ingestion_key=context.ingestion_key,
             )
 
-            self._record_run(
-                connector.name, started_at, finished_at, "error", 0, [], error_message=str(exc),
+        finished_at = datetime.now(timezone.utc)
+        logger.info("Conector '%s': %d linha(s) carregada(s).", connector.name, rows_loaded)
+        visual_logger.success(
+            "'{}': concluido com sucesso -- {} registro(s), inicio {} fim {}.",
+            connector.name,
+            rows_loaded,
+            started_at.isoformat(timespec="seconds"),
+            finished_at.isoformat(timespec="seconds"),
+        )
+        self._record_run_safely(
+            self._run_log_entry(
+                connector_name=connector.name,
+                context=context,
+                started_at=started_at,
+                finished_at=finished_at,
+                status="success",
+                rows_loaded=rows_loaded,
+                extra_fields_seen=extra_fields_seen,
+                error_message=None,
+                destination=destination_label,
+                window=window,
+                watermark_after=watermark_after,
             )
-            return StepResult(connector_name=connector.name, rows_loaded=0, error=str(exc))
+        )
+        return StepResult(
+            connector_name=connector.name,
+            rows_loaded=rows_loaded,
+            status="success",
+            destination=destination_label,
+            started_at=started_at,
+            finished_at=finished_at,
+            window_start=_window_start(window),
+            window_end=_window_end(window),
+            watermark_before=_window_watermark_before(window),
+            watermark_after=watermark_after,
+            extra_fields_seen=tuple(extra_fields_seen),
+            ingestion_key=context.ingestion_key,
+        )
 
-    def _record_run(
+    def _load_destination(
         self,
+        *,
         connector_name: str,
+        schema: EndpointSchema,
+        records,
+        context: LoadContext,
+    ) -> Any:
+        contextual_load = getattr(self._destination, "load_with_context", None)
+        if callable(contextual_load):
+            return contextual_load(
+                connector_name=connector_name,
+                endpoint=connector_name,
+                schema=schema,
+                records=records,
+                context=context,
+            )
+        return self._destination.load(
+            connector_name=connector_name,
+            endpoint=connector_name,
+            schema=schema,
+            records=records,
+        )
+
+    @staticmethod
+    def _run_log_entry(
+        *,
+        connector_name: str,
+        context: LoadContext,
         started_at: datetime,
         finished_at: datetime,
         status: str,
         rows_loaded: int,
         extra_fields_seen: list[str],
-        error_message: Optional[str],
-    ) -> None:
+        error_message: str | None,
+        destination: str | None,
+        window,
+        watermark_after: Watermark | None,
+    ) -> RunLogEntry:
+        return RunLogEntry(
+            connector_name=connector_name,
+            started_at=started_at,
+            finished_at=finished_at,
+            status=status,
+            rows_loaded=rows_loaded,
+            extra_fields_seen=extra_fields_seen,
+            error_message=redact_text(error_message) if error_message else None,
+            run_id=context.run_id,
+            ingestion_key=context.ingestion_key,
+            destination=destination,
+            window_start=_window_start(window),
+            window_end=_window_end(window),
+            watermark_before=_watermark_json(_window_watermark_before(window)),
+            watermark_after=_watermark_json(watermark_after),
+        )
+
+    def _record_run_safely(self, entry: RunLogEntry) -> None:
         if self._run_log_store is None:
             return
-        self._run_log_store.record(
-            RunLogEntry(
-                connector_name=connector_name,
-                started_at=started_at,
-                finished_at=finished_at,
-                status=status,
-                rows_loaded=rows_loaded,
-                extra_fields_seen=extra_fields_seen,
-                error_message=error_message,
+        try:
+            self._run_log_store.record(entry)
+        except Exception as exc:
+            logger.error(
+                "Falha ao persistir auditoria da execucao %s; erro=%s",
+                entry.run_id,
+                type(exc).__name__,
             )
-        )
+            visual_logger.warning(
+                "Auditoria da execucao '{}' nao foi persistida: {}",
+                entry.run_id or "sem-id",
+                redact_text(exc),
+            )
+
+
+def _window_start(window) -> date | None:
+    return getattr(window, "start", None) if window is not None else None
+
+
+def _window_end(window) -> date | None:
+    return getattr(window, "end", None) if window is not None else None
+
+
+def _window_watermark_before(window) -> Watermark | None:
+    return getattr(window, "watermark_before", None) if window is not None else None
+
+
+def _watermark_json(watermark: Watermark | None) -> str | None:
+    if watermark is None:
+        return None
+    return json.dumps(asdict(watermark), ensure_ascii=False, default=str, sort_keys=True)

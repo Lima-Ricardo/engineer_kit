@@ -1,0 +1,30 @@
+name: Feature request
+description: Sugira uma melhoria, adapter ou novo contrato
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema que você quer resolver
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposta
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Camada principal
+      options:
+        - Connector / HTTP
+        - Pagination / Incremental
+        - ExtractionSession / streaming
+        - Destination / State / Audit
+        - Databricks / Fabric / Cloud
+        - UI / CLI
+        - Documentação
+        - Outro

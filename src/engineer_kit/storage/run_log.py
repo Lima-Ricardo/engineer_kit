@@ -1,68 +1,66 @@
-"""Registra cada execucao de conector: quando comecou, quando terminou,
-status (sucesso/erro), quantidade de registros e quais campos novos
-apareceram fora do schema declarado.
-
-Fica em `_meta.run_log`, ao lado de `_meta.ingestion_state` -- o dbt
-pode ler essa tabela como qualquer outra fonte. Gravar aqui e opcional:
-o Pipeline so grava se receber um RunLogStore; quem nao passar nenhum,
-simplesmente nao tem essa tabela.
-"""
+"""Backend-agnostic contracts for ingestion run audit events."""
 
 from __future__ import annotations
 
-import json
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
-import duckdb
 
-
-@dataclass
+@dataclass(frozen=True)
 class RunLogEntry:
+    """Auditable event produced at the end of one ingestion attempt.
+
+    The original 0.1 fields remain first for backwards compatibility. New
+    execution/window metadata is optional so custom backends can adopt it
+    incrementally.
+    """
+
     connector_name: str
     started_at: datetime
     finished_at: datetime
-    status: str  # "success" ou "error"
+    status: str
     rows_loaded: int
     extra_fields_seen: list[str]
     error_message: Optional[str] = None
+    run_id: Optional[str] = None
+    ingestion_key: Optional[str] = None
+    destination: Optional[str] = None
+    window_start: Optional[date] = None
+    window_end: Optional[date] = None
+    watermark_before: Optional[str] = None
+    watermark_after: Optional[str] = None
 
 
-class RunLogStore:
-    _SCHEMA = "_meta"
-    _TABLE = "run_log"
+class RunLogBackend(ABC):
+    """Observability port used by the Pipeline."""
 
-    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-        self._conn = conn
-        self._ensure_table()
-
-    def _ensure_table(self) -> None:
-        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._SCHEMA}")
-        self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self._SCHEMA}.{self._TABLE} (
-                connector_name VARCHAR,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP,
-                status VARCHAR,
-                rows_loaded BIGINT,
-                extra_fields_seen VARCHAR,
-                error_message VARCHAR
-            )
-            """
-        )
-
+    @abstractmethod
     def record(self, entry: RunLogEntry) -> None:
-        self._conn.execute(
-            f"INSERT INTO {self._SCHEMA}.{self._TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                entry.connector_name,
-                entry.started_at,
-                entry.finished_at,
-                entry.status,
-                entry.rows_loaded,
-                json.dumps(entry.extra_fields_seen, ensure_ascii=False),
-                entry.error_message,
-            ],
-        )
+        """Persist one execution event."""
+
+
+_DUCKDB_EXPORTS = {"DuckDBRunLogStore", "RunLogStore"}
+
+
+def __getattr__(name: str):
+    """Keep 0.1 DuckDB imports compatible without making DuckDB mandatory."""
+    if name not in _DUCKDB_EXPORTS:
+        raise AttributeError(name)
+
+    try:
+        from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
+    except ModuleNotFoundError as exc:
+        if exc.name == "duckdb":
+            raise ModuleNotFoundError(
+                'DuckDB support is optional. Install `pip install "engineer_kit[duckdb]"`.'
+            ) from None
+        raise
+
+    return DuckDBRunLogStore
+
+
+# ``__getattr__`` preserves explicit legacy imports. Wildcard exports remain
+# backend-neutral so static tooling and core-only installations see only ports.
+__all__ = ["RunLogBackend", "RunLogEntry"]

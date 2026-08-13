@@ -70,12 +70,26 @@ def test_field_outside_schema_is_captured_in_extra_not_dropped(conn, schema):
 
 def test_missing_declared_field_becomes_null(conn, schema):
     loader = DuckDBLoader(conn, schema="bronze")
-    records = [{"sha": "abc123"}]  # todos os outros campos declarados estao ausentes
+    records = [{"sha": "abc123"}]
 
     loader.load("github_commits", "commits", schema, records)
 
     row = conn.execute("SELECT commit_author_name, parents FROM bronze.commits").fetchone()
     assert row == (None, None)
+
+
+def test_declared_analytical_type_does_not_type_bronze(conn):
+    schema = EndpointSchema(columns=[ColumnSpec("amount", dtype="DECIMAL(18, 2)")])
+    loader = DuckDBLoader(conn, schema="bronze")
+
+    loader.load("orders", "orders", schema, [{"amount": "not-yet-cast"}])
+
+    column_type = conn.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema='bronze' AND table_name='orders' AND column_name='amount'"
+    ).fetchone()[0]
+    assert column_type == "VARCHAR"
+    assert conn.execute("SELECT amount FROM bronze.orders").fetchone()[0] == "not-yet-cast"
 
 
 def test_second_load_reuses_table_without_altering_schema(conn, schema):
@@ -85,15 +99,29 @@ def test_second_load_reuses_table_without_altering_schema(conn, schema):
 
     total = conn.execute("SELECT count(*) FROM bronze.commits").fetchone()[0]
     assert total == 2
-    # coluna nova nao foi promovida a coluna real -- so entrou em _extra
     columns = {
-        r[0]
-        for r in conn.execute(
+        row[0]
+        for row in conn.execute(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema='bronze' AND table_name='commits'"
         ).fetchall()
     }
     assert "new_field" not in columns
+
+
+def test_failed_later_batch_rolls_back_earlier_batches(conn):
+    schema = EndpointSchema.from_names(["id"])
+    loader = DuckDBLoader(conn, schema="bronze", batch_size=MIN_BATCH_SIZE)
+
+    def broken_records():
+        for index in range(MIN_BATCH_SIZE):
+            yield {"id": str(index)}
+        raise RuntimeError("source failed after first batch")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        loader.load("events", "events", schema, broken_records())
+
+    assert conn.execute("SELECT count(*) FROM bronze.events").fetchone()[0] == 0
 
 
 def test_empty_batch_is_a_noop(conn, schema):
@@ -106,7 +134,12 @@ def test_invalid_endpoint_name_is_rejected():
     conn_local = duckdb.connect()
     loader = DuckDBLoader(conn_local, schema="bronze")
     with pytest.raises(InvalidIdentifierError):
-        loader.load("conn", "commits; DROP TABLE bronze.commits", EndpointSchema.from_names(["sha"]), [{"sha": "x"}])
+        loader.load(
+            "conn",
+            "commits; DROP TABLE bronze.commits",
+            EndpointSchema.from_names(["sha"]),
+            [{"sha": "x"}],
+        )
 
 
 def test_invalid_schema_name_is_rejected():
@@ -132,7 +165,10 @@ def test_batch_size_above_maximum_is_rejected(conn):
 
 def test_small_batch_size_still_loads_everything_across_multiple_batches(conn, schema):
     loader = DuckDBLoader(conn, schema="bronze", batch_size=MIN_BATCH_SIZE)
-    records = [{"sha": f"commit-{i}", "extra_field": f"drift-{i}"} for i in range(MIN_BATCH_SIZE * 3 + 7)]
+    records = [
+        {"sha": f"commit-{index}", "extra_field": f"drift-{index}"}
+        for index in range(MIN_BATCH_SIZE * 3 + 7)
+    ]
 
     result = loader.load("github_commits", "commits", schema, records)
 

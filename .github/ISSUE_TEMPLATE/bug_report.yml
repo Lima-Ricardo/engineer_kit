@@ -1,0 +1,42 @@
+name: Bug report
+description: Reporte um comportamento incorreto ou regressão
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Não publique tokens, dados pessoais ou payloads de produção. Para vulnerabilidades, use SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Versão do engineer_kit
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python / runtime
+      placeholder: Python 3.12 / Databricks / Fabric / local
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reprodução mínima
+      description: Use endpoint/payload fictício ou sanitizado.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Resultado esperado
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Resultado atual
+    validations:
+      required: true

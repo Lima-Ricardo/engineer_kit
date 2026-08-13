@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Arquitetura - engineer_kit{% endblock %}
+{% block content %}
+<h1>Arquitetura do engineer_kit</h1>
+<p class="subtitle">O local lab ensina e testa os mesmos contratos usados em código, Parquet e Lakehouse.</p>
+
+<div class="flow-strip architecture-flow">
+    <div class="flow-node active"><strong>Source</strong><span>RestConnector</span><small>HTTP, auth, paginação</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Extraction</strong><span>ExtractionSession</span><small>streaming + batches</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Incremental</strong><span>StateStore</span><small>watermark/checkpoint</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Bronze</strong><span>Destination</span><small>batch + schema estável</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node"><strong>Transform</strong><span>opcional</span><small>dbt, Spark ou SQL</small></div>
+</div>
+
+<div class="grid-2 docs-grid">
+    <section class="card"><h3>Connector</h3><p>Contrato pai independente de plataforma. <code>RestConnector</code> implementa HTTP, autenticação, paginação e janela incremental sem saber se está rodando localmente, no Fabric, Databricks, AWS ou GCP.</p><code>extract_incremental() → ExtractionSession</code></section>
+    <section class="card"><h3>ExtractionSession</h3><p>É single-pass e streaming-first. Iterar a sessão retorna batches limitados em memória; o default oficial é <code>25_000</code>. <code>collect()</code> existe apenas como materialização explícita para datasets pequenos.</p><code>for batch in run: ...</code></section>
+    <section class="card"><h3>StateStore</h3><p>Persiste o checkpoint sem acoplar o connector ao storage. Implementações oficiais: <code>DuckDBStateStore</code>, <code>JsonFileStateStore</code> e <code>DeltaStateStore</code>.</p><code>get_watermark / set_watermark</code></section>
+    <section class="card"><h3>Destination</h3><p>Materializa a Bronze. Implementações oficiais: <code>DuckDBDestination</code>, <code>ParquetDestination</code> e <code>DeltaDestination</code>.</p><code>load(...) → LoadResult</code></section>
+    <section class="card"><h3>RunLogBackend</h3><p>Audita a execução sem amarrar o Pipeline a uma tabela específica. Há backends DuckDB, JSONL e Delta.</p><code>record(RunLogEntry)</code></section>
+    <section class="card"><h3>Pipeline</h3><p>Coordena extração, transação da Bronze, checkpoint e auditoria. Um <code>PipelineResult</code> contém run id, janela, destino, linhas e watermarks.</p><code>extract → load → checkpoint → audit</code></section>
+    <section class="card"><h3>Transform</h3><p>É deliberadamente pós-ingestão. dbt é uma integração opcional no local lab; plataformas podem executar dbt, Spark ou SQL externamente.</p><code>Bronze → staging → silver → gold</code></section>
+</div>
+
+<h2>Batching: três controles diferentes</h2>
+<div class="card">
+    <pre class="code-block">API pagination size
+        ↓
+Extraction batch size (default: 25.000)
+        ↓
+Destination write batch size</pre>
+    <p>O tamanho de página respeita a API; o extraction batch controla memória e o tamanho entregue ao consumidor; o write batch é uma decisão física do adapter. Uma API com páginas de 1.000 registros pode, por exemplo, preencher aproximadamente 25 páginas antes de entregar um batch padrão de 25.000. Essa relação não é rígida: paginação e batching permanecem independentes.</p>
+</div>
+
+<h2>Managed mode e embedded mode</h2>
+<div class="grid-2 docs-grid">
+    <section class="card"><h3>Managed mode</h3><p>O <code>Pipeline</code> entrega o stream ao <code>Destination</code>, confirma a Bronze e depois avança o checkpoint.</p><pre class="code-block">API → Pipeline → Destination → StateStore</pre></section>
+    <section class="card"><h3>Embedded mode</h3><p>Em Fabric, Databricks ou outro runtime, o usuário pode usar apenas a extração e incremental, processar batches com Spark/Pandas/Polars e chamar <code>run.commit()</code> somente depois de persistir o resultado.</p><pre class="code-block">API → ExtractionSession → user code → Spark/Delta → commit()</pre></section>
+</div>
+
+<h2>Adapters disponíveis</h2>
+<div class="card">
+    <table><thead><tr><th>Uso</th><th>Destination</th><th>State</th><th>Audit</th><th>Instalação</th></tr></thead><tbody>
+        <tr><td>Local zero-infra</td><td>DuckDBDestination</td><td>DuckDBStateStore</td><td>DuckDBRunLogStore</td><td><code>engineer_kit[duckdb]</code></td></tr>
+        <tr><td>Arquivos / lake montado</td><td>ParquetDestination</td><td>JsonFileStateStore</td><td>JsonLinesRunLogStore</td><td><code>engineer_kit[parquet]</code></td></tr>
+        <tr><td>Lakehouse / plataforma</td><td>DeltaDestination</td><td>DeltaStateStore</td><td>DeltaRunLogStore</td><td><code>engineer_kit[delta]</code></td></tr>
+    </tbody></table>
+    <p>Cloud é tratado como runtime/storage, não como uma subclasse do conector. S3, GCS, ADLS/OneLake e caminhos Delta entram por URI/storage options quando suportados pelo adapter e pelo ambiente.</p>
+</div>
+
+<h2>Contrato Bronze</h2>
+<div class="card">
+    <p>Os campos declarados chegam fisicamente à Bronze como strings. A tipagem analítica é lógica e fica para staging/transformação. Isso evita que uma mudança de tipo na API derrube a ingestão.</p>
+    <pre class="code-block">campos declarados  → string / null
+campo novo          → _extra + warning
+registro original   → _raw
+execução            → _run_id
+janela incremental  → _window_start / _window_end
+retry idempotente   → _ingestion_key</pre>
+</div>
+
+<h2>Retry e checkpoint</h2>
+<div class="card">
+    <pre class="code-block">read watermark
+      ↓
+extract API
+      ↓
+write/process downstream
+      ↓
+sucesso
+      ↓
+commit watermark
+      ↓
+audit (best effort)
+      ↓
+transform opcional</pre>
+    <p>Se a Bronze ou o processamento downstream falhar, o watermark não avança. Em embedded mode, <code>ExtractionSession.commit()</code> também recusa checkpoint parcial: a sessão precisa ter sido consumida completamente.</p>
+</div>
+
+<h2>Write modes</h2>
+<div class="card">
+    <p><code>append</code> é o padrão de Bronze e mantém janelas distintas. <code>overwrite</code> substitui o alvo inteiro com promoção/transação segura quando suportada. Merge/upsert não é inferido pela biblioteca porque exige uma chave de negócio explícita.</p>
+</div>
+
+<h2>Runtime local</h2>
+<div class="card">
+    <p>A UI é opcional e pensada para desenvolvimento e treinamento:</p>
+    <pre class="code-block"># interface local
+pip install "engineer_kit[ui]"
+
+# dbt local
+pip install "engineer_kit[dbt]"
+
+# laboratório completo: DuckDB + UI + dbt
+pip install "engineer_kit[local]"
+
+engineer_kit ui --workspace .</pre>
+    <p>O editor visual cria pipelines DuckDB porque o navegador de dados e a integração dbt do local lab são locais. Parquet, Delta e embedded mode usam os mesmos contratos via Python/YAML e são documentados aqui como arquitetura de plataforma.</p>
+</div>
+{% endblock %}

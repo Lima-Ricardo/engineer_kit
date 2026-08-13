@@ -1,12 +1,4 @@
-"""Gera sources.yml e um modelo de staging a partir do schema declarado
-de cada endpoint.
-
-Isso elimina o trabalho manual repetitivo de descrever no dbt uma
-tabela que a lib ja sabe descrever (o schema foi declarado em Python,
-na EndpointSchema). As regras de negocio de silver/gold continuam
-manuais — este gerador so cobre staging, que e so um cast de string
-para o tipo certo.
-"""
+"""Generate dbt staging scaffolds from the declared endpoint contract."""
 
 from __future__ import annotations
 
@@ -41,20 +33,34 @@ def generate_sources_yml(
     return yaml.dump(doc, sort_keys=False, allow_unicode=True)
 
 
-def generate_staging_model(endpoint: str, schema: EndpointSchema, source_name: str = "bronze") -> str:
+def generate_staging_model(
+    endpoint: str,
+    schema: EndpointSchema,
+    source_name: str = "bronze",
+    dialect: str = "duckdb",
+) -> str:
+    """Generate the mechanical Bronze -> staging cast layer.
+
+    Logical types declared in ``ColumnSpec`` are rendered for the requested
+    dialect. Business rules remain outside the generated staging model.
+    """
     validate_identifier(endpoint, "Nome de endpoint")
     validate_identifier(source_name, "Nome da source dbt")
-    select_lines = [f'    "{col.name}"::{col.dtype} as {col.name}' for col in schema.columns]
+    select_lines = [
+        f'    "{column.name}"::{column.sql_type(dialect)} as {column.name}'
+        for column in schema.columns
+    ]
     select_lines += [
         '    "_source" as _source',
         '    "_endpoint" as _endpoint',
         '    "_ingested_at" as _ingested_at',
     ]
     columns_sql = ",\n".join(select_lines)
+    # This function emits a dbt model as text; it does not execute SQL. Source
+    # and endpoint identifiers are validated above before template generation.
     return (
-        f"-- gerado automaticamente a partir do schema declarado em Python "
-        f"para o endpoint '{endpoint}'.\n"
-        f"-- revise os tipos (::TIPO) manualmente antes de considerar isto pronto para producao.\n"
+        f"-- generated from the declared engineer_kit schema for '{endpoint}'.\n"  # nosec B608
+        f"-- business rules belong in silver/gold; this layer only casts Bronze strings.\n"
         f"select\n{columns_sql}\n"
         f"from {{{{ source('{source_name}', '{endpoint}') }}}}\n"
     )
@@ -64,22 +70,28 @@ def write_staging_scaffold(
     dbt_project_dir: str,
     endpoints: dict[str, EndpointSchema],
     bronze_schema: str = "bronze",
+    dialect: str = "duckdb",
 ) -> list[str]:
-    """Escreve sources.yml + um stg_<endpoint>.sql por endpoint em
-    <dbt_project_dir>/models/staging/. Sobrescreve o que tiver sido
-    gerado antes — nao e para editar esses arquivos a mao; crie modelos
-    de silver/gold que leem deles em vez disso."""
+    """Write sources.yml plus one generated ``stg_<endpoint>.sql`` per endpoint."""
     staging_dir = Path(dbt_project_dir) / "models" / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    written = []
+    written: list[str] = []
     sources_path = staging_dir / "sources.yml"
     sources_path.write_text(generate_sources_yml(bronze_schema, endpoints), encoding="utf-8")
     written.append(str(sources_path))
 
     for endpoint, schema in endpoints.items():
         model_path = staging_dir / f"stg_{endpoint}.sql"
-        model_path.write_text(generate_staging_model(endpoint, schema, source_name=bronze_schema), encoding="utf-8")
+        model_path.write_text(
+            generate_staging_model(
+                endpoint,
+                schema,
+                source_name=bronze_schema,
+                dialect=dialect,
+            ),
+            encoding="utf-8",
+        )
         written.append(str(model_path))
 
     return written
