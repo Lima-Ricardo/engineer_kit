@@ -127,6 +127,7 @@ class RestConnector(APIConnector):
             extraction_batch_size=extraction_batch_size,
             max_pages=max_pages,
             allow_cross_origin_pagination=allow_cross_origin_pagination,
+            record_transform=self._project_record if self._select else None,
         )
 
     @staticmethod
@@ -149,6 +150,11 @@ class RestConnector(APIConnector):
     def _stateful(cls, name: str, store: StateStore | None, mode: IncrementalMode, start: date | None):
         resolved = store or cls._local_state(Path(".engineer_kit") / "state.json")
         return IncrementalStrategy(name, resolved, mode=mode, initial_start=start), resolved
+
+    @property
+    def needs_auto_state(self) -> bool:
+        """Whether managed mode may replace the automatically chosen local state."""
+        return self._auto_state
 
     def _bind_auto_state_store(self, state_store: StateStore) -> None:
         """Let a managed destination replace only the automatically chosen local state."""
@@ -181,10 +187,13 @@ class RestConnector(APIConnector):
         raw = response.json()
         items = self._extract_items(raw)
         return ParsedPage(
-            records=[stringify(project(item, self._select)) for item in items],
+            records=[stringify(item) for item in items],
             raw=raw,
             headers=dict(response.headers),
         )
+
+    def _project_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        return project(record, self._select)
 
     def _extract_items(self, raw: Any) -> list[dict[str, Any]]:
         if callable(self._records_path):
