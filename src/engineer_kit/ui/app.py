@@ -63,8 +63,16 @@ def create_app(
     warehouse_filename: str = "warehouse.duckdb",
     dbt_project_dirname: str = "dbt_project",
     username: str = "admin",
-    password: str = "admin",
+    password: str | None = None,
 ) -> FastAPI:
+    if not password:
+        raise ValueError(
+            "create_app() exige password explicita. Para uso local pela CLI, execute "
+            "`engineer_kit ui`; ela gera uma senha temporaria quando nenhuma e informada."
+        )
+    if not username:
+        raise ValueError("create_app() exige username nao vazio.")
+
     workspace = Path(workspace_dir).resolve()
     pipelines_dir = _workspace_child(workspace, pipelines_dirname)
     pipelines_dir.mkdir(parents=True, exist_ok=True)
