@@ -1,5 +1,7 @@
 # engineer_kit
 
+**🇧🇷 Português** · [🇺🇸 English](README.en.md)
+
 > **Ingestão confiável de APIs REST para analytics — streaming-first, incremental e backend-agnostic.**
 
 [![CI](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml)
@@ -43,7 +45,7 @@ A release candidate 0.1.0 consolida a mudança de um pipeline centrado em DuckDB
 - local lab visual para aprender, configurar e inspecionar pipelines;
 - CI em Python 3.10/3.11/3.12, segurança, packaging e stress sintético.
 
-Acompanhe detalhes e mudanças em [`CHANGELOG.md`](CHANGELOG.md) e na [documentação completa](https://lima-ricardo.github.io/engineer_kit/).
+Acompanhe detalhes e mudanças em [`CHANGELOG.md`](CHANGELOG.md) e na [documentação completa em português](https://lima-ricardo.github.io/engineer_kit/). A [documentação em inglês](https://lima-ricardo.github.io/engineer_kit/en/) mantém a mesma estrutura e exemplos.
 
 ## 📸 Local Lab / UI
 
@@ -344,9 +346,13 @@ O CI cobre:
 
 ## 📚 Documentação
 
-A documentação completa fica no GitHub Pages:
+A documentação completa em português fica no GitHub Pages:
 
 **https://lima-ricardo.github.io/engineer_kit/**
+
+A versão completa em inglês fica em:
+
+**https://lima-ricardo.github.io/engineer_kit/en/**
 
 Atalhos:
 
@@ -370,6 +376,12 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev,all,docs]"
 pytest -q
 mkdocs serve
+```
+
+Para servir a documentação em inglês localmente:
+
+```bash
+mkdocs serve -f mkdocs.en.yml
 ```
 
 ## 🤝 Contribuição

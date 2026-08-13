@@ -168,7 +168,7 @@ jobs:
           python -m twine check dist/*
 
   docs:
-    name: build documentation
+    name: build bilingual documentation
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -184,5 +184,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install '.[docs]'
           python -m pip check
-      - name: Build docs strictly
+      - name: Build Portuguese docs strictly
         run: mkdocs build --strict
+      - name: Build English docs strictly
+        run: mkdocs build --strict -f mkdocs.en.yml
