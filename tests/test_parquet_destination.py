@@ -6,6 +6,7 @@ import pytest
 
 from engineer_kit.adapters.parquet import ParquetDestination
 from engineer_kit.storage.batching import MIN_BATCH_SIZE
+from engineer_kit.storage.destination import LoadContext
 from engineer_kit.storage.identifiers import InvalidIdentifierError
 from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 
@@ -94,6 +95,24 @@ def test_parquet_destination_rejects_endpoint_path_traversal(tmp_path):
             EndpointSchema.from_names(["id"]),
             [{"id": "1"}],
         )
+
+
+def test_parquet_staging_never_uses_raw_operator_run_id_as_path(tmp_path):
+    destination = ParquetDestination(tmp_path)
+    context = LoadContext.adhoc("events_api", run_id="../../escape")
+
+    result = destination.load_with_context(
+        "events_api",
+        "events",
+        EndpointSchema.from_names(["id"]),
+        [{"id": "1"}],
+        context,
+    )
+
+    assert result.rows_loaded == 1
+    assert len(list((tmp_path / "events").glob("*.parquet"))) == 1
+    assert not (tmp_path.parent / "escape.parquet.tmp").exists()
+    assert not (tmp_path.parent / "escape").exists()
 
 
 def test_empty_parquet_load_is_a_noop(tmp_path):
