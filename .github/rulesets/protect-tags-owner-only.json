@@ -1,0 +1,30 @@
+{
+  "name": "Protect tags - owner only",
+  "target": "tag",
+  "source_type": "Repository",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": ["~ALL"]
+    }
+  },
+  "rules": [
+    {
+      "type": "creation"
+    },
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 83733893,
+      "actor_type": "User",
+      "bypass_mode": "always"
+    }
+  ]
+}
