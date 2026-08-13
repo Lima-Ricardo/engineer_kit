@@ -55,11 +55,18 @@ def test_http_rejects_embedded_url_credentials():
     assert not responses.calls
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::ffff:169.254.169.254]/latest/meta-data",
+    ],
+)
 @responses.activate
-def test_http_blocks_link_local_cloud_metadata_target():
+def test_http_blocks_link_local_cloud_metadata_target(url):
     client = HttpClient()
     with pytest.raises(UnsafeUrlError, match="bloqueado"):
-        client.get("https://169.254.169.254/latest/meta-data")
+        client.get(url)
     assert not responses.calls
 
 
@@ -235,6 +242,7 @@ def test_cross_origin_next_url_is_blocked_before_second_authenticated_request():
         state_store=state,
         incremental_mode=IncrementalMode.INGESTION_DATE,
         auth=BearerAuth(secret_provider, "TOKEN"),
+        records_path="results",
     )
     responses.add(
         responses.GET,
@@ -244,7 +252,6 @@ def test_cross_origin_next_url_is_blocked_before_second_authenticated_request():
             "next": "https://evil.example.test/items?page=2",
         },
     )
-    connector._records_path = "results"
 
     with pytest.raises(CrossOriginPaginationError, match="outra origem"):
         list(connector.extract(end=date(2026, 8, 12)))
