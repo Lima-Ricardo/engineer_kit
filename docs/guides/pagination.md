@@ -1,13 +1,38 @@
 # Paginação
 
-Paginação é uma escolha explícita. Não existe uma estratégia escondida porque cada API documenta um contrato diferente.
+O caminho comum não exige instanciar classes de estratégia. A API pública aceita seletores simples e resolve a estratégia **uma vez antes do hot path**.
 
-## Sem paginação
+## Happy path
 
 ```python
-from engineer_kit import NoPagination
+RestConnector(
+    base_url=url,
+    pagination="cursor",
+)
+```
 
-pagination = NoPagination()
+Também são aceitos:
+
+```python
+pagination="page"
+pagination="offset"
+pagination="link_header"
+pagination="next_url"
+pagination=False
+```
+
+Strings são normalizadas sem diferenciar capitalização, então `Cursor`, `cursor` e `CURSOR` representam a mesma intenção.
+
+## `auto`
+
+`pagination="auto"` é o default. Ele é propositalmente conservador: usa a resposta que a extração já recebeu e reconhece somente padrões com alta confiança, como Link header, next URL e campos de cursor conhecidos.
+
+Ele **não faz requests extras de descoberta** e não tenta adivinhar page/offset quando os parâmetros da request não podem ser determinados com segurança.
+
+Se uma API usa page number, declare isso:
+
+```python
+pagination="page"
 ```
 
 ## Página + tamanho
@@ -18,37 +43,40 @@ Para:
 ?page=1&per_page=1000
 ```
 
-use:
+use a forma guiada:
 
 ```python
-from engineer_kit import PageNumberPagination
-
-pagination = PageNumberPagination(
-    page_param="page",
-    page_size_param="per_page",
-    page_size=1000,
-    start_page=1,
-)
+pagination={
+    "type": "page",
+    "size": 1000,
+}
 ```
 
-A estratégia encerra quando uma página vem com menos registros do que `page_size`.
+Quando os nomes são fora do padrão:
+
+```python
+pagination={
+    "type": "page",
+    "param": "page_number",
+    "size_param": "page_limit",
+    "size": 1000,
+}
+```
 
 ## Offset + limit
 
 ```python
-from engineer_kit import OffsetPagination
-
-pagination = OffsetPagination(
-    offset_param="offset",
-    limit_param="limit",
-    limit=1000,
-    start_offset=0,
-)
+pagination={
+    "type": "offset",
+    "size": 1000,
+}
 ```
+
+Seletores adicionais continuam disponíveis para nomes fora do padrão.
 
 ## Cursor
 
-Resposta:
+Resposta comum:
 
 ```json
 {
@@ -57,89 +85,70 @@ Resposta:
 }
 ```
 
-```python
-from engineer_kit import CursorPagination
+Basta:
 
-pagination = CursorPagination(
-    cursor_param="cursor",
-    cursor_field="next_cursor",
-)
+```python
+pagination="cursor"
+```
+
+Para uma API diferente:
+
+```python
+pagination={
+    "type": "cursor",
+    "cursor": "meta.next_cursor",
+    "param": "after",
+}
 ```
 
 ## Link header
 
-Header:
-
-```text
-Link: <https://api.example.com/items?page=2>; rel="next"
+```python
+pagination="link_header"
 ```
+
+O connector continua aplicando a proteção de origem para URLs fornecidas pela API.
+
+## Next URL
 
 ```python
-from engineer_kit import LinkHeaderPagination
-
-pagination = LinkHeaderPagination()
-```
-
-## Próxima URL no JSON
-
-```json
-{
-  "results": [...],
-  "next": "https://api.example.com/items?page=2"
+pagination={
+    "type": "next_url",
+    "field": "paging.next",
 }
 ```
 
-```python
-from engineer_kit import NextUrlPagination
+## Modo expert
 
-pagination = NextUrlPagination(next_url_field="next")
-```
-
-## Segurança de URLs fornecidas pela API
-
-Uma API pode fornecer a próxima URL. Por padrão, o connector recusa trocar de origem:
-
-```text
-https://api.example.com/page/1
-           ↓ permitido
-https://api.example.com/page/2
-
-https://api.example.com/page/1
-           ↓ bloqueado por padrão
-https://attacker.example/collect
-```
-
-Isso reduz o risco de encaminhar credenciais para outro host.
-
-## Loop infinito
-
-Além da lógica de cada estratégia, a biblioteca aplica:
-
-- detecção de loops de paginação;
-- limite máximo de páginas (`max_pages`).
-
-Configure `max_pages` de acordo com o volume esperado, mas evite remover limites em configs não confiáveis.
-
-## Page size não é extraction batch
-
-```text
-page_size=1000
-extraction_batch_size=25000
-```
-
-Nesse exemplo, aproximadamente 25 páginas podem preencher um batch. A API decide como paginar; a sessão decide quanto entregar ao consumidor por vez.
-
-## Paginação customizada
-
-Quando nenhuma estratégia padrão encaixa, implemente `PaginationStrategy`:
+As classes continuam públicas:
 
 ```python
-class MyPagination(PaginationStrategy):
-    def initial_params(self):
-        return {...}
+from engineer_kit import CursorPagination
 
-    def next_params(self, page, previous_params):
-        ...
+pagination = CursorPagination(
+    cursor_param="after",
+    cursor_field="next_cursor",
+)
 ```
 
-A classe pode ser testada sem rede usando `ParsedPage` construído manualmente.
+Implemente `PaginationStrategy` quando nenhuma estratégia oficial representar o contrato da origem.
+
+## Proteções
+
+Independentemente da forma de configuração, o runtime mantém:
+
+- `max_pages` defensivo;
+- detecção de loop de paginação;
+- bloqueio de paginação cross-origin por padrão;
+- reutilização da sessão HTTP/connection pool;
+- separação entre API page size e extraction batch size.
+
+```text
+page size da API
+       ↓
+stream de registros
+       ↓
+extraction batch (25.000 por padrão)
+```
+
+A abstração acontece no setup; a execução usa a estratégia já resolvida.
