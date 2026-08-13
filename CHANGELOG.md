@@ -4,7 +4,7 @@ Todas as mudanças relevantes do projeto serão documentadas aqui.
 
 O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando aplicável.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-08-13
 
 ### Added
 
