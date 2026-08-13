@@ -16,7 +16,8 @@ from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStra
 from engineer_kit.connectors.intent import as_date, infer_name, pick_records_path, project, read_path, resolve_select
 from engineer_kit.connectors.normalize import stringify
 from engineer_kit.connectors.pagination import AutoPagination, PaginationStrategy, ParsedPage, resolve_pagination
-from engineer_kit.http.auth import AuthStrategy, NoAuth
+from engineer_kit.http.auth import AuthStrategy
+from engineer_kit.http.auth_intent import resolve_auth
 from engineer_kit.http.client import HttpClient
 from engineer_kit.storage.state_store import StateStore
 
@@ -42,7 +43,7 @@ class RestConnector(APIConnector):
         initial_start: Optional[date | str] = None,
         date_field: Optional[DateFieldSpec] = None,
         incremental: IncrementalStrategy | bool | str | dict[str, Any] | None = None,
-        auth: Optional[AuthStrategy] = None,
+        auth: Optional[AuthStrategy | str] = None,
         date_params: Optional[DateParams | dict[str, Any]] = None,
         static_params: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
@@ -81,12 +82,14 @@ class RestConnector(APIConnector):
             runtime_incremental, state_store = self._stateful(resolved_name, state_store, mode, start)
         elif isinstance(incremental, dict):
             config = dict(incremental)
-            field = str(config.get("field", config.get("date_field"))) if config.get("field", config.get("date_field")) is not None else field
+            field_value = config.get("field", config.get("date_field"))
+            field = str(field_value) if field_value is not None else field
             mode = IncrementalMode(str(config["mode"]).lower()) if config.get("mode") else (IncrementalMode.DATA_DATE if field else IncrementalMode.INGESTION_DATE)
             start = as_date(config.get("initial_start", start))
             if config.get("start_param") or config.get("end_param") or config.get("param"):
+                start_param = config.get("start_param", config.get("param"))
                 self._date_params = DateParams(
-                    start=str(config.get("start_param", config.get("param"))) if config.get("start_param", config.get("param")) else None,
+                    start=str(start_param) if start_param else None,
                     end=str(config["end_param"]) if config.get("end_param") else None,
                     date_format=str(config.get("format", config.get("date_format", "%Y-%m-%d"))),
                 )
@@ -101,7 +104,7 @@ class RestConnector(APIConnector):
         else:
             runtime_incremental = None
 
-        http = http_client or HttpClient(auth=auth or NoAuth())
+        http = http_client or HttpClient(auth=resolve_auth(auth))
         super().__init__(
             name=resolved_name,
             http_client=http,
