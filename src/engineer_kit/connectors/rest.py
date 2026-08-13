@@ -74,11 +74,13 @@ class RestConnector(APIConnector):
         mode = incremental_mode
         field = date_field
         runtime_incremental: IncrementalStrategy | None
+        auto_state = False
 
         if isinstance(incremental, IncrementalStrategy):
             runtime_incremental = incremental
         elif isinstance(incremental, str):
             field, mode = incremental, IncrementalMode.DATA_DATE
+            auto_state = state_store is None
             runtime_incremental, state_store = self._stateful(resolved_name, state_store, mode, start)
         elif isinstance(incremental, dict):
             config = dict(incremental)
@@ -95,14 +97,21 @@ class RestConnector(APIConnector):
                 )
             if state_store is None and config.get("state_path"):
                 state_store = self._local_state(Path(str(config["state_path"])))
+            elif state_store is None:
+                auto_state = True
             runtime_incremental, state_store = self._stateful(resolved_name, state_store, mode, start)
         elif incremental is True:
             mode = IncrementalMode.DATA_DATE if field else IncrementalMode.INGESTION_DATE
+            auto_state = state_store is None
             runtime_incremental, state_store = self._stateful(resolved_name, state_store, mode, start)
         elif incremental is False or state_store is None:
             runtime_incremental = NoIncrementalStrategy()
         else:
             runtime_incremental = None
+
+        self._auto_state = auto_state
+        self._resolved_incremental_mode = mode
+        self._resolved_initial_start = start
 
         http = http_client or HttpClient(auth=resolve_auth(auth))
         super().__init__(
@@ -140,6 +149,17 @@ class RestConnector(APIConnector):
     def _stateful(cls, name: str, store: StateStore | None, mode: IncrementalMode, start: date | None):
         resolved = store or cls._local_state(Path(".engineer_kit") / "state.json")
         return IncrementalStrategy(name, resolved, mode=mode, initial_start=start), resolved
+
+    def _bind_auto_state_store(self, state_store: StateStore) -> None:
+        """Let a managed destination replace only the automatically chosen local state."""
+        if not self._auto_state:
+            return
+        self._incremental = IncrementalStrategy(
+            self.name,
+            state_store,
+            mode=self._resolved_incremental_mode,
+            initial_start=self._resolved_initial_start,
+        )
 
     @property
     def selected_fields(self) -> tuple[str, ...] | None:
@@ -219,6 +239,7 @@ class RestConnector(APIConnector):
             "records": self._resolved_records_path or "auto",
             "select": list(self._select or ()),
             "incremental": type(self._incremental).__name__,
+            "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "batch_size": self.extraction_batch_size,
         }
 
