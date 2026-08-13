@@ -1,43 +1,43 @@
 site_name: engineer_kit
-site_description: Ingestão confiável e streaming-first de APIs REST para destinos analíticos
-site_url: https://lima-ricardo.github.io/engineer_kit/
+site_description: Reliable, streaming-first REST API ingestion for analytical destinations
+site_url: https://lima-ricardo.github.io/engineer_kit/en/
 repo_url: https://github.com/Lima-Ricardo/engineer_kit
 repo_name: Lima-Ricardo/engineer_kit
-edit_uri: edit/main/docs/
-exclude_docs: |
-  en/**
+edit_uri: edit/main/docs/en/
+docs_dir: docs/en
+site_dir: site/en
 
 nav:
-  - Início: index.md
-  - Notícias: news.md
-  - Começando:
-      - Instalação: getting-started/installation.md
-      - Modelo mental: getting-started/mental-model.md
-      - Primeiro pipeline: getting-started/first-pipeline.md
-  - Guias:
-      - Autenticação & secrets: guides/authentication.md
-      - Paginação: guides/pagination.md
-      - Incremental & watermark: guides/incremental.md
+  - Home: index.md
+  - News: news.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Mental model: getting-started/mental-model.md
+      - First pipeline: getting-started/first-pipeline.md
+  - Guides:
+      - Authentication & secrets: guides/authentication.md
+      - Pagination: guides/pagination.md
+      - Incremental & watermarks: guides/incremental.md
       - Streaming & batching: guides/streaming.md
       - Managed mode: guides/managed-mode.md
       - Embedded mode / Spark: guides/embedded-mode.md
-      - Destinos: guides/destinations.md
+      - Destinations: guides/destinations.md
       - AWS / GCP / Azure: guides/platforms.md
       - Local Lab / UI: guides/ui.md
       - dbt: guides/dbt.md
-  - Arquitetura: architecture.md
-  - Referência:
+  - Architecture: architecture.md
+  - Reference:
       - YAML: reference/configuration.md
       - Python API: reference/python-api.md
       - CLI: reference/cli.md
-      - Segurança: reference/security.md
+      - Security: reference/security.md
       - Troubleshooting: reference/troubleshooting.md
       - FAQ: reference/faq.md
-      - Publicação (mantenedor): reference/releasing.md
+      - Releasing (maintainer): reference/releasing.md
 
 theme:
   name: material
-  language: pt-BR
+  language: en
   features:
     - navigation.tabs
     - navigation.sections
@@ -53,13 +53,13 @@ theme:
       accent: orange
       toggle:
         icon: material/weather-sunny
-        name: Modo claro
+        name: Switch to light mode
     - scheme: default
       primary: deep orange
       accent: orange
       toggle:
         icon: material/weather-night
-        name: Modo escuro
+        name: Switch to dark mode
 
 extra:
   alternate:

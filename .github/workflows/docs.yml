@@ -7,7 +7,9 @@ on:
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
+      - 'mkdocs.en.yml'
       - 'README.md'
+      - 'README.en.md'
       - 'pyproject.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -23,7 +25,7 @@ concurrency:
 
 jobs:
   build:
-    name: build documentation
+    name: build bilingual documentation
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,12 +41,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install '.[docs]'
           python -m pip check
-      - name: Build documentation
+      - name: Build Portuguese documentation
         run: mkdocs build --strict
+      - name: Build English documentation
+        run: mkdocs build --strict -f mkdocs.en.yml
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-        with:
-          enablement: true
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
