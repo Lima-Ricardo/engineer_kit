@@ -7,6 +7,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 import pyarrow.parquet as pq
 
@@ -27,7 +28,7 @@ logger = logging.getLogger("engineer_kit.storage.parquet")
 
 
 def _path_token(value: str) -> str:
-    """Return a filesystem-safe deterministic token for operator-supplied ids."""
+    """Return a filesystem-safe deterministic token for an ingestion identity."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
@@ -37,8 +38,10 @@ class ParquetDestination(Destination):
     APPEND writes one file per ingestion window. Its final filename uses a
     deterministic token derived from ``ingestion_key`` supplied by Pipeline,
     so retrying a window atomically replaces that window's previous file instead
-    of duplicating it. Raw run/key values never participate in filesystem paths.
-    OVERWRITE stages a complete replacement directory before promotion.
+    of duplicating it. Staging paths use an internal random token, so even a
+    caller-supplied/reused ``run_id`` cannot escape the base path or collide
+    with another concurrent attempt. OVERWRITE stages a complete replacement
+    directory before promotion.
     """
 
     def __init__(
@@ -98,17 +101,17 @@ class ParquetDestination(Destination):
         arrow_schema = bronze_arrow_schema(schema)
         total_rows = 0
         all_extra_fields: set[str] = set()
-        run_token = _path_token(context.run_id)
+        staging_token = uuid4().hex
         ingestion_token = _path_token(context.ingestion_key)
 
         if self._write_mode is WriteMode.OVERWRITE:
-            staged_dir = staging_root / f"replace-{run_token}"
+            staged_dir = staging_root / f"replace-{staging_token}"
             staged_dir.mkdir(parents=True, exist_ok=False)
-            temp_path = staged_dir / f"part-{run_token}.parquet"
+            temp_path = staged_dir / f"part-{staging_token}.parquet"
             final_path = temp_path
         else:
             endpoint_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = staging_root / f"{run_token}.parquet.tmp"
+            temp_path = staging_root / f"{staging_token}.parquet.tmp"
             final_path = endpoint_dir / f"part-{ingestion_token}.parquet"
 
         writer: pq.ParquetWriter | None = None
@@ -138,7 +141,7 @@ class ParquetDestination(Destination):
                 writer = None
 
             if self._write_mode is WriteMode.OVERWRITE:
-                self._promote_overwrite(staged_dir, endpoint_dir, run_token)
+                self._promote_overwrite(staged_dir, endpoint_dir, staging_token)
             elif total_rows:
                 temp_path.replace(final_path)
             else:
@@ -168,8 +171,8 @@ class ParquetDestination(Destination):
         )
 
     @staticmethod
-    def _promote_overwrite(staged_dir: Path, endpoint_dir: Path, run_token: str) -> None:
-        backup = endpoint_dir.with_name(f".{endpoint_dir.name}.backup-{run_token}")
+    def _promote_overwrite(staged_dir: Path, endpoint_dir: Path, staging_token: str) -> None:
+        backup = endpoint_dir.with_name(f".{endpoint_dir.name}.backup-{staging_token}")
         had_previous = endpoint_dir.exists()
         try:
             if had_previous:
