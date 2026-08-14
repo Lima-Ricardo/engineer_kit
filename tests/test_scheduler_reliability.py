@@ -4,6 +4,7 @@ import pytest
 
 from engineer_kit.orchestration.pipeline import PipelineResult, StepResult
 from engineer_kit.orchestration.scheduler import ScheduledPipelineError, _run_scheduled_pipeline
+from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger
 
 
 class _FakePipeline:
@@ -35,3 +36,19 @@ def test_scheduler_wrapper_raises_when_pipeline_returns_failed_step():
     )
     with pytest.raises(ScheduledPipelineError, match="orders: error"):
         _run_scheduled_pipeline(_FakePipeline(failed))
+
+
+def test_interval_trigger_rejects_zero_negative_and_boolean_intervals():
+    with pytest.raises(ValueError, match="intervalo total"):
+        IntervalTrigger()
+    with pytest.raises(ValueError, match="seconds"):
+        IntervalTrigger(seconds=-1)
+    with pytest.raises(ValueError, match="seconds"):
+        IntervalTrigger(seconds=True)
+
+
+def test_interval_and_cron_triggers_build_after_validation():
+    assert IntervalTrigger(minutes=5).to_apscheduler_trigger() is not None
+    assert CronTrigger("0 3 * * *").to_apscheduler_trigger() is not None
+    with pytest.raises(ValueError, match="cron_expression"):
+        CronTrigger("")
