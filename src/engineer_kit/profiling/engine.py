@@ -9,7 +9,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Sequence
 
-from engineer_kit.connectors.dedup import ExactRowDeduplicator
+from engineer_kit.connectors.dedup import (
+    ExactKeyDeduplicator,
+    ExactRowDeduplicator,
+    resolve_dedup_keys,
+)
 from engineer_kit.profiling.model import (
     PROFILE_REPORT_VERSION,
     CardinalityEstimate,
@@ -197,8 +201,15 @@ def profile_records(
     scope: str = "full",
     limit: int | None = None,
     fields: Sequence[str] | None = None,
+    key: str | Sequence[str] | None = None,
 ) -> ProfileReport:
-    """Profile a record stream without materializing the source dataset."""
+    """Profile a record stream without materializing the source dataset.
+
+    When ``key`` is provided, duplicate analysis is performed against that
+    candidate simple/composite primary key. Invalid key rows are counted rather
+    than aborting the profile so the report can explain why the key is unsafe.
+    Without ``key``, duplicate analysis compares complete rows.
+    """
     plan_tuple = resolve_profile_metrics(metrics)
     plan = set(plan_tuple)
     normalized_scope = scope.strip().lower()
@@ -217,7 +228,14 @@ def profile_records(
     )
     accumulators: dict[str, _FieldAccumulator] = {}
     records_analyzed = 0
-    duplicate_tracker = ExactRowDeduplicator() if "duplicates" in plan else None
+    duplicate_keys = resolve_dedup_keys(key) if key is not None else None
+    duplicate_tracker: ExactKeyDeduplicator | ExactRowDeduplicator | None = None
+    if "duplicates" in plan:
+        duplicate_tracker = (
+            ExactKeyDeduplicator(duplicate_keys, strict=False)
+            if duplicate_keys is not None
+            else ExactRowDeduplicator()
+        )
     duplicate_rows = 0
 
     try:
@@ -225,8 +243,10 @@ def profile_records(
             if limit is not None and records_analyzed >= limit:
                 break
             records_analyzed += 1
-            if duplicate_tracker is not None and not duplicate_tracker.add(record):
-                duplicate_rows += 1
+            if duplicate_tracker is not None:
+                seen = duplicate_tracker.add(record)
+                if seen is False:
+                    duplicate_rows += 1
             if not field_plan:
                 continue
 
@@ -310,12 +330,26 @@ def profile_records(
 
     duplicates = None
     if "duplicates" in plan:
+        invalid_key_rows = (
+            duplicate_tracker.invalid_key_count
+            if isinstance(duplicate_tracker, ExactKeyDeduplicator)
+            else 0
+        )
         duplicates = DuplicateProfile(
             duplicate_rows=duplicate_rows,
             unique_rows=records_analyzed - duplicate_rows,
+            key_fields=duplicate_keys,
+            invalid_key_rows=invalid_key_rows,
         )
         if duplicate_rows:
-            warnings.append(f"{duplicate_rows} registro(s) duplicado(s) observado(s)")
+            label = "PK" if duplicate_keys else "registro completo"
+            warnings.append(
+                f"{duplicate_rows} duplicata(s) por {label} observada(s)"
+            )
+        if invalid_key_rows:
+            warnings.append(
+                f"{invalid_key_rows} registro(s) com PK ausente, null, blank ou nao escalar"
+            )
 
     return ProfileReport(
         version=PROFILE_REPORT_VERSION,
