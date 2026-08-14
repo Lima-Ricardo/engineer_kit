@@ -11,45 +11,79 @@ from engineer_kit.profiling.config import connector_from_config
 from engineer_kit.profiling.engine import profile_records
 
 
-def _config_dict(*, dedup=False):
+def _config_dict(*, primary_key=None, dedup=False):
+    connector = {
+        "base_url": "https://example.test/orders",
+        "pagination": False,
+        "incremental": False,
+        "dedup": dedup,
+    }
+    if primary_key is not None:
+        connector["primary_key"] = primary_key
     return {
         "version": 1,
         "name": "orders",
-        "connector": {
-            "base_url": "https://example.test/orders",
-            "pagination": False,
-            "incremental": False,
-            "dedup": dedup,
-        },
+        "connector": connector,
         "run_log": False,
     }
 
 
-def test_declarative_dedup_defaults_false_and_round_trips_primary_key_list():
+def test_declarative_primary_key_and_dedup_are_independent_and_round_trip():
     default = pipeline_config_from_dict(_config_dict())
-    enabled = pipeline_config_from_dict(_config_dict(dedup=["customer_id"]))
-
-    assert default.connector.dedup is False
-    assert enabled.connector.dedup == ["customer_id"]
-    assert pipeline_config_to_dict(enabled)["connector"]["dedup"] == ["customer_id"]
-    connector = connector_from_config(enabled)
-    assert connector.dedup_enabled is True
-    assert connector.dedup_keys == ("customer_id",)
-
-
-def test_declarative_dedup_accepts_single_key_shorthand_and_composite_key():
-    single = pipeline_config_from_dict(_config_dict(dedup="customer_id"))
-    composite = pipeline_config_from_dict(
-        _config_dict(dedup=["tenant_id", "customer_id"])
+    mapped = pipeline_config_from_dict(_config_dict(primary_key=["customer_id"]))
+    enabled = pipeline_config_from_dict(
+        _config_dict(primary_key=["customer_id"], dedup=True)
     )
 
-    assert single.connector.dedup == ["customer_id"]
-    assert composite.connector.dedup == ["tenant_id", "customer_id"]
+    assert default.connector.primary_key is None
+    assert default.connector.dedup is False
+    assert mapped.connector.primary_key == ["customer_id"]
+    assert mapped.connector.dedup is False
+    assert enabled.connector.primary_key == ["customer_id"]
+    assert enabled.connector.dedup is True
+
+    serialized = pipeline_config_to_dict(enabled)["connector"]
+    assert serialized["primary_key"] == ["customer_id"]
+    assert serialized["dedup"] is True
+
+    connector = connector_from_config(enabled)
+    assert connector.primary_key == ("customer_id",)
+    assert connector.dedup_enabled is True
 
 
-def test_declarative_dedup_rejects_true_without_primary_key():
-    with pytest.raises(PipelineConfigError, match="dedup=True e ambiguo"):
+def test_declarative_primary_key_accepts_single_and_composite_identity():
+    single = pipeline_config_from_dict(_config_dict(primary_key="customer_id"))
+    composite = pipeline_config_from_dict(
+        _config_dict(primary_key=["tenant_id", "customer_id"])
+    )
+
+    assert single.connector.primary_key == ["customer_id"]
+    assert composite.connector.primary_key == ["tenant_id", "customer_id"]
+    assert single.connector.dedup is False
+    assert composite.connector.dedup is False
+
+
+def test_declarative_dedup_true_requires_primary_key():
+    with pytest.raises(PipelineConfigError, match="dedup=true exige connector.primary_key"):
         pipeline_config_from_dict(_config_dict(dedup=True))
+
+
+def test_declarative_dedup_must_be_boolean():
+    with pytest.raises(PipelineConfigError, match="connector.dedup deve ser booleano"):
+        pipeline_config_from_dict(_config_dict(dedup="false"))
+
+    with pytest.raises(PipelineConfigError, match="connector.dedup deve ser booleano"):
+        pipeline_config_from_dict(_config_dict(dedup=["customer_id"]))
+
+
+def test_configured_primary_key_is_available_to_profile_with_dedup_disabled():
+    config = pipeline_config_from_dict(
+        _config_dict(primary_key=["customer_id"], dedup=False)
+    )
+    connector = connector_from_config(config)
+
+    assert connector.primary_key == ("customer_id",)
+    assert connector.dedup_enabled is False
 
 
 def test_quality_summary_preserves_not_computed_semantics():
