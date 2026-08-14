@@ -418,27 +418,51 @@ def _validate_keys(value: Any, allowed: set[str], path: str) -> None:
         )
 
 
+def _validate_optional_mapping(value: Any, allowed: set[str], path: str) -> None:
+    if value is None:
+        return
+    _validate_keys(value, allowed, path)
+
+
+def _validate_mapping_value(value: Any, path: str) -> None:
+    if value is not None and not isinstance(value, dict):
+        raise PipelineConfigError(f"'{path}' deve ser um objeto/mapping.")
+
+
 def _validate_shape(data: dict[str, Any]) -> None:
     _validate_keys(data, _ROOT_KEYS, "root")
     connector = data.get("connector")
     _validate_keys(connector, _CONNECTOR_KEYS, "connector")
 
     if "auth" in connector:
-        _validate_keys(connector.get("auth") or {}, _AUTH_KEYS, "connector.auth")
+        _validate_optional_mapping(connector.get("auth"), _AUTH_KEYS, "connector.auth")
+
     pagination = connector.get("pagination")
+    if pagination is not None and not isinstance(pagination, (bool, str, dict)):
+        raise PipelineConfigError("connector.pagination deve ser string, bool ou objeto.")
     if isinstance(pagination, dict):
         _validate_keys(pagination, _PAGINATION_KEYS, "connector.pagination")
-        if "params" in pagination and not isinstance(pagination["params"], dict):
-            raise PipelineConfigError("connector.pagination.params deve ser um mapping.")
+        if "params" in pagination:
+            _validate_mapping_value(
+                pagination.get("params"),
+                "connector.pagination.params",
+            )
+
     incremental = connector.get("incremental")
+    if incremental is not None and not isinstance(incremental, (bool, str, dict)):
+        raise PipelineConfigError("connector.incremental deve ser bool, string ou objeto.")
     if isinstance(incremental, dict):
         _validate_keys(incremental, _INCREMENTAL_KEYS, "connector.incremental")
+
     if "date_params" in connector:
-        _validate_keys(
-            connector.get("date_params") or {},
+        _validate_optional_mapping(
+            connector.get("date_params"),
             _DATE_PARAM_KEYS,
             "connector.date_params",
         )
+    for key in ("params", "static_params"):
+        if key in connector:
+            _validate_mapping_value(connector.get(key), f"connector.{key}")
 
     columns = data.get("columns", [])
     if not isinstance(columns, list):
@@ -446,19 +470,37 @@ def _validate_shape(data: dict[str, Any]) -> None:
     for index, column in enumerate(columns):
         _validate_keys(column, _COLUMN_KEYS, f"columns[{index}]")
 
+    destination = data.get("destination")
     if "destination" in data:
-        _validate_keys(data.get("destination") or {}, _DESTINATION_KEYS, "destination")
+        _validate_optional_mapping(destination, _DESTINATION_KEYS, "destination")
+    if isinstance(destination, dict) and "options" in destination:
+        _validate_mapping_value(destination.get("options"), "destination.options")
+
     if "state" in data and "state_store" in data:
         raise PipelineConfigError("Use 'state' ou o alias legado 'state_store', nao os dois.")
     state = data.get("state", data.get("state_store"))
+    if state is not None and not isinstance(state, (str, dict)):
+        raise PipelineConfigError("state deve ser string ou objeto.")
     if isinstance(state, dict):
         _validate_keys(state, _STATE_KEYS, "state")
+        if "options" in state:
+            _validate_mapping_value(state.get("options"), "state.options")
+
+    secrets = data.get("secrets")
     if "secrets" in data:
-        _validate_keys(data.get("secrets") or {}, _SECRETS_KEYS, "secrets")
+        _validate_optional_mapping(secrets, _SECRETS_KEYS, "secrets")
+
     run_log = data.get("run_log")
+    if run_log is not None and not isinstance(run_log, (bool, dict)):
+        raise PipelineConfigError("run_log deve ser booleano ou um objeto de configuracao.")
     if isinstance(run_log, dict):
         _validate_keys(run_log, _RUN_LOG_KEYS, "run_log")
+        if "options" in run_log:
+            _validate_mapping_value(run_log.get("options"), "run_log.options")
+
     transform = data.get("transform")
+    if transform is not None and not isinstance(transform, (str, dict)):
+        raise PipelineConfigError("transform deve ser string ou objeto.")
     if isinstance(transform, dict):
         _validate_keys(transform, _TRANSFORM_KEYS, "transform")
 
@@ -490,7 +532,11 @@ def _incremental_from_value(value: Any, *, present: bool) -> IncrementalConfig:
             return IncrementalConfig(enabled=False, mode="ingestion_date")
         return IncrementalConfig(enabled=True, mode="data_date", date_field=value)
     if isinstance(value, dict):
-        enabled = bool(value.get("enabled", True))
+        enabled = _strict_bool(
+            value.get("enabled"),
+            path="connector.incremental.enabled",
+            default=True,
+        )
         field_value = value.get("date_field", value.get("field"))
         date_field = str(field_value) if field_value is not None else None
         mode = str(value.get("mode") or ("data_date" if date_field else "ingestion_date"))
@@ -529,7 +575,14 @@ def _run_log_from_value(value: Any) -> RunLogConfig:
     if value is None:
         return RunLogConfig()
     if isinstance(value, dict):
-        return RunLogConfig(**value)
+        values = dict(value)
+        if "enabled" in values:
+            values["enabled"] = _strict_bool(
+                values.get("enabled"),
+                path="run_log.enabled",
+                default=True,
+            )
+        return RunLogConfig(**values)
     raise PipelineConfigError("run_log deve ser booleano ou um objeto de configuracao.")
 
 
@@ -628,17 +681,24 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
             f"Campo obrigatorio faltando na configuracao: {exc}"
         ) from exc
 
-    try:
-        version = int(data.get("version", CURRENT_PIPELINE_CONFIG_VERSION))
-    except (TypeError, ValueError) as exc:
-        raise PipelineConfigError("version deve ser um inteiro.") from exc
+    raw_version = data.get("version", CURRENT_PIPELINE_CONFIG_VERSION)
+    if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+        raise PipelineConfigError("version deve ser um inteiro.")
+    version = raw_version
     if version != CURRENT_PIPELINE_CONFIG_VERSION:
         raise PipelineConfigError(
             f"config version {version} nao suportada; "
             f"use version={CURRENT_PIPELINE_CONFIG_VERSION}."
         )
 
-    secrets = SecretsConfig(**(data.get("secrets", {}) or {}))
+    secrets_data = dict(data.get("secrets") or {})
+    if "allow_inline_values" in secrets_data:
+        secrets_data["allow_inline_values"] = _strict_bool(
+            secrets_data.get("allow_inline_values"),
+            path="secrets.allow_inline_values",
+            default=False,
+        )
+    secrets = SecretsConfig(**secrets_data)
     _validate_no_inline_secrets(data, secrets)
 
     connector = ConnectorConfig(
