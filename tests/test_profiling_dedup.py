@@ -159,10 +159,20 @@ def test_primary_key_does_not_enable_dedup_by_itself():
 
     assert connector.primary_key == ("id",)
     assert connector.dedup_enabled is False
+    assert connector.dedup_keys is None
     assert len(records) == 3
     assert report.duplicates is not None
     assert report.duplicates.key_fields == ("id",)
     assert report.duplicates.duplicate_rows == 1
+
+
+def test_explain_reports_identity_and_dedup_policy_separately():
+    connector = _connector(primary_key=["id"], dedup=False)
+
+    plan = connector.explain()
+
+    assert plan["primary_key"] == ["id"]
+    assert plan["dedup"] is False
 
 
 def test_dedup_is_off_by_default_and_enabled_policy_filters_complete_records_by_pk():
