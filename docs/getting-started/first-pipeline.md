@@ -1,25 +1,37 @@
 # Primeiro pipeline, passo a passo
 
-Vamos consumir uma API fictícia de pedidos, paginada por número de página, e salvar em Parquet.
+O caminho principal do `engineer_kit` é **intent-driven**: você informa o que sabe sobre a origem e o destino; a biblioteca resolve adapters, estado, auditoria, paginação e schema quando isso pode ser feito com segurança.
 
-## 1. Instale o extra Parquet
+## 1. Instale somente o destino que você vai usar
 
 ```bash
 pip install "engineer_kit[parquet]"
 ```
 
-## 2. Entenda a API
+## 2. Comece pelo mínimo
 
-Suponha que a documentação diga:
+Para uma API simples, `GET` já é o método padrão, o nome do conector é derivado da URL e a lista de registros é detectada quando não há ambiguidade:
 
-```text
-GET https://api.example.com/orders
-?page=1
-&per_page=1000
-&updated_from=2026-01-01
+```python
+from engineer_kit import RestConnector
+
+records = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+).collect()
 ```
 
-E a resposta:
+Uma string em `auth` representa Bearer auth. Para produção, os objetos `BearerAuth`, `SecretProvider` e demais contratos continuam disponíveis quando você quiser controlar a origem do segredo explicitamente.
+
+## 3. Declare somente o que a API exige
+
+Suponha que a API use páginas de 1.000 registros e aceite `updated_from`:
+
+```text
+GET /orders?page=1&per_page=1000&updated_from=2026-01-01
+```
+
+A resposta é:
 
 ```json
 {
@@ -29,88 +41,146 @@ E a resposta:
 }
 ```
 
-Antes de escrever código, identifique:
+Você não precisa instanciar classes de paginação ou estado:
 
-- método: `GET`;
-- lista: `results`;
-- paginação: `page` + `per_page`;
-- filtro incremental: `updated_from`;
-- campo de data do registro: `updated_at`.
-
-## 3. Crie `pipelines/orders.yaml`
-
-```yaml
-name: orders
-
-connector:
-  base_url: https://api.example.com/orders
-  method: GET
-  records_path: results
-  extraction_batch_size: 25000
-  pagination:
-    type: page
-    params:
-      page_param: page
-      page_size_param: per_page
-      page_size: 1000
-  incremental:
-    mode: data_date
-    initial_start: "2026-01-01"
-    date_field: updated_at
-  date_params:
-    start: updated_from
-
-columns:
-  - name: id
-    dtype: bigint
-  - name: updated_at
-    dtype: timestamp
-
-destination:
-  type: parquet
-  path: ./lake
-  schema: bronze
-  batch_size: 5000
-  write_mode: append
-
-state:
-  type: auto
-
-run_log:
-  enabled: true
-  type: auto
-
-secrets:
-  type: env
+```python
+connector = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+    pagination={"type": "page", "size": 1000},
+    incremental={
+        "field": "updated_at",
+        "param": "updated_from",
+        "initial_start": "2026-01-01",
+    },
+)
 ```
 
-## 4. Execute
+Para cursor comum, basta:
 
-```bash
-engineer_kit run-config pipelines/orders.yaml
+```python
+pagination="cursor"
 ```
 
-No primeiro run, o estado começa em `2026-01-01`. Depois de a Bronze ser confirmada, o `StateStore` grava o novo watermark.
+`Cursor`, `cursor` e outras variações de capitalização são normalizadas uma vez antes da execução.
 
-## 5. Execute novamente
+## 4. Colete, faça streaming ou grave diretamente
 
-A segunda execução lê o watermark anterior e monta uma nova janela incremental. Você não precisa consultar a Bronze inteira para descobrir a última data.
+Dataset pequeno:
 
-## 6. O que acontece se falhar?
+```python
+records = connector.collect()
+```
 
-Se a API ou o destino falhar:
+Volume maior, com batches limitados:
+
+```python
+for batch in connector.stream():
+    process(batch)
+```
+
+Managed mode, sem construir `Destination`, `StateStore` ou `RunLogBackend` manualmente:
+
+```python
+result = connector.to(
+    "parquet",
+    "bronze.orders",
+    path="./lake",
+).run()
+```
+
+Ao usar um destino oficial, o managed flow resolve o backend natural de estado e auditoria. O checkpoint continua sendo confirmado somente depois de a carga no destino terminar com sucesso.
+
+## 5. Se quiser DuckDB
+
+```python
+result = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+    pagination="cursor",
+    incremental=True,
+).to(
+    "duckdb",
+    "bronze.orders",
+    path="analytics.duckdb",
+).run()
+```
+
+A conexão, destino Bronze, estado e auditoria DuckDB são resolvidos internamente. Passe objetos explícitos apenas quando precisar substituir os defaults.
+
+## 6. Se quiser dbt depois da ingestão
+
+Quando houver um `dbt_project.yml` no projeto ou em um diretório pai:
+
+```python
+result = (
+    connector
+    .to("duckdb", "bronze.orders", path="analytics.duckdb")
+    .dbt(select="orders")
+    .run()
+)
+```
+
+O projeto dbt é descoberto uma vez. `project_dir`, `profiles_dir` e `target` continuam disponíveis como seletores quando o ambiente não segue o layout padrão.
+
+## 7. Controle a resposta sem boilerplate
+
+Se a lista estiver aninhada:
+
+```python
+records="payload.data.orders"
+```
+
+Se você quiser somente algumas colunas:
+
+```python
+select=["id", "customer_id", "amount", "updated_at"]
+```
+
+Isso evita loops manuais apenas para remover campos que você não pretende consumir.
+
+## 8. Entenda sem abrir a implementação
+
+```python
+print(connector.explain())
+```
+
+`explain()` mostra a resolução segura do conector sem executar uma nova chamada e sem exibir o valor da autenticação.
+
+## 9. Regra de performance
+
+A conveniência não roda heurísticas por registro. Resolução de configuração acontece antes da extração; detecção de paginação e do caminho de registros usa a resposta que já foi buscada e é cacheada para as próximas páginas daquela execução.
 
 ```text
-checkpoint anterior permanece
+intenção do usuário
+      ↓
+resolução única
+      ↓
+objetos tipados
+      ↓
+hot path direto e em batches
 ```
 
-Se o destino persistir, mas o checkpoint falhar, o run é marcado como erro de checkpoint. Os adapters oficiais usam uma identidade determinística de ingestão para tornar o retry da mesma janela seguro.
+## 10. Modo avançado continua disponível
 
-## 7. E se a API adicionar um campo?
+Nada impede o uso explícito dos contratos internos:
 
-O schema declarado não é alterado automaticamente. O campo inesperado é preservado em `_extra`, e o registro original continua em `_raw`.
+```python
+RestConnector(
+    name="orders",
+    base_url=url,
+    pagination=CursorPagination(
+        cursor_param="after",
+        cursor_field="meta.next_cursor",
+    ),
+    auth=BearerAuth(provider, "API_TOKEN"),
+    incremental=IncrementalStrategy(...),
+)
+```
 
-## 8. Próximos passos
+Use esse nível quando a API realmente exigir controle especial; não como boilerplate obrigatório.
+
+## Próximos passos
 
 - [Autenticação](../guides/authentication.md)
 - [Paginação](../guides/pagination.md)

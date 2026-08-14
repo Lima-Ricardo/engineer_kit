@@ -4,7 +4,40 @@ Todas as mudanças relevantes do projeto serão documentadas aqui.
 
 O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando aplicável.
 
-## [0.1.0] - Unreleased
+## [0.2.0] - 2026-08-13
+
+### Added
+
+- API pública intent-driven para reduzir boilerplate sem simplificar o core tipado.
+- `RestConnector(...).collect()` como caminho de conveniência para datasets pequenos.
+- `RestConnector(...).stream()` para consumo em batches limitados.
+- Seletores de paginação por string, bool ou dict, incluindo `pagination="cursor"` e modo `auto` conservador.
+- Autenticação Bearer simplificada com `auth=<string>` mantendo `AuthStrategy`/`SecretProvider` para controle explícito.
+- Descoberta automática do nome do conector e da lista de registros quando não há ambiguidade.
+- `records=` para caminhos aninhados e `select=` para projeção de campos sem loops manuais.
+- Incremental simplificado com `True`, nome do campo ou dict de seletores.
+- `connector.to("duckdb" | "parquet" | "delta", ...).run()` para managed ingestion sem construção manual de adapters.
+- Inferência inicial de schema a partir de uma amostra limitada, sem materializar toda a extração.
+- Resolução automática do state store e do run log naturais do destino no managed flow.
+- `connector.explain()` para inspecionar a resolução sem nova chamada HTTP e sem expor autenticação.
+- Fachada dbt com descoberta de projeto e encadeamento `.dbt(...).run()` após ingestão.
+- Documentação bilíngue atualizada para o fluxo 95% abstração / 5% configuração explícita.
+
+### Performance
+
+- Resolução de strings/dicts acontece uma vez antes do hot path.
+- Paginação automática reutiliza a primeira resposta real; não dispara requests de descoberta.
+- Caminho de registros e estratégia de paginação são cacheados durante a execução.
+- Schema inference usa somente um prefixo limitado do stream e recoloca a amostra no mesmo iterador.
+- Streaming, batching e connection pooling existentes permanecem no caminho de produção.
+
+### Compatibility
+
+- Objetos `PaginationStrategy`, `IncrementalStrategy`, `AuthStrategy`, `StateStore`, `Destination` e `RunLogBackend` continuam aceitos diretamente.
+- `extract_incremental()` e `ExtractionSession` permanecem disponíveis para workloads que precisam controlar explicitamente o checkpoint.
+- Opções legadas como `records_path`, `static_params`, `date_field` e `state_store` continuam suportadas.
+
+## [0.1.0] - 2026-08-13
 
 ### Added
 

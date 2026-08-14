@@ -1,6 +1,7 @@
 from engineer_kit.connectors.pagination import (
     NEXT_URL_KEY,
     STANDARD_PAGINATION_TYPES,
+    AutoPagination,
     CursorPagination,
     LinkHeaderPagination,
     NextUrlPagination,
@@ -88,7 +89,27 @@ def test_next_url_pagination_reads_url_field_from_body():
     assert strategy.next_params(page_without_next, {}) is None
 
 
+def test_auto_pagination_resolves_cursor_once():
+    strategy = AutoPagination()
+    first = ParsedPage(records=[{}], raw={"next_cursor": "abc"})
+    assert strategy.next_params(first, {}) == {"cursor": "abc"}
+    assert strategy.resolved_type == "cursor"
+
+    second = ParsedPage(records=[{}], raw={"next_cursor": None})
+    assert strategy.next_params(second, {"cursor": "abc"}) is None
+    assert strategy.resolved_type == "cursor"
+
+
 def test_standard_pagination_types_catalog_lists_all_strategies():
-    assert set(STANDARD_PAGINATION_TYPES) == {"none", "page", "offset", "cursor", "link_header", "next_url"}
+    assert set(STANDARD_PAGINATION_TYPES) == {
+        "none",
+        "auto",
+        "page",
+        "offset",
+        "cursor",
+        "link_header",
+        "next_url",
+    }
+    assert STANDARD_PAGINATION_TYPES["auto"] is AutoPagination
     assert STANDARD_PAGINATION_TYPES["page"] is PageNumberPagination
     assert STANDARD_PAGINATION_TYPES["link_header"] is LinkHeaderPagination

@@ -1,22 +1,34 @@
 # First pipeline, step by step
 
-We will ingest a fictional orders API, paginate by page number, and persist the Bronze layer as Parquet.
+The primary `engineer_kit` path is **intent-driven**: describe what you know about the source and destination, and let the library resolve adapters, state, audit, pagination, and schema when that can be done safely.
 
-## 1. Install the Parquet extra
+## 1. Install only the destination you need
 
 ```bash
 pip install "engineer_kit[parquet]"
 ```
 
-## 2. Understand the API contract
+## 2. Start with the minimum
 
-Assume the API documentation shows:
+For a simple API, `GET` is already the default, the connector name is derived from the URL, and the records list is detected when there is no ambiguity:
+
+```python
+from engineer_kit import RestConnector
+
+records = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+).collect()
+```
+
+A string passed to `auth` means Bearer auth. In production, `BearerAuth`, `SecretProvider`, and the other explicit contracts remain available when you want to control where the secret comes from.
+
+## 3. Declare only what the API requires
+
+Assume the API uses 1,000-record pages and accepts `updated_from`:
 
 ```text
-GET https://api.example.com/orders
-?page=1
-&per_page=1000
-&updated_from=2026-01-01
+GET /orders?page=1&per_page=1000&updated_from=2026-01-01
 ```
 
 Response:
@@ -29,82 +41,146 @@ Response:
 }
 ```
 
-Identify these facts before writing configuration:
+You do not need to instantiate pagination or state classes:
 
-- method: `GET`;
-- records list: `results`;
-- pagination: `page` + `per_page`;
-- incremental filter: `updated_from`;
-- record date field: `updated_at`.
-
-## 3. Create `pipelines/orders.yaml`
-
-```yaml
-name: orders
-
-connector:
-  base_url: https://api.example.com/orders
-  method: GET
-  records_path: results
-  extraction_batch_size: 25000
-  pagination:
-    type: page
-    params:
-      page_param: page
-      page_size_param: per_page
-      page_size: 1000
-  incremental:
-    mode: data_date
-    initial_start: "2026-01-01"
-    date_field: updated_at
-  date_params:
-    start: updated_from
-
-columns:
-  - name: id
-    dtype: bigint
-  - name: updated_at
-    dtype: timestamp
-
-destination:
-  type: parquet
-  path: ./lake
-  schema: bronze
-  batch_size: 5000
-  write_mode: append
-
-state:
-  type: auto
-
-run_log:
-  enabled: true
-  type: auto
-
-secrets:
-  type: env
+```python
+connector = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+    pagination={"type": "page", "size": 1000},
+    incremental={
+        "field": "updated_at",
+        "param": "updated_from",
+        "initial_start": "2026-01-01",
+    },
+)
 ```
 
-## 4. Run it
+For a conventional cursor API, this is enough:
 
-```bash
-engineer_kit run-config pipelines/orders.yaml
+```python
+pagination="cursor"
 ```
 
-On the first run, the state starts at `2026-01-01`. Only after Bronze persistence succeeds does the `StateStore` receive the new watermark.
+`Cursor`, `cursor`, and capitalization variants are normalized once before execution.
 
-## 5. Run it again
+## 4. Collect, stream, or persist directly
 
-The next execution reads the previous watermark and creates a new incremental window. You do not need to scan the full Bronze table to discover the last processed date.
+Small dataset:
 
-## 6. What happens on failure?
+```python
+records = connector.collect()
+```
 
-If the API or destination fails, the previous checkpoint remains unchanged. If destination persistence succeeds but the checkpoint fails, the run is marked as a checkpoint error. Official adapters use deterministic ingestion identity so retrying the same window is safe.
+Larger volume with bounded batches:
 
-## 7. What if the API adds a field?
+```python
+for batch in connector.stream():
+    process(batch)
+```
 
-The declared schema is not mutated automatically. Unexpected fields are preserved in `_extra`, while `_raw` retains the original record.
+Managed mode, without constructing `Destination`, `StateStore`, or `RunLogBackend` manually:
 
-## 8. Next steps
+```python
+result = connector.to(
+    "parquet",
+    "bronze.orders",
+    path="./lake",
+).run()
+```
+
+With an official destination, the managed flow resolves its natural state and audit backends. The checkpoint is still committed only after destination persistence succeeds.
+
+## 5. DuckDB
+
+```python
+result = RestConnector(
+    base_url="https://api.example.com/orders",
+    auth=token,
+    pagination="cursor",
+    incremental=True,
+).to(
+    "duckdb",
+    "bronze.orders",
+    path="analytics.duckdb",
+).run()
+```
+
+The DuckDB connection, Bronze destination, state, and audit backend are resolved internally. Pass explicit objects only when you need to override the defaults.
+
+## 6. Add dbt after ingestion
+
+When a `dbt_project.yml` exists in the project or a parent directory:
+
+```python
+result = (
+    connector
+    .to("duckdb", "bronze.orders", path="analytics.duckdb")
+    .dbt(select="orders")
+    .run()
+)
+```
+
+The dbt project is discovered once. `project_dir`, `profiles_dir`, and `target` remain available as selectors when the environment does not follow the standard layout.
+
+## 7. Control the response without boilerplate
+
+For a nested records list:
+
+```python
+records="payload.data.orders"
+```
+
+For a small field projection:
+
+```python
+select=["id", "customer_id", "amount", "updated_at"]
+```
+
+This avoids manual loops whose only purpose is dropping fields you never intended to consume.
+
+## 8. Inspect the plan without opening the implementation
+
+```python
+print(connector.explain())
+```
+
+`explain()` reports the safe connector resolution without issuing another request and without exposing the authentication value.
+
+## 9. Performance rule
+
+Convenience does not run heuristics per record. Configuration is resolved before extraction; pagination and records-path detection use a response that was already fetched and cache their decision for the remaining execution.
+
+```text
+user intent
+    ↓
+one-time resolution
+    ↓
+typed runtime objects
+    ↓
+direct batched hot path
+```
+
+## 10. Expert mode is still available
+
+The explicit contracts remain valid:
+
+```python
+RestConnector(
+    name="orders",
+    base_url=url,
+    pagination=CursorPagination(
+        cursor_param="after",
+        cursor_field="meta.next_cursor",
+    ),
+    auth=BearerAuth(provider, "API_TOKEN"),
+    incremental=IncrementalStrategy(...),
+)
+```
+
+Use that level when the source genuinely needs special control, not as mandatory boilerplate.
+
+## Next steps
 
 - [Authentication](../guides/authentication.md)
 - [Pagination](../guides/pagination.md)

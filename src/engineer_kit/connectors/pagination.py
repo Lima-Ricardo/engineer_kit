@@ -1,15 +1,7 @@
-"""Estrategias de paginacao.
+"""Pagination strategies and ergonomic resolution.
 
-Cada estrategia so sabe duas coisas: quais params vao na primeira
-requisicao, e — dado o resultado da pagina atual — quais params vao na
-proxima (ou None se acabou). Isso e testavel sem rede: basta montar um
-ParsedPage na mao.
-
-`pagination` e sempre um parametro obrigatorio de um conector — nao
-existe um tipo padrao "por baixo dos panos", porque o jeito de paginar
-muda de API para API e forcar essa escolha explicita evita surpresa.
-`STANDARD_PAGINATION_TYPES` lista todo tipo padrao que a biblioteca ja
-sabe lidar; para algo fora dessa lista, implemente PaginationStrategy.
+Strict strategy objects remain the runtime contract. Public callers may pass a
+string or a small mapping; resolution happens once before the hot path.
 """
 
 from __future__ import annotations
@@ -19,40 +11,34 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-# chave sentinela: quando next_params() devolve um dict contendo essa
-# chave, extract() para de montar a proxima requisicao a partir da
-# base_url do conector e chama essa URL absoluta diretamente -- e o
-# caso de paginacao por header Link ou por um campo "next" na resposta,
-# onde a API ja devolve a URL completa da proxima pagina.
 NEXT_URL_KEY = "__next_url__"
 
 
 @dataclass
 class ParsedPage:
-    """Resultado de parsear uma resposta de API: registros extraidos, o
-    JSON bruto (para ler cursores) e os headers da resposta (para
-    paginacao por header, ex.: Link)."""
-
     records: list[dict[str, Any]]
     raw: Any
     headers: dict[str, str] = field(default_factory=dict)
 
 
+def _get_path(value: Any, path: str) -> Any:
+    current = value
+    for key in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
 class PaginationStrategy(ABC):
     @abstractmethod
-    def initial_params(self) -> dict[str, Any]:
-        """Parametros de paginacao da primeira requisicao."""
+    def initial_params(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
-        """Parametros da proxima pagina, ou None se a paginacao terminou.
-        Pode devolver {NEXT_URL_KEY: "https://..."} para pedir que a
-        proxima requisicao use essa URL absoluta diretamente."""
+    def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None: ...
 
 
 class NoPagination(PaginationStrategy):
-    """API devolve tudo numa unica resposta."""
-
     def initial_params(self) -> dict[str, Any]:
         return {}
 
@@ -61,8 +47,6 @@ class NoPagination(PaginationStrategy):
 
 
 class PageNumberPagination(PaginationStrategy):
-    """?page=1&per_page=100 — para quando a pagina vem incompleta (fim dos dados)."""
-
     def __init__(
         self,
         page_param: str = "page",
@@ -81,13 +65,10 @@ class PageNumberPagination(PaginationStrategy):
     def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
         if len(page.records) < self._page_size:
             return None
-        next_page = previous_params[self._page_param] + 1
-        return {**previous_params, self._page_param: next_page}
+        return {**previous_params, self._page_param: previous_params[self._page_param] + 1}
 
 
 class OffsetPagination(PaginationStrategy):
-    """?offset=0&limit=100 — mesma logica de parada que PageNumberPagination."""
-
     def __init__(
         self,
         offset_param: str = "offset",
@@ -106,13 +87,10 @@ class OffsetPagination(PaginationStrategy):
     def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
         if len(page.records) < self._limit:
             return None
-        next_offset = previous_params[self._offset_param] + self._limit
-        return {**previous_params, self._offset_param: next_offset}
+        return {**previous_params, self._offset_param: previous_params[self._offset_param] + self._limit}
 
 
 class CursorPagination(PaginationStrategy):
-    """Cursor devolvido dentro do corpo da resposta, ex: {"next_cursor": "abc123", "results": [...]}."""
-
     def __init__(self, cursor_param: str = "cursor", cursor_field: str = "next_cursor") -> None:
         self._cursor_param = cursor_param
         self._cursor_field = cursor_field
@@ -121,20 +99,13 @@ class CursorPagination(PaginationStrategy):
         return {}
 
     def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
-        if not isinstance(page.raw, dict):
-            return None
-        cursor = page.raw.get(self._cursor_field)
+        cursor = _get_path(page.raw, self._cursor_field)
         if not cursor:
             return None
         return {**previous_params, self._cursor_param: cursor}
 
 
 class LinkHeaderPagination(PaginationStrategy):
-    """Paginacao via header HTTP `Link` (RFC 5988), ex.: GitHub, Stripe:
-    `Link: <https://api.exemplo.com/items?page=2>; rel="next"`. A API ja
-    devolve a URL completa da proxima pagina, entao nada e montado a
-    partir da base_url do conector."""
-
     _LINK_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
 
     def __init__(self, header_name: str = "Link") -> None:
@@ -148,15 +119,10 @@ class LinkHeaderPagination(PaginationStrategy):
         if not link_header:
             return None
         match = self._LINK_RE.search(link_header)
-        if not match:
-            return None
-        return {NEXT_URL_KEY: match.group(1)}
+        return {NEXT_URL_KEY: match.group(1)} if match else None
 
 
 class NextUrlPagination(PaginationStrategy):
-    """Paginacao via campo de URL completa no corpo da resposta, ex.:
-    {"next": "https://api.exemplo.com/items?page=2", "results": [...]}."""
-
     def __init__(self, next_url_field: str = "next") -> None:
         self._next_url_field = next_url_field
 
@@ -164,22 +130,150 @@ class NextUrlPagination(PaginationStrategy):
         return {}
 
     def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
-        if not isinstance(page.raw, dict):
-            return None
-        next_url = page.raw.get(self._next_url_field)
-        if not next_url:
-            return None
-        return {NEXT_URL_KEY: next_url}
+        next_url = _get_path(page.raw, self._next_url_field)
+        return {NEXT_URL_KEY: next_url} if next_url else None
 
 
-# Catalogo dos tipos de paginacao padrao que a biblioteca ja resolve.
-# O jeito de paginar muda de API para API -- use isto para descobrir
-# qual estrategia bate com a documentacao da API que voce esta integrando.
+class AutoPagination(PaginationStrategy):
+    """Conservatively resolve next-link/cursor pagination from the first page."""
+
+    _NEXT_URL_PATHS = ("next", "next_url", "links.next", "pagination.next", "paging.next")
+    _CURSOR_PATHS = (
+        ("next_cursor", "cursor"),
+        ("nextCursor", "cursor"),
+        ("meta.next_cursor", "cursor"),
+        ("pagination.next_cursor", "cursor"),
+        ("paging.next_cursor", "cursor"),
+        ("continuation_token", "continuation_token"),
+        ("next_token", "token"),
+        ("nextPageToken", "pageToken"),
+    )
+
+    def __init__(self) -> None:
+        self._resolved: PaginationStrategy | None = None
+        self.resolved_type: str | None = None
+
+    def initial_params(self) -> dict[str, Any]:
+        return {}
+
+    def next_params(self, page: ParsedPage, previous_params: dict[str, Any]) -> dict[str, Any] | None:
+        if self._resolved is None:
+            self._resolved = self._detect(page)
+        return self._resolved.next_params(page, previous_params)
+
+    def _detect(self, page: ParsedPage) -> PaginationStrategy:
+        link = LinkHeaderPagination()
+        if link.next_params(page, {}):
+            self.resolved_type = "link_header"
+            return link
+        for path in self._NEXT_URL_PATHS:
+            candidate = _get_path(page.raw, path)
+            if isinstance(candidate, str) and candidate:
+                self.resolved_type = "next_url"
+                return NextUrlPagination(path)
+        for path, param in self._CURSOR_PATHS:
+            candidate = _get_path(page.raw, path)
+            if candidate not in (None, "", False):
+                self.resolved_type = "cursor"
+                return CursorPagination(cursor_param=param, cursor_field=path)
+        self.resolved_type = "none"
+        return NoPagination()
+
+
 STANDARD_PAGINATION_TYPES: dict[str, type[PaginationStrategy]] = {
     "none": NoPagination,
+    "auto": AutoPagination,
     "page": PageNumberPagination,
     "offset": OffsetPagination,
     "cursor": CursorPagination,
     "link_header": LinkHeaderPagination,
     "next_url": NextUrlPagination,
 }
+
+
+def _normalize_type(value: str) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if key.endswith("_pagination"):
+        key = key[: -len("_pagination")]
+    elif key.endswith("pagination"):
+        key = key[: -len("pagination")].rstrip("_")
+    aliases = {
+        "": "auto",
+        "automatic": "auto",
+        "off": "none",
+        "false": "none",
+        "no": "none",
+        "page_number": "page",
+        "pagenumber": "page",
+        "link": "link_header",
+        "linkheader": "link_header",
+        "next": "next_url",
+        "nexturl": "next_url",
+    }
+    return aliases.get(key, key)
+
+
+def _translate_options(kind: str, options: dict[str, Any]) -> dict[str, Any]:
+    values = dict(options)
+    values.pop("type", None)
+    aliases: dict[str, str]
+    if kind == "cursor":
+        aliases = {"cursor": "cursor_field", "cursor_path": "cursor_field", "param": "cursor_param"}
+    elif kind == "page":
+        aliases = {"size": "page_size", "param": "page_param", "size_param": "page_size_param"}
+    elif kind == "offset":
+        aliases = {"size": "limit", "param": "offset_param", "size_param": "limit_param"}
+    elif kind == "next_url":
+        aliases = {"field": "next_url_field", "path": "next_url_field"}
+    elif kind == "link_header":
+        aliases = {"header": "header_name"}
+    else:
+        aliases = {}
+    for source, target in aliases.items():
+        if source in values and target not in values:
+            values[target] = values.pop(source)
+    return values
+
+
+def resolve_pagination(value: PaginationStrategy | str | dict[str, Any] | bool | None) -> PaginationStrategy:
+    """Resolve friendly pagination input once, keeping the runtime strongly typed."""
+    if isinstance(value, PaginationStrategy):
+        return value
+    if value is None or value is True:
+        return AutoPagination()
+    if value is False:
+        return NoPagination()
+    if isinstance(value, str):
+        kind = _normalize_type(value)
+        strategy_cls = STANDARD_PAGINATION_TYPES.get(kind)
+        if strategy_cls is None:
+            valid = ", ".join(sorted(STANDARD_PAGINATION_TYPES))
+            raise ValueError(f"pagination '{value}' desconhecida. Use: {valid}.")
+        return strategy_cls()
+    if isinstance(value, dict):
+        kind = _normalize_type(str(value.get("type", "auto")))
+        strategy_cls = STANDARD_PAGINATION_TYPES.get(kind)
+        if strategy_cls is None:
+            valid = ", ".join(sorted(STANDARD_PAGINATION_TYPES))
+            raise ValueError(f"pagination.type '{kind}' desconhecido. Use: {valid}.")
+        try:
+            return strategy_cls(**_translate_options(kind, value))
+        except TypeError as exc:
+            raise ValueError(f"Parametros de pagination '{kind}' invalidos: {exc}") from exc
+    raise TypeError("pagination deve ser string, dict, bool ou PaginationStrategy.")
+
+
+__all__ = [
+    "NEXT_URL_KEY",
+    "ParsedPage",
+    "PaginationStrategy",
+    "NoPagination",
+    "AutoPagination",
+    "PageNumberPagination",
+    "OffsetPagination",
+    "CursorPagination",
+    "LinkHeaderPagination",
+    "NextUrlPagination",
+    "STANDARD_PAGINATION_TYPES",
+    "resolve_pagination",
+]

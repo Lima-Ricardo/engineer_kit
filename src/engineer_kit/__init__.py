@@ -1,8 +1,7 @@
 """engineer_kit: reliable API ingestion for analytical destinations.
 
 The top-level package exposes the backend-agnostic core eagerly and loads
-optional integrations only when requested. DuckDB, PyArrow, Delta and the web
-UI therefore remain installation choices rather than core requirements.
+optional integrations only when requested.
 """
 
 from __future__ import annotations
@@ -80,42 +79,23 @@ from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 from engineer_kit.storage.state_store import StateStore, Watermark
 from engineer_kit.storage.types import LogicalType, render_sql_type, resolve_logical_type
 from engineer_kit.terminal_log import visual_logger
+from engineer_kit.transform.dbt_easy import Dbt, discover_dbt_project
 from engineer_kit.transform.dbt_runner import DbtResult, DbtRunner
 from engineer_kit.transform.scaffold import generate_sources_yml, generate_staging_model, write_staging_scaffold
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 _CONFIG_EXPORTS = {
-    "AuthConfig",
-    "ColumnConfig",
-    "ConnectorConfig",
-    "DateParamsConfig",
-    "DestinationConfig",
-    "IncrementalConfig",
-    "PaginationConfig",
-    "PipelineConfig",
-    "PipelineConfigError",
-    "RunLogConfig",
-    "SecretsConfig",
-    "StateConfig",
-    "TransformConfig",
-    "build_pipeline",
-    "list_pipeline_configs",
-    "load_pipeline_config",
-    "save_pipeline_config",
+    "AuthConfig", "ColumnConfig", "ConnectorConfig", "DateParamsConfig",
+    "DestinationConfig", "IncrementalConfig", "PaginationConfig", "PipelineConfig",
+    "PipelineConfigError", "RunLogConfig", "SecretsConfig", "StateConfig",
+    "TransformConfig", "build_pipeline", "list_pipeline_configs",
+    "load_pipeline_config", "save_pipeline_config",
 }
-
 _DUCKDB_EXPORTS = {
-    "DuckDBLoader",
-    "DuckDBDestination",
-    "DEFAULT_BATCH_SIZE",
-    "MIN_BATCH_SIZE",
-    "MAX_BATCH_SIZE",
-    "InvalidBatchSizeError",
-    "DuckDBStateStore",
-    "IngestionStateStore",
-    "DuckDBRunLogStore",
-    "RunLogStore",
+    "DuckDBLoader", "DuckDBDestination", "DEFAULT_BATCH_SIZE", "MIN_BATCH_SIZE",
+    "MAX_BATCH_SIZE", "InvalidBatchSizeError", "DuckDBStateStore",
+    "IngestionStateStore", "DuckDBRunLogStore", "RunLogStore",
 }
 _PARQUET_EXPORTS = {"ParquetDestination"}
 _DELTA_EXPORTS = {"DeltaDestination", "DeltaStateStore", "DeltaRunLogStore"}
@@ -125,14 +105,10 @@ _FILE_EXPORTS = {"JsonFileStateStore", "JsonLinesRunLogStore"}
 def __getattr__(name: str):
     if name in _CONFIG_EXPORTS:
         from engineer_kit.config import pipeline_config
-
         return getattr(pipeline_config, name)
-
     if name in _FILE_EXPORTS:
         from engineer_kit.adapters import files
-
         return getattr(files, name)
-
     if name in _PARQUET_EXPORTS:
         try:
             from engineer_kit.adapters.parquet import ParquetDestination
@@ -143,7 +119,6 @@ def __getattr__(name: str):
                 ) from None
             raise
         return ParquetDestination
-
     if name in _DELTA_EXPORTS:
         try:
             from engineer_kit.adapters import delta
@@ -154,28 +129,20 @@ def __getattr__(name: str):
                 ) from None
             raise
         return getattr(delta, name)
-
     if name in _DUCKDB_EXPORTS:
         try:
             if name in {
-                "DuckDBLoader",
-                "DuckDBDestination",
-                "DEFAULT_BATCH_SIZE",
-                "MIN_BATCH_SIZE",
-                "MAX_BATCH_SIZE",
-                "InvalidBatchSizeError",
+                "DuckDBLoader", "DuckDBDestination", "DEFAULT_BATCH_SIZE",
+                "MIN_BATCH_SIZE", "MAX_BATCH_SIZE", "InvalidBatchSizeError",
             }:
                 from engineer_kit.storage import duckdb_loader
-
                 if name == "DuckDBDestination":
                     return duckdb_loader.DuckDBDestination
                 return getattr(duckdb_loader, name)
             if name in {"DuckDBStateStore", "IngestionStateStore"}:
                 from engineer_kit.adapters.duckdb.state_store import DuckDBStateStore
-
                 return DuckDBStateStore
             from engineer_kit.adapters.duckdb.run_log import DuckDBRunLogStore
-
             return DuckDBRunLogStore
         except ModuleNotFoundError as exc:
             if exc.name == "duckdb":
@@ -184,130 +151,35 @@ def __getattr__(name: str):
                     'or `pip install "engineer_kit[local]"`.'
                 ) from None
             raise
-
     raise AttributeError(name)
 
 
 __all__ = [
-    "__version__",
-    "Connector",
-    "APIConnector",
-    "RestConnector",
-    "ExtractionSession",
-    "DEFAULT_EXTRACTION_BATCH_SIZE",
-    "InvalidExtractionBatchSizeError",
-    "validate_extraction_batch_size",
-    "DateParams",
-    "InvalidHttpMethodError",
-    "MissingDateFieldError",
-    "PaginationLimitError",
-    "PaginationLoopError",
-    "CrossOriginPaginationError",
-    "DEFAULT_MAX_PAGES",
-    "VALID_HTTP_METHODS",
-    "DateFieldSpec",
-    "extract_date_value",
-    "stringify",
-    "PipelineConfig",
-    "ConnectorConfig",
-    "ColumnConfig",
-    "DestinationConfig",
-    "StateConfig",
-    "RunLogConfig",
-    "TransformConfig",
-    "SecretsConfig",
-    "AuthConfig",
-    "PaginationConfig",
-    "IncrementalConfig",
-    "DateParamsConfig",
-    "PipelineConfigError",
-    "load_pipeline_config",
-    "save_pipeline_config",
-    "list_pipeline_configs",
-    "build_pipeline",
-    "AdapterContext",
-    "AdapterNotFoundError",
-    "register_destination",
-    "register_state_store",
-    "register_run_log",
-    "available_adapters",
-    "PaginationStrategy",
-    "ParsedPage",
-    "NoPagination",
-    "PageNumberPagination",
-    "OffsetPagination",
-    "CursorPagination",
-    "LinkHeaderPagination",
-    "NextUrlPagination",
-    "STANDARD_PAGINATION_TYPES",
-    "NEXT_URL_KEY",
-    "IncrementalMode",
-    "IncrementalStrategy",
-    "IncrementalWindow",
-    "HttpClient",
-    "HttpRequestError",
-    "InsecureUrlError",
-    "UnsafeUrlError",
-    "UnsafeRedirectError",
-    "ResponseTooLargeError",
-    "DEFAULT_MAX_RESPONSE_BYTES",
-    "DEFAULT_MAX_REDIRECTS",
-    "AuthStrategy",
-    "NoAuth",
-    "BearerAuth",
-    "ApiKeyAuth",
-    "InvalidAuthValueError",
-    "SecretProvider",
-    "EnvSecretProvider",
-    "StaticSecretProvider",
-    "FileSecretProvider",
-    "SecretNotFoundError",
-    "InvalidSecretKeyError",
-    "SecretTooLargeError",
-    "redact_text",
-    "EndpointSchema",
-    "ColumnSpec",
-    "LogicalType",
-    "render_sql_type",
-    "resolve_logical_type",
-    "Destination",
-    "LoadContext",
-    "LoadResult",
-    "WriteMode",
-    "DuckDBLoader",
-    "DuckDBDestination",
-    "ParquetDestination",
-    "DeltaDestination",
-    "DEFAULT_BATCH_SIZE",
-    "MIN_BATCH_SIZE",
-    "MAX_BATCH_SIZE",
-    "InvalidBatchSizeError",
-    "StateStore",
-    "DuckDBStateStore",
-    "IngestionStateStore",
-    "DeltaStateStore",
-    "JsonFileStateStore",
-    "Watermark",
-    "RunLogBackend",
-    "DuckDBRunLogStore",
-    "RunLogStore",
-    "DeltaRunLogStore",
-    "JsonLinesRunLogStore",
-    "RunLogEntry",
-    "flatten_record",
-    "InvalidIdentifierError",
-    "visual_logger",
-    "DbtRunner",
-    "DbtResult",
-    "write_staging_scaffold",
-    "generate_sources_yml",
-    "generate_staging_model",
-    "Pipeline",
-    "PipelineSource",
-    "PipelineResult",
-    "StepResult",
-    "Scheduler",
-    "Trigger",
-    "CronTrigger",
+    "__version__", "Connector", "APIConnector", "RestConnector", "ExtractionSession",
+    "DEFAULT_EXTRACTION_BATCH_SIZE", "InvalidExtractionBatchSizeError", "validate_extraction_batch_size",
+    "DateParams", "InvalidHttpMethodError", "MissingDateFieldError", "PaginationLimitError",
+    "PaginationLoopError", "CrossOriginPaginationError", "DEFAULT_MAX_PAGES", "VALID_HTTP_METHODS",
+    "DateFieldSpec", "extract_date_value", "stringify", "PipelineConfig", "ConnectorConfig",
+    "ColumnConfig", "DestinationConfig", "StateConfig", "RunLogConfig", "TransformConfig",
+    "SecretsConfig", "AuthConfig", "PaginationConfig", "IncrementalConfig", "DateParamsConfig",
+    "PipelineConfigError", "load_pipeline_config", "save_pipeline_config", "list_pipeline_configs",
+    "build_pipeline", "AdapterContext", "AdapterNotFoundError", "register_destination",
+    "register_state_store", "register_run_log", "available_adapters", "PaginationStrategy",
+    "ParsedPage", "NoPagination", "PageNumberPagination", "OffsetPagination", "CursorPagination",
+    "LinkHeaderPagination", "NextUrlPagination", "STANDARD_PAGINATION_TYPES", "NEXT_URL_KEY",
+    "IncrementalMode", "IncrementalStrategy", "IncrementalWindow", "HttpClient", "HttpRequestError",
+    "InsecureUrlError", "UnsafeUrlError", "UnsafeRedirectError", "ResponseTooLargeError",
+    "DEFAULT_MAX_RESPONSE_BYTES", "DEFAULT_MAX_REDIRECTS", "AuthStrategy", "NoAuth", "BearerAuth",
+    "ApiKeyAuth", "InvalidAuthValueError", "SecretProvider", "EnvSecretProvider", "StaticSecretProvider",
+    "FileSecretProvider", "SecretNotFoundError", "InvalidSecretKeyError", "SecretTooLargeError",
+    "redact_text", "EndpointSchema", "ColumnSpec", "LogicalType", "render_sql_type",
+    "resolve_logical_type", "Destination", "LoadContext", "LoadResult", "WriteMode", "DuckDBLoader",
+    "DuckDBDestination", "ParquetDestination", "DeltaDestination", "DEFAULT_BATCH_SIZE", "MIN_BATCH_SIZE",
+    "MAX_BATCH_SIZE", "InvalidBatchSizeError", "StateStore", "DuckDBStateStore", "IngestionStateStore",
+    "DeltaStateStore", "JsonFileStateStore", "Watermark", "RunLogBackend", "DuckDBRunLogStore",
+    "RunLogStore", "DeltaRunLogStore", "JsonLinesRunLogStore", "RunLogEntry", "flatten_record",
+    "InvalidIdentifierError", "visual_logger", "Dbt", "discover_dbt_project", "DbtRunner", "DbtResult",
+    "write_staging_scaffold", "generate_sources_yml", "generate_staging_model", "Pipeline",
+    "PipelineSource", "PipelineResult", "StepResult", "Scheduler", "Trigger", "CronTrigger",
     "IntervalTrigger",
 ]

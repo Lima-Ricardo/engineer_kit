@@ -68,7 +68,7 @@ class IncrementalStrategy:
         window: IncrementalWindow,
         max_data_date: Optional[date] = None,
     ) -> Watermark:
-        """Persist and return the checkpoint after the destination confirmed the load."""
+        """Persist and return the checkpoint after downstream success."""
         watermark = Watermark(
             last_run_at=datetime.now(timezone.utc),
             last_data_date=max_data_date or window.end,
@@ -76,3 +76,39 @@ class IncrementalStrategy:
         )
         self._state_store.set_watermark(self._connector_name, watermark)
         return watermark
+
+
+class NoIncrementalStrategy(IncrementalStrategy):
+    """No-op checkpoint strategy used by the zero-configuration happy path.
+
+    It preserves the same ExtractionSession contract without creating files or
+    requiring a StateStore when incrementality was not requested.
+    """
+
+    def __init__(self) -> None:
+        pass
+
+    def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
+        resolved_end = date.today() if end == "today" else end
+        if not isinstance(resolved_end, date):
+            raise TypeError("end deve ser date ou 'today'.")
+        return IncrementalWindow(start=None, end=resolved_end, watermark_before=None)
+
+    def commit(
+        self,
+        window: IncrementalWindow,
+        max_data_date: Optional[date] = None,
+    ) -> Watermark:
+        return Watermark(
+            last_run_at=datetime.now(timezone.utc),
+            last_data_date=max_data_date or window.end,
+            cursor_value=None,
+        )
+
+
+__all__ = [
+    "IncrementalMode",
+    "IncrementalWindow",
+    "IncrementalStrategy",
+    "NoIncrementalStrategy",
+]
