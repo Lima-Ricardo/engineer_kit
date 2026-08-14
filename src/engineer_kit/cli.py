@@ -128,6 +128,14 @@ def profile_config(
         "-m",
         help="Metricas separadas por virgula. Vazio executa o perfil completo.",
     ),
+    key: str = typer.Option(
+        "",
+        "--key",
+        help=(
+            "PK candidata para a metrica duplicates. Use virgula para chave composta. "
+            "Se omitida, reutiliza connector.dedup quando configurado."
+        ),
+    ),
     scope: str = typer.Option(
         "sample",
         help="Escopo: sample (padrao seguro no CLI) ou full.",
@@ -151,6 +159,7 @@ def profile_config(
     if normalized_scope not in {"sample", "full"}:
         raise typer.BadParameter("scope deve ser 'sample' ou 'full'.", param_hint="--scope")
     selectors = tuple(item.strip() for item in metrics.split(",") if item.strip())
+    candidate_key = [item.strip() for item in key.split(",") if item.strip()] or None
     resolved_limit = limit if normalized_scope == "sample" else None
 
     try:
@@ -160,6 +169,7 @@ def profile_config(
             *selectors,
             scope=normalized_scope,
             limit=resolved_limit,
+            key=candidate_key,
         )
     except Exception as exc:
         typer.echo(f"Falha ao gerar data profile: {exc}")
