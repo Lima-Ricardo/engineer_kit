@@ -119,6 +119,7 @@ class RestConnector(APIConnector):
         field = date_field
         runtime_incremental: IncrementalStrategy | None
         auto_state = False
+        explicit_incremental_strategy = isinstance(incremental, IncrementalStrategy)
 
         if isinstance(incremental, NoIncrementalStrategy):
             runtime_incremental = incremental
@@ -190,7 +191,8 @@ class RestConnector(APIConnector):
             )
 
         if (
-            not isinstance(runtime_incremental, NoIncrementalStrategy)
+            not explicit_incremental_strategy
+            and not isinstance(runtime_incremental, NoIncrementalStrategy)
             and mode is IncrementalMode.DATA_DATE
             and field is None
         ):
@@ -202,17 +204,11 @@ class RestConnector(APIConnector):
             if self._date_params.start:
                 self._incremental_filter_mode = "source-param"
             elif mode is IncrementalMode.DATA_DATE and field is not None:
-                # Preserve the ergonomic incremental='updated_at' path without
-                # pretending the API was filtered: scan the source and enforce
-                # the checkpoint window locally. This is correct but may be more
-                # expensive than configuring date_params.start.
                 self._client_side_incremental_filter = True
                 self._incremental_filter_mode = "client-side"
+            elif explicit_incremental_strategy:
+                self._incremental_filter_mode = "strategy-owned"
             else:
-                # Backwards-compatible INGESTION_DATE without a source parameter
-                # is conservative rather than lossy: re-read the full source and
-                # use the watermark only for state/retry identity. It may replay
-                # rows on append-only destinations, but it cannot skip source rows.
                 self._incremental_filter_mode = "checkpoint-only"
 
         self._auto_state = auto_state
