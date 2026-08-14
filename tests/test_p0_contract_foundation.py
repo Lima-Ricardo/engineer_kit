@@ -12,6 +12,7 @@ from engineer_kit import (
     StateConflictError,
     capability_manifest,
 )
+from engineer_kit.adapters.delta.state_store import DeltaStateStore
 from engineer_kit.adapters.duckdb.state_store import DuckDBStateStore
 from engineer_kit.adapters.files.state_store import JsonFileStateStore
 from engineer_kit.config.pipeline_config import (
@@ -199,10 +200,12 @@ def test_probe_fetches_one_page_without_advancing_checkpoint(tmp_path):
     assert not state_path.exists()
 
 
-def _assert_stale_writer_is_rejected(store):
-    first = IncrementalStrategy("orders", store, initial_start=date(2024, 1, 1))
-    second = IncrementalStrategy("orders", store, initial_start=date(2024, 1, 1))
+def _assert_stale_writer_is_rejected(first_store, second_store, *, state_key="orders"):
+    first = IncrementalStrategy(state_key, first_store, initial_start=date(2024, 1, 1))
+    second = IncrementalStrategy(state_key, second_store, initial_start=date(2024, 1, 1))
 
+    # Both runs resolve from the same checkpoint before either one commits,
+    # modelling the dangerous concurrent-run interleaving deterministically.
     first_window = first.resolve_window(end=date(2024, 2, 1))
     second_window = second.resolve_window(end=date(2024, 2, 1))
     first.commit(first_window, max_data_date=date(2024, 1, 20))
@@ -210,18 +213,39 @@ def _assert_stale_writer_is_rejected(store):
     with pytest.raises(StateConflictError):
         second.commit(second_window, max_data_date=date(2024, 1, 25))
 
-    assert store.get_watermark("orders").last_data_date == date(2024, 1, 20)
+    assert second_store.get_watermark(state_key).last_data_date == date(2024, 1, 20)
 
 
-def test_duckdb_checkpoint_compare_and_set_rejects_stale_concurrent_writer():
-    _assert_stale_writer_is_rejected(DuckDBStateStore(duckdb.connect()))
+def test_duckdb_checkpoint_compare_and_set_rejects_stale_independent_writer(tmp_path):
+    database = str(tmp_path / "state.duckdb")
+    first_conn = duckdb.connect(database)
+    second_conn = duckdb.connect(database)
+    try:
+        _assert_stale_writer_is_rejected(
+            DuckDBStateStore(first_conn),
+            DuckDBStateStore(second_conn),
+        )
+    finally:
+        second_conn.close()
+        first_conn.close()
 
 
-def test_json_checkpoint_compare_and_set_rejects_stale_concurrent_writer(tmp_path):
-    store = JsonFileStateStore(tmp_path / "state.json")
-    _assert_stale_writer_is_rejected(store)
-    if store.supports_atomic_compare_and_set:
+def test_json_checkpoint_compare_and_set_rejects_stale_independent_writer(tmp_path):
+    path = tmp_path / "state.json"
+    first_store = JsonFileStateStore(path)
+    second_store = JsonFileStateStore(path)
+    _assert_stale_writer_is_rejected(first_store, second_store)
+    if first_store.supports_atomic_compare_and_set:
         assert (tmp_path / ".state.json.lock").exists()
+
+
+def test_delta_state_namespace_accepts_data_keys_and_rejects_stale_writer(tmp_path):
+    first_store = DeltaStateStore(tmp_path / "delta-state")
+    second_store = DeltaStateStore(tmp_path / "delta-state")
+    state_key = "tenant-a.orders"
+
+    _assert_stale_writer_is_rejected(first_store, second_store, state_key=state_key)
+    assert first_store.get_watermark(state_key).last_data_date == date(2024, 1, 20)
 
 
 def test_state_key_can_namespace_same_logical_connector(tmp_path):
