@@ -25,7 +25,7 @@ from engineer_kit.config.pipeline_config import (
     load_pipeline_config,
     pipeline_config_from_dict,
 )
-from engineer_kit.connectors.incremental import IncrementalStrategy
+from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy
 from engineer_kit.connectors.intent import read_path
 from engineer_kit.orchestration.pipeline import _checkpoint_identity
 from engineer_kit.storage.flatten import flatten_record
@@ -216,6 +216,7 @@ def test_probe_fetches_one_page_without_advancing_checkpoint(tmp_path):
     assert result.response_bytes == len(_Response.content)
     assert state.get_watermark("orders") is None
     assert not state_path.exists()
+    assert not (tmp_path / ".state.json.lock").exists()
 
 
 def _assert_stale_writer_is_rejected(first_store, second_store, *, state_key="orders"):
@@ -303,6 +304,30 @@ def test_declarative_state_key_reaches_runtime_incremental_strategy():
 
     assert connector.state_key == "tenant-a.orders"
     assert connector._incremental.state_key == "tenant-a.orders"
+
+
+def test_explicit_incremental_strategy_owns_runtime_state_key(tmp_path):
+    strategy = IncrementalStrategy(
+        "strategy.orders",
+        JsonFileStateStore(tmp_path / "expert-state.json"),
+        mode=IncrementalMode.INGESTION_DATE,
+    )
+    connector = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        pagination=False,
+        incremental=strategy,
+    )
+    assert connector.state_key == "strategy.orders"
+
+    with pytest.raises(ValueError, match="diverge"):
+        RestConnector(
+            name="orders",
+            base_url="https://example.test/orders",
+            pagination=False,
+            incremental=strategy,
+            state_key="other.orders",
+        )
 
 
 def test_state_key_rejects_control_characters_before_backend_access():
