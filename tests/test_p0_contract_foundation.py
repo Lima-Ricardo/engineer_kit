@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import duckdb
 import pytest
 
 from engineer_kit import (
     ColumnSpec,
+    EndpointSchema,
     FlattenCollisionError,
+    Pipeline,
     RestConnector,
     StateConflictError,
     capability_manifest,
@@ -54,6 +57,20 @@ class _Client:
         self.calls += 1
         self.kwargs.append((method, kwargs))
         return _Response()
+
+
+class _RecordingDestination:
+    def __init__(self):
+        self.contexts = []
+
+    def load_with_context(self, connector_name, endpoint, schema, records, context):
+        materialized = list(records)
+        self.contexts.append(context)
+        return SimpleNamespace(
+            table="memory",
+            rows_loaded=len(materialized),
+            extra_fields_seen=[],
+        )
 
 
 def test_declarative_short_form_matches_python_intent_surface():
@@ -294,6 +311,32 @@ def test_state_key_participates_in_deterministic_ingestion_identity(tmp_path):
     second_window = second.extract_incremental(end=date(2026, 1, 1)).window
 
     assert _checkpoint_identity(first, first_window) != _checkpoint_identity(second, second_window)
+
+
+def test_non_incremental_managed_runs_get_distinct_run_scoped_ingestion_keys():
+    client = _Client()
+    connector = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        pagination=False,
+        incremental=False,
+        http_client=client,
+    )
+    destination = _RecordingDestination()
+    pipeline = Pipeline(
+        connector=connector,
+        schema=EndpointSchema.from_names(["id"]),
+        destination=destination,
+        run_log=False,
+    )
+
+    first = pipeline.run(run_id="run-a")
+    second = pipeline.run(run_id="run-b")
+
+    assert first.success and second.success
+    assert connector.checkpoint_enabled is False
+    assert len(destination.contexts) == 2
+    assert destination.contexts[0].ingestion_key != destination.contexts[1].ingestion_key
 
 
 def test_capability_manifest_is_serializable_and_adapter_aware():
