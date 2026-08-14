@@ -11,7 +11,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator
 
-from engineer_kit.storage.state_store import StateConflictError, StateStore, Watermark
+from engineer_kit.storage.state_store import (
+    StateConflictError,
+    StateStore,
+    Watermark,
+    validate_state_key,
+)
 
 
 class JsonFileStateStore(StateStore):
@@ -107,14 +112,16 @@ class JsonFileStateStore(StateStore):
                 os.unlink(tmp_name)
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
+        key = validate_state_key(connector_name)
         with self._lock, self._process_lock():
-            item = self._read_all_unlocked().get(connector_name)
+            item = self._read_all_unlocked().get(key)
         return self._watermark_from_item(item) if item is not None else None
 
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
+        key = validate_state_key(connector_name)
         with self._lock, self._process_lock():
             data = self._read_all_unlocked()
-            data[connector_name] = self._item_from_watermark(watermark)
+            data[key] = self._item_from_watermark(watermark)
             self._write_all_unlocked(data)
 
     def compare_and_set_watermark(
@@ -123,16 +130,17 @@ class JsonFileStateStore(StateStore):
         expected: Watermark | None,
         watermark: Watermark,
     ) -> None:
+        key = validate_state_key(connector_name)
         with self._lock, self._process_lock():
             data = self._read_all_unlocked()
-            item = data.get(connector_name)
+            item = data.get(key)
             current = self._watermark_from_item(item) if item is not None else None
             if current != expected:
                 raise StateConflictError(
-                    f"Checkpoint de '{connector_name}' mudou durante a execucao; "
+                    f"Checkpoint de '{key}' mudou durante a execucao; "
                     "o commit concorrente foi recusado."
                 )
-            data[connector_name] = self._item_from_watermark(watermark)
+            data[key] = self._item_from_watermark(watermark)
             self._write_all_unlocked(data)
 
 
