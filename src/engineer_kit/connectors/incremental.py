@@ -17,11 +17,24 @@ class IncrementalMode(str, Enum):
 
 @dataclass(frozen=True)
 class IncrementalWindow:
-    """Resolved extraction interval plus the checkpoint it was derived from."""
+    """Resolved extraction interval plus the checkpoint it was derived from.
+
+    ``start`` preserves the checkpoint boundary used for the next request.
+    Date-granularity checkpoints are intentionally inclusive: advancing the
+    request to the next day can lose records that arrive later on the same
+    calendar date after a successful run. Re-reading the boundary is the
+    correctness-first choice; destination retry identity and explicit dedup
+    policies handle replay where needed.
+    """
 
     start: Optional[date]
     end: date
     watermark_before: Watermark | None = None
+    start_inclusive: bool = True
+
+    @property
+    def request_start(self) -> date | None:
+        return self.start
 
 
 class IncrementalStrategy:
@@ -43,6 +56,10 @@ class IncrementalStrategy:
     def state_key(self) -> str:
         return self._connector_name
 
+    @property
+    def mode(self) -> IncrementalMode:
+        return self._mode
+
     def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
         resolved_end = date.today() if end == "today" else end
         if not isinstance(resolved_end, date):
@@ -54,6 +71,7 @@ class IncrementalStrategy:
                 start=self._initial_start,
                 end=resolved_end,
                 watermark_before=None,
+                start_inclusive=True,
             )
 
         start = (
@@ -65,6 +83,7 @@ class IncrementalStrategy:
             start=start,
             end=resolved_end,
             watermark_before=watermark,
+            start_inclusive=True,
         )
 
     def commit(
@@ -87,20 +106,29 @@ class IncrementalStrategy:
 
 
 class NoIncrementalStrategy(IncrementalStrategy):
-    """No-op checkpoint strategy used by the zero-configuration happy path.
-
-    It preserves the same ExtractionSession contract without creating files or
-    requiring a StateStore when incrementality was not requested.
-    """
+    """No-op checkpoint strategy used by the zero-configuration happy path."""
 
     def __init__(self) -> None:
         pass
+
+    @property
+    def state_key(self) -> str:
+        return "<disabled>"
+
+    @property
+    def mode(self) -> IncrementalMode:
+        return IncrementalMode.INGESTION_DATE
 
     def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
         resolved_end = date.today() if end == "today" else end
         if not isinstance(resolved_end, date):
             raise TypeError("end deve ser date ou 'today'.")
-        return IncrementalWindow(start=None, end=resolved_end, watermark_before=None)
+        return IncrementalWindow(
+            start=None,
+            end=resolved_end,
+            watermark_before=None,
+            start_inclusive=True,
+        )
 
     def commit(
         self,

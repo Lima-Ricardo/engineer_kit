@@ -15,6 +15,8 @@ class InvalidBatchSizeError(ValueError):
 
 
 def validate_batch_size(batch_size: int) -> int:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+        raise InvalidBatchSizeError("batch_size deve ser um inteiro.")
     if not (MIN_BATCH_SIZE <= batch_size <= MAX_BATCH_SIZE):
         raise InvalidBatchSizeError(
             f"batch_size={batch_size} fora do intervalo permitido "
@@ -27,9 +29,10 @@ def iter_in_batches(
     records: Iterable[dict[str, Any]], batch_size: int
 ) -> Iterator[list[dict[str, Any]]]:
     """Consume an iterable in bounded slices without materializing it all."""
+    size = validate_batch_size(batch_size)
     iterator = iter(records)
     while True:
-        batch = list(itertools.islice(iterator, batch_size))
+        batch = list(itertools.islice(iterator, size))
         if not batch:
             return
         yield batch

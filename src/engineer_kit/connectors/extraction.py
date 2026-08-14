@@ -3,9 +3,6 @@
 An :class:`ExtractionSession` represents one resolved incremental window. The
 session is intentionally single-pass: iterating it consumes the API stream once,
 and the checkpoint can only be committed after the stream is fully consumed.
-
-The default public iteration unit is a batch of 25,000 records. This value is
-independent from API pagination and from destination write batching.
 """
 
 from __future__ import annotations
@@ -26,7 +23,6 @@ class InvalidExtractionBatchSizeError(ValueError):
 
 
 def validate_extraction_batch_size(value: int) -> int:
-    """Return a validated extraction batch size."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise InvalidExtractionBatchSizeError(
             "extraction batch_size deve ser um inteiro maior que zero."
@@ -35,21 +31,7 @@ def validate_extraction_batch_size(value: int) -> int:
 
 
 class ExtractionSession:
-    """Single-pass incremental extraction with an explicit checkpoint boundary.
-
-    Iterating the session yields ``list[dict]`` batches. ``iter_records()`` is
-    available for consumers such as managed destinations that already stream
-    records internally. ``collect()`` is deliberately explicit because it
-    materializes the complete extraction in memory.
-
-    ``record_transform`` is applied only after incremental date tracking. This
-    allows ergonomic projections to hide fields from the caller without hiding
-    a watermark field from checkpoint logic. At this low-level boundary,
-    ``dedup`` receives the already-resolved primary-key fields only when the
-    higher-level connector policy enabled deduplication. ``False``/``None`` keep
-    deduplication disabled for 0.2 compatibility. The complete duplicate record
-    is removed; the key column itself is never mutated.
-    """
+    """Single-pass incremental extraction with an explicit checkpoint boundary."""
 
     def __init__(
         self,
@@ -77,53 +59,54 @@ class ExtractionSession:
         self._committed = False
         self._watermark_after: Watermark | None = None
         self._max_data_date_seen: date | None = None
+        self._invalid_date_records = 0
 
     @property
     def exhausted(self) -> bool:
-        """Whether the underlying API stream was consumed completely."""
         return self._exhausted
 
     @property
     def committed(self) -> bool:
-        """Whether this session has committed its checkpoint."""
         return self._committed
 
     @property
     def aborted(self) -> bool:
-        """Whether this session was explicitly aborted."""
         return self._aborted
 
     @property
     def dedup_enabled(self) -> bool:
-        """Whether duplicate PK records are filtered in this session."""
         return self._dedup_keys is not None
 
     @property
     def dedup_keys(self) -> tuple[str, ...] | None:
-        """Declared simple/composite PK used by deduplication."""
         return self._dedup_keys
 
     @property
     def max_data_date_seen(self) -> date | None:
-        """Largest configured data date observed while consuming the stream."""
         return self._max_data_date_seen
 
     @property
+    def invalid_date_records(self) -> int:
+        """Rows that could not produce the configured DATA_DATE value."""
+        return self._invalid_date_records
+
+    @property
     def watermark_after(self) -> Watermark | None:
-        """Checkpoint written by ``commit()``, if any."""
         return self._watermark_after
 
+    def __enter__(self) -> "ExtractionSession":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None and not self._committed:
+            self.abort()
+        elif not self._committed and not self._aborted:
+            self.abort()
+
     def __iter__(self) -> Iterator[list[dict]]:
-        """Yield extraction batches using the configured default batch size."""
         return self.iter_batches()
 
     def iter_records(self) -> Iterator[dict]:
-        """Consume the extraction as a lazy record stream.
-
-        The session is single-pass. Callers that need to reuse data must persist
-        or materialize it themselves rather than causing the API to be fetched
-        twice implicitly.
-        """
         self._ensure_can_start()
         self._started = True
         deduplicator = (
@@ -142,15 +125,8 @@ class ExtractionSession:
         finally:
             if deduplicator is not None:
                 deduplicator.close()
-            # If a consumer stops early or closes the generator, _exhausted stays
-            # false and commit() refuses to advance the checkpoint.
 
     def iter_batches(self, size: int | None = None) -> Iterator[list[dict]]:
-        """Consume the extraction in bounded in-memory batches.
-
-        ``size`` defaults to 25,000 records. It is intentionally independent
-        from pagination page size and destination write batch size.
-        """
         resolved_size = self.batch_size if size is None else validate_extraction_batch_size(size)
         batch: list[dict] = []
         for record in self.iter_records():
@@ -162,15 +138,9 @@ class ExtractionSession:
             yield batch
 
     def collect(self) -> list[dict]:
-        """Materialize all records in memory.
-
-        Prefer normal session iteration or ``iter_batches`` for medium/large
-        extractions. This method exists for small datasets and convenience.
-        """
         return list(self.iter_records())
 
     def commit(self, max_data_date: date | None = None) -> Watermark:
-        """Commit the incremental checkpoint after successful downstream work."""
         if self._aborted:
             raise RuntimeError("ExtractionSession abortada; checkpoint nao pode ser confirmado.")
         if self._committed:
@@ -180,6 +150,12 @@ class ExtractionSession:
             raise RuntimeError(
                 "ExtractionSession ainda nao foi consumida por completo; "
                 "checkpoint nao pode avancar parcialmente."
+            )
+        if self._date_field is not None and self._invalid_date_records:
+            raise RuntimeError(
+                "checkpoint recusado: "
+                f"{self._invalid_date_records} registro(s) nao possuem date_field valido. "
+                "Corrija a origem/mapeamento antes de avancar o watermark."
             )
         effective_max_date = (
             max_data_date if max_data_date is not None else self._max_data_date_seen
@@ -192,10 +168,14 @@ class ExtractionSession:
         return self._watermark_after
 
     def abort(self) -> None:
-        """Close the session without advancing the checkpoint."""
         if self._committed:
             raise RuntimeError("ExtractionSession ja confirmada; nao pode ser abortada.")
+        if self._aborted:
+            return
         self._aborted = True
+        close = getattr(self._records, "close", None)
+        if callable(close):
+            close()
 
     def _ensure_can_start(self) -> None:
         if self._aborted:
@@ -213,6 +193,7 @@ class ExtractionSession:
             return
         seen = extract_date_value(record, self._date_field)
         if seen is None:
+            self._invalid_date_records += 1
             return
         if self._max_data_date_seen is None or seen > self._max_data_date_seen:
             self._max_data_date_seen = seen

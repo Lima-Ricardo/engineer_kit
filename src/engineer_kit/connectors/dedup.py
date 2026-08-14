@@ -1,10 +1,4 @@
-"""Streaming exact primary-key deduplication with bounded memory.
-
-Deduplication stores only SHA-256 fingerprints in a temporary SQLite database.
-It therefore avoids materializing either records or an unbounded in-memory set
-while keeping source values out of the temporary store. Disk usage grows with
-the number of unique identities; memory does not.
-"""
+"""Streaming exact primary-key deduplication with bounded memory and disk."""
 
 from __future__ import annotations
 
@@ -19,6 +13,8 @@ from typing import Any, Sequence
 from engineer_kit.connectors.intent import parse_path, read_path
 
 _DEDUP_COMMIT_INTERVAL = 10_000
+DEFAULT_MAX_DEDUP_UNIQUE_KEYS = 50_000_000
+DEFAULT_MAX_DEDUP_TEMP_BYTES = 8 * 1024 * 1024 * 1024
 
 
 class DeduplicationError(RuntimeError):
@@ -30,12 +26,6 @@ class InvalidDeduplicationKeyError(DeduplicationError):
 
 
 def resolve_primary_key(value: str | Sequence[str] | None) -> tuple[str, ...] | None:
-    """Normalize a simple/composite record identity.
-
-    ``None`` means no declared identity. A string denotes one key path and a
-    sequence denotes a composite key. This function validates identity only;
-    whether deduplication is enabled is a separate policy decision.
-    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -70,12 +60,6 @@ def resolve_primary_key(value: str | Sequence[str] | None) -> tuple[str, ...] | 
 def resolve_dedup_keys(
     value: str | Sequence[str] | bool | None,
 ) -> tuple[str, ...] | None:
-    """Compatibility alias for the pre-separation key normalizer.
-
-    New identity-aware code should call :func:`resolve_primary_key`. ``None``
-    means no key. Boolean values are rejected because neither ``True`` nor
-    ``False`` describes record identity.
-    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -86,7 +70,6 @@ def resolve_dedup_keys(
 
 
 def canonical_record_bytes(record: dict[str, Any]) -> bytes:
-    """Return a stable JSON representation used for complete-row identity."""
     try:
         text = json.dumps(
             record,
@@ -101,7 +84,6 @@ def canonical_record_bytes(record: dict[str, Any]) -> bytes:
 
 
 def record_fingerprint(record: dict[str, Any]) -> bytes:
-    """Return a privacy-preserving 256-bit identity for a complete record."""
     return hashlib.sha256(canonical_record_bytes(record)).digest()
 
 
@@ -122,7 +104,6 @@ def _key_values(record: dict[str, Any], keys: tuple[str, ...]) -> list[Any]:
 
 
 def key_fingerprint(record: dict[str, Any], keys: tuple[str, ...]) -> bytes:
-    """Return a stable fingerprint for a declared simple/composite primary key."""
     try:
         payload = json.dumps(
             _key_values(record, keys),
@@ -135,8 +116,26 @@ def key_fingerprint(record: dict[str, Any], keys: tuple[str, ...]) -> bytes:
     return hashlib.sha256(payload).digest()
 
 
+def _positive_limit(value: int | None, *, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} deve ser inteiro maior que zero ou None.")
+    return value
+
+
 class _ExactFingerprintStore:
-    def __init__(self, *, directory: str | os.PathLike[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        directory: str | os.PathLike[str] | None = None,
+        max_unique_keys: int | None = DEFAULT_MAX_DEDUP_UNIQUE_KEYS,
+        max_temp_bytes: int | None = DEFAULT_MAX_DEDUP_TEMP_BYTES,
+    ) -> None:
+        self._max_unique_keys = _positive_limit(
+            max_unique_keys, name="max_unique_keys"
+        )
+        self._max_temp_bytes = _positive_limit(max_temp_bytes, name="max_temp_bytes")
         fd, raw_path = tempfile.mkstemp(
             prefix="engineer_kit_dedup_",
             suffix=".sqlite3",
@@ -162,8 +161,29 @@ class _ExactFingerprintStore:
 
     @property
     def path(self) -> Path:
-        """Temporary path, primarily exposed for diagnostics/tests."""
         return self._path
+
+    def _check_limits(self) -> None:
+        if (
+            self._max_unique_keys is not None
+            and self.unique_count > self._max_unique_keys
+        ):
+            raise DeduplicationError(
+                "deduplicacao excedeu max_unique_keys; aumente o limite explicitamente "
+                "ou reduza o escopo da extracao."
+            )
+        if self._max_temp_bytes is not None:
+            try:
+                size = self._path.stat().st_size
+            except OSError as exc:
+                raise DeduplicationError(
+                    "nao foi possivel verificar o tamanho do armazenamento temporario"
+                ) from exc
+            if size > self._max_temp_bytes:
+                raise DeduplicationError(
+                    "deduplicacao excedeu max_temp_bytes; aumente o limite explicitamente "
+                    "ou configure um diretorio temporario com capacidade adequada."
+                )
 
     def add_fingerprint(self, fingerprint: bytes) -> bool:
         if self._closed:
@@ -181,6 +201,10 @@ class _ExactFingerprintStore:
         if self._pending >= _DEDUP_COMMIT_INTERVAL:
             self._conn.commit()
             self._pending = 0
+            self._check_limits()
+        elif is_new and self._max_unique_keys is not None:
+            if self.unique_count > self._max_unique_keys:
+                self._check_limits()
         return is_new
 
     def close(self) -> None:
@@ -196,10 +220,18 @@ class _ExactFingerprintStore:
 
 
 class ExactRowDeduplicator:
-    """Disk-backed duplicate detector for complete rows."""
-
-    def __init__(self, *, directory: str | os.PathLike[str] | None = None) -> None:
-        self._store = _ExactFingerprintStore(directory=directory)
+    def __init__(
+        self,
+        *,
+        directory: str | os.PathLike[str] | None = None,
+        max_unique_keys: int | None = DEFAULT_MAX_DEDUP_UNIQUE_KEYS,
+        max_temp_bytes: int | None = DEFAULT_MAX_DEDUP_TEMP_BYTES,
+    ) -> None:
+        self._store = _ExactFingerprintStore(
+            directory=directory,
+            max_unique_keys=max_unique_keys,
+            max_temp_bytes=max_temp_bytes,
+        )
 
     @property
     def path(self) -> Path:
@@ -227,28 +259,25 @@ class ExactRowDeduplicator:
 
 
 class ExactKeyDeduplicator:
-    """Disk-backed detector for a declared simple/composite primary key.
-
-    ``add(record)`` returns ``True`` only for the first occurrence of the PK.
-    Missing/null/blank/non-scalar key values fail fast by default because a
-    declared primary key is an identity contract, not a best-effort hint.
-    Profiling may opt into ``strict=False`` to count invalid-key rows instead of
-    stopping the scan.
-    """
-
     def __init__(
         self,
         keys: str | Sequence[str],
         *,
         strict: bool = True,
         directory: str | os.PathLike[str] | None = None,
+        max_unique_keys: int | None = DEFAULT_MAX_DEDUP_UNIQUE_KEYS,
+        max_temp_bytes: int | None = DEFAULT_MAX_DEDUP_TEMP_BYTES,
     ) -> None:
         resolved = resolve_primary_key(keys)
         assert resolved is not None
         self.keys = resolved
         self.strict = strict
         self.invalid_key_count = 0
-        self._store = _ExactFingerprintStore(directory=directory)
+        self._store = _ExactFingerprintStore(
+            directory=directory,
+            max_unique_keys=max_unique_keys,
+            max_temp_bytes=max_temp_bytes,
+        )
 
     @property
     def path(self) -> Path:
@@ -283,6 +312,8 @@ class ExactKeyDeduplicator:
 
 
 __all__ = [
+    "DEFAULT_MAX_DEDUP_TEMP_BYTES",
+    "DEFAULT_MAX_DEDUP_UNIQUE_KEYS",
     "DeduplicationError",
     "ExactKeyDeduplicator",
     "ExactRowDeduplicator",

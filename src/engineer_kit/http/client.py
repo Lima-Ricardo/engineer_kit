@@ -167,6 +167,12 @@ class HttpClient:
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
 
+    @property
+    def auth_identity(self) -> dict[str, Any]:
+        """Return stable logical auth metadata without resolving secret values."""
+        identity = self._auth.identity()
+        return dict(identity)
+
     def _check_url(self, url: str) -> None:
         try:
             parsed = urlsplit(url)
@@ -225,9 +231,6 @@ class HttpClient:
                 )
             chunks.append(chunk)
 
-        # requests.Response.json()/text expect the normal in-memory response
-        # contract. We materialize exactly one bounded API page, never an
-        # unbounded body.
         response._content = b"".join(chunks)  # noqa: SLF001
         response._content_consumed = True  # noqa: SLF001
 
@@ -300,9 +303,6 @@ class HttpClient:
                     f"{_safe_request_target(next_target)}"
                 )
 
-            # Match common HTTP client/browser semantics without invoking a
-            # second auth strategy. Same-origin credentials remain scoped to
-            # the same origin only.
             if status_code == 303 or (
                 status_code in {301, 302} and method.upper() == "POST"
             ):
