@@ -28,7 +28,8 @@
         <dl class="facts">
             <dt>Paginação</dt><dd>{{ config.connector.pagination.type }}</dd>
             <dt>Incremental</dt><dd>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %}<br><code>{{ config.connector.incremental.date_field }}</code>{% endif %}</dd>
-            <dt>Deduplicação</dt><dd>{% if config.connector.dedup %}PK: <code>{{ config.connector.dedup | join(', ') }}</code> · keep first{% else %}desligada{% endif %}</dd>
+            <dt>Primary key</dt><dd>{% if config.connector.primary_key %}<code>{{ config.connector.primary_key | join(', ') }}</code>{% else %}não declarada{% endif %}</dd>
+            <dt>Deduplicação</dt><dd>{% if config.connector.dedup %}ativa · keep first · remove registro inteiro repetido por PK{% else %}desligada{% endif %}</dd>
             <dt>Autenticação</dt><dd>{{ config.connector.auth.type }}</dd>
             <dt>Destination</dt><dd>{{ config.destination.type }}</dd>
             <dt>Schema Bronze</dt><dd>{{ config.destination.schema }}</dd>
