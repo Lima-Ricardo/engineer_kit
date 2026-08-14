@@ -246,11 +246,7 @@ def create_app(
     @app.get("/pipelines/{name}/profile", response_class=HTMLResponse)
     def profile_form(request: Request, name: str, _: None = Depends(check_auth)):
         config = _load_or_404(name)
-        configured_key = (
-            ",".join(config.connector.dedup)
-            if isinstance(config.connector.dedup, list)
-            else ""
-        )
+        configured_key = ",".join(config.connector.primary_key or [])
         return templates.TemplateResponse(
             request,
             "profile_report.html",
@@ -534,8 +530,11 @@ def create_app(
                     )
                 )
 
-        dedup_key = str(form.get("dedup_key") or "").strip()
-        dedup = [item.strip() for item in dedup_key.split(",") if item.strip()] or False
+        primary_key_text = str(form.get("primary_key") or "").strip()
+        primary_key = [
+            item.strip() for item in primary_key_text.split(",") if item.strip()
+        ] or None
+        dedup = (form.get("dedup") or "off") == "on"
 
         connector = ConnectorConfig(
             base_url=base_url,
@@ -561,6 +560,7 @@ def create_app(
                 format=form.get("date_param_format") or "%Y-%m-%d",
             ),
             records_path=form.get("records_path") or None,
+            primary_key=primary_key,
             dedup=dedup,
             extraction_batch_size=int(
                 form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
