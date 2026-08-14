@@ -23,10 +23,9 @@ class JsonFileStateStore(StateStore):
     """Persist all connector checkpoints in one small JSON document.
 
     Writes use ``os.replace`` so readers never observe a partially-written
-    file. On POSIX, a small sidecar advisory lock coordinates independent
-    writers/CAS operations. Plain reads need no process lock because promotion
-    is atomic, which keeps diagnostics such as ``probe()`` filesystem-read-only
-    when no state file exists. Distributed Lakehouse workloads should prefer
+    file. A small sidecar advisory lock coordinates independent writers/CAS
+    operations on POSIX and Windows. Plain reads need no process lock because
+    promotion is atomic. Distributed Lakehouse workloads should still prefer
     DeltaStateStore rather than mounted-filesystem locking semantics.
     """
 
@@ -38,18 +37,30 @@ class JsonFileStateStore(StateStore):
 
     @property
     def supports_atomic_compare_and_set(self) -> bool:
-        return os.name != "nt"
+        return True
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
-        """Coordinate local POSIX writers; use the thread lock elsewhere."""
-        if os.name == "nt":
-            yield
-            return
-
-        import fcntl
-
         with self._lock_path.open("a+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                return
+
+            import fcntl
+
             try:
                 self._lock_path.chmod(0o600)
             except OSError:
@@ -115,9 +126,6 @@ class JsonFileStateStore(StateStore):
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
         key = validate_state_key(connector_name)
-        # Atomic os.replace means an unlocked process reader sees either the old
-        # complete document or the new complete document, never a partial file.
-        # RLock still protects same-instance thread interactions.
         with self._lock:
             item = self._read_all_unlocked().get(key)
         return self._watermark_from_item(item) if item is not None else None
