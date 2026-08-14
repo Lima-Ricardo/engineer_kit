@@ -10,7 +10,7 @@
 </div>
 
 <div class="architecture-note">
-    O profiling é somente leitura: não grava dados na Bronze e não avança checkpoint. Use uma <strong>PK candidata</strong> para medir duplicidade e completude antes de ativar deduplicação. O modo <strong>sample</strong> é o padrão seguro da UI; escolha <strong>full</strong> explicitamente para percorrer toda a fonte configurada.
+    O profiling é somente leitura: não grava dados na Bronze e não avança checkpoint. A <strong>primary_key</strong> configurada é reutilizada na análise mesmo com deduplicação desligada; você também pode informar uma <strong>PK candidata</strong> temporária abaixo. O modo <strong>sample</strong> é o padrão seguro da UI; escolha <strong>full</strong> explicitamente para percorrer toda a fonte configurada.
 </div>
 
 <form method="post" action="/pipelines/{{ config.name }}/profile" class="card">
@@ -30,7 +30,7 @@
         <div class="field">
             <label>PK candidata para duplicatas</label>
             <input type="text" name="candidate_key" value="{{ candidate_key }}" placeholder="customer_id ou tenant_id,customer_id">
-            <div class="field-hint">Opcional. Com PK, <code>duplicates</code> compara a identidade do registro; sem PK, compara a linha completa.</div>
+            <div class="field-hint">Opcional. Com PK, <code>duplicates</code> compara a identidade do registro; sem PK configurada/candidata, compara a linha completa.</div>
         </div>
     </div>
 
