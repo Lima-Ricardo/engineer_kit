@@ -24,12 +24,29 @@ class JsonLinesRunLogStore(RunLogBackend):
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
-        if os.name == "nt":
-            yield
-            return
-        import fcntl
-
         with self._lock_path.open("a+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+
+                # msvcrt.locking locks bytes from the current file position.
+                # Keep a permanent sentinel byte so every process contends on
+                # exactly the same range even when the lock file was just created.
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                return
+
+            import fcntl
+
             try:
                 self._lock_path.chmod(0o600)
             except OSError:
