@@ -1,9 +1,9 @@
-"""Streaming exact-row deduplication with bounded memory.
+"""Streaming exact deduplication with bounded memory.
 
-The tracker stores only SHA-256 fingerprints in a temporary SQLite database.
+Deduplication stores only SHA-256 fingerprints in a temporary SQLite database.
 It therefore avoids materializing either records or an unbounded in-memory set
-while keeping source values out of the temporary dedup store. Disk usage grows
-with the number of unique rows; memory does not.
+while keeping source values out of the temporary store. Disk usage grows with
+the number of unique identities; memory does not.
 """
 
 from __future__ import annotations
@@ -14,7 +14,9 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+
+from engineer_kit.connectors.intent import parse_path, read_path
 
 _DEDUP_COMMIT_INTERVAL = 10_000
 
@@ -23,8 +25,54 @@ class DeduplicationError(RuntimeError):
     """Raised when the temporary deduplication backend cannot operate safely."""
 
 
+class InvalidDeduplicationKeyError(DeduplicationError):
+    """Raised when a record does not contain a usable declared primary key."""
+
+
+def resolve_dedup_keys(
+    value: str | Sequence[str] | bool | None,
+) -> tuple[str, ...] | None:
+    """Normalize the public ``dedup`` contract to declared primary-key paths.
+
+    ``False``/``None`` disable deduplication. ``True`` is deliberately rejected:
+    deduplication must declare the business identity that governs which complete
+    record is kept. A string denotes one key and a sequence denotes a composite
+    key.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        raise TypeError(
+            "dedup=True e ambiguo. Declare a PK, por exemplo "
+            "dedup='customer_id' ou dedup=['tenant_id', 'customer_id']."
+        )
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        raw_values = list(value)
+    else:
+        raise TypeError("dedup deve ser False/None, uma coluna PK ou uma lista de colunas PK.")
+
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            raise TypeError("cada coluna de dedup deve ser uma string.")
+        key = raw.strip()
+        if not key:
+            raise ValueError("coluna de dedup nao pode ser vazia.")
+        parse_path(key)
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    if not keys:
+        raise ValueError("dedup precisa declarar pelo menos uma coluna PK.")
+    return tuple(keys)
+
+
 def canonical_record_bytes(record: dict[str, Any]) -> bytes:
-    """Return a stable JSON representation used for row identity."""
+    """Return a stable JSON representation used for complete-row identity."""
     try:
         text = json.dumps(
             record,
@@ -43,15 +91,37 @@ def record_fingerprint(record: dict[str, Any]) -> bytes:
     return hashlib.sha256(canonical_record_bytes(record)).digest()
 
 
-class ExactRowDeduplicator:
-    """Disk-backed duplicate detector for one extraction/profile pass.
+def _key_values(record: dict[str, Any], keys: tuple[str, ...]) -> list[Any]:
+    values: list[Any] = []
+    for key in keys:
+        value = read_path(record, key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise InvalidDeduplicationKeyError(
+                f"PK de dedup invalida: '{key}' esta ausente, null ou blank."
+            )
+        if isinstance(value, (dict, list)):
+            raise InvalidDeduplicationKeyError(
+                f"PK de dedup invalida: '{key}' deve resolver para valor escalar."
+            )
+        values.append(value)
+    return values
 
-    ``add(record)`` returns ``True`` only for the first occurrence. The SQLite
-    file is process-local, contains only fingerprints, and is removed on close.
-    Inserts are committed periodically so a very large scan does not become one
-    enormous SQLite transaction.
-    """
 
+def key_fingerprint(record: dict[str, Any], keys: tuple[str, ...]) -> bytes:
+    """Return a stable fingerprint for a declared simple/composite primary key."""
+    try:
+        payload = json.dumps(
+            _key_values(record, keys),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise DeduplicationError("PK nao pode ser serializada para deduplicacao") from exc
+    return hashlib.sha256(payload).digest()
+
+
+class _ExactFingerprintStore:
     def __init__(self, *, directory: str | os.PathLike[str] | None = None) -> None:
         fd, raw_path = tempfile.mkstemp(
             prefix="engineer_kit_dedup_",
@@ -81,10 +151,9 @@ class ExactRowDeduplicator:
         """Temporary path, primarily exposed for diagnostics/tests."""
         return self._path
 
-    def add(self, record: dict[str, Any]) -> bool:
+    def add_fingerprint(self, fingerprint: bytes) -> bool:
         if self._closed:
             raise DeduplicationError("deduplicador ja foi encerrado")
-        fingerprint = record_fingerprint(record)
         cursor = self._conn.execute(
             "INSERT OR IGNORE INTO seen(fingerprint) VALUES (?)",
             (sqlite3.Binary(fingerprint),),
@@ -111,7 +180,88 @@ class ExactRowDeduplicator:
             self._path.unlink(missing_ok=True)
             self._closed = True
 
+
+class ExactRowDeduplicator:
+    """Disk-backed duplicate detector for complete rows."""
+
+    def __init__(self, *, directory: str | os.PathLike[str] | None = None) -> None:
+        self._store = _ExactFingerprintStore(directory=directory)
+
+    @property
+    def path(self) -> Path:
+        return self._store.path
+
+    @property
+    def unique_count(self) -> int:
+        return self._store.unique_count
+
+    @property
+    def duplicate_count(self) -> int:
+        return self._store.duplicate_count
+
+    def add(self, record: dict[str, Any]) -> bool:
+        return self._store.add_fingerprint(record_fingerprint(record))
+
+    def close(self) -> None:
+        self._store.close()
+
     def __enter__(self) -> "ExactRowDeduplicator":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+class ExactKeyDeduplicator:
+    """Disk-backed detector for a declared simple/composite primary key.
+
+    ``add(record)`` returns ``True`` only for the first occurrence of the PK.
+    Missing/null/blank/non-scalar key values fail fast by default because a
+    declared dedup key is a primary-key contract, not a best-effort hint.
+    Profiling may opt into ``strict=False`` to count invalid-key rows instead of
+    stopping the scan.
+    """
+
+    def __init__(
+        self,
+        keys: str | Sequence[str],
+        *,
+        strict: bool = True,
+        directory: str | os.PathLike[str] | None = None,
+    ) -> None:
+        resolved = resolve_dedup_keys(keys)
+        assert resolved is not None
+        self.keys = resolved
+        self.strict = strict
+        self.invalid_key_count = 0
+        self._store = _ExactFingerprintStore(directory=directory)
+
+    @property
+    def path(self) -> Path:
+        return self._store.path
+
+    @property
+    def unique_count(self) -> int:
+        return self._store.unique_count
+
+    @property
+    def duplicate_count(self) -> int:
+        return self._store.duplicate_count
+
+    def add(self, record: dict[str, Any]) -> bool | None:
+        try:
+            fingerprint = key_fingerprint(record, self.keys)
+        except InvalidDeduplicationKeyError:
+            self.invalid_key_count += 1
+            if self.strict:
+                raise
+            return None
+        return self._store.add_fingerprint(fingerprint)
+
+    def close(self) -> None:
+        self._store.close()
+
+    def __enter__(self) -> "ExactKeyDeduplicator":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -120,7 +270,11 @@ class ExactRowDeduplicator:
 
 __all__ = [
     "DeduplicationError",
+    "ExactKeyDeduplicator",
     "ExactRowDeduplicator",
+    "InvalidDeduplicationKeyError",
     "canonical_record_bytes",
+    "key_fingerprint",
     "record_fingerprint",
+    "resolve_dedup_keys",
 ]
