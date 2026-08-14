@@ -13,7 +13,7 @@ import requests
 
 from engineer_kit.connectors.base import Connector
 from engineer_kit.connectors.date_field import DateFieldSpec
-from engineer_kit.connectors.dedup import resolve_dedup_keys
+from engineer_kit.connectors.dedup import resolve_primary_key
 from engineer_kit.connectors.extraction import (
     DEFAULT_EXTRACTION_BATCH_SIZE,
     ExtractionSession,
@@ -119,7 +119,7 @@ class APIConnector(Connector):
         else:
             raise TypeError("dedup deve ser booleano; declare a identidade em primary_key.")
 
-        resolved_primary_key = resolve_dedup_keys(primary_key)
+        resolved_primary_key = resolve_primary_key(primary_key)
         if resolved_dedup and resolved_primary_key is None:
             raise ValueError(
                 "dedup=True exige primary_key. Defina primary_key='id' ou uma chave composta."
