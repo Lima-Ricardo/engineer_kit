@@ -42,6 +42,7 @@ def _jsonl_worker(path, prefix, count, ready, start):
                 finished_at=datetime(2026, 8, 12, 12, 1, tzinfo=timezone.utc),
                 status="success",
                 rows_loaded=1,
+                extra_fields_seen=[],
                 run_id=f"{prefix}-{index}",
             )
         )
