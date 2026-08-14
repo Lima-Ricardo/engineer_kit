@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from engineer_kit.config.pipeline_config import PipelineConfig
+from engineer_kit.config.pipeline_config import PipelineConfig, _resolve_secret_refs
 from engineer_kit.connectors.rest import RestConnector
 from engineer_kit.storage.state_store import StateStore, Watermark
 
@@ -10,9 +10,9 @@ from engineer_kit.storage.state_store import StateStore, Watermark
 class InspectionStateStore(StateStore):
     """Empty state backend that refuses writes.
 
-    A profile launched from Local Lab should evaluate the configured source
+    A profile launched from Local Lab/CLI should evaluate the configured source
     window without mutating production/local checkpoints. ``RestConnector``
-    starts from the declarative ``initial_start`` when this store returns None.
+    starts from declarative ``initial_start`` when this store returns None.
     """
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
@@ -27,6 +27,7 @@ def connector_from_config(config: PipelineConfig) -> RestConnector:
     provider = config.secrets.build()
     incremental = config.connector.incremental
     state_store = InspectionStateStore() if incremental.enabled else None
+    params = _resolve_secret_refs(config.connector.resolved_params(), provider)
 
     return RestConnector(
         name=config.name,
@@ -41,7 +42,7 @@ def connector_from_config(config: PipelineConfig) -> RestConnector:
         initial_start=incremental.resolve_initial_start(),
         date_field=incremental.date_field,
         date_params=config.connector.date_params.build(),
-        params=config.connector.resolved_params() or None,
+        params=params or None,
         records=config.connector.resolved_records(),
         select=config.connector.select,
         dedup=bool(getattr(config.connector, "dedup", False)),
