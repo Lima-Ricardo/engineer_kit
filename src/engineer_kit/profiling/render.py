@@ -13,6 +13,10 @@ def _pct(value: int, total: int) -> str:
     return f"{(value / total) * 100:.2f}%"
 
 
+def _metric(value: int | None) -> str:
+    return "not computed" if value is None else f"{value:,}"
+
+
 def render_text(report: ProfileReport) -> str:
     """Render an aggregate-only terminal report."""
     lines = [
@@ -35,10 +39,10 @@ def render_text(report: ProfileReport) -> str:
     if report.fields:
         lines.extend(
             [
-                f"fields={len(report.fields):,} | missing_fields={quality.fields_with_missing:,} "
-                f"| null_fields={quality.fields_with_nulls:,} "
-                f"| empty_fields={quality.fields_with_empty:,} "
-                f"| mixed_type_fields={quality.mixed_type_fields:,}",
+                f"fields={len(report.fields):,} | missing_fields={_metric(quality.fields_with_missing)} "
+                f"| null_fields={_metric(quality.fields_with_nulls)} "
+                f"| empty_fields={_metric(quality.fields_with_empty)} "
+                f"| mixed_type_fields={_metric(quality.mixed_type_fields)}",
                 "",
                 "FIELDS",
             ]
@@ -74,6 +78,10 @@ def render_text(report: ProfileReport) -> str:
         lines.extend(["", "WARNINGS"])
         lines.extend(f"- {warning}" for warning in report.warnings)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _html_metric(value: int | None) -> str:
+    return "—" if value is None else f"{value:,}"
 
 
 def render_html(report: ProfileReport) -> str:
@@ -129,8 +137,10 @@ th,td{{border-bottom:1px solid #ddd;padding:.55rem;text-align:left;vertical-alig
 <p>scope={escape(report.scope)} · records={report.records_analyzed:,} · metrics={escape(','.join(report.requested_metrics))}</p>
 <div class="profile-grid"><div class="profile-card"><strong>Records analyzed</strong><span>{report.records_analyzed:,}</span></div>
 <div class="profile-card"><strong>Fields</strong><span>{len(report.fields):,}</span></div>{duplicate_html}
-<div class="profile-card"><strong>Fields with missing</strong><span>{quality.fields_with_missing:,}</span></div>
-<div class="profile-card"><strong>Fields with nulls</strong><span>{quality.fields_with_nulls:,}</span></div></div>
+<div class="profile-card"><strong>Fields with missing</strong><span>{_html_metric(quality.fields_with_missing)}</span></div>
+<div class="profile-card"><strong>Fields with nulls</strong><span>{_html_metric(quality.fields_with_nulls)}</span></div>
+<div class="profile-card"><strong>Fields with empty</strong><span>{_html_metric(quality.fields_with_empty)}</span></div>
+<div class="profile-card"><strong>Mixed-type fields</strong><span>{_html_metric(quality.mixed_type_fields)}</span></div></div>
 <table><thead><tr><th>Field</th><th>Present</th><th>Missing</th><th>Nulls</th><th>Empty</th><th>Unique</th><th>Types</th></tr></thead>
 <tbody>{''.join(rows)}</tbody></table>
 {'<h2>Warnings</h2><ul>'+warning_html+'</ul>' if warning_html else ''}
