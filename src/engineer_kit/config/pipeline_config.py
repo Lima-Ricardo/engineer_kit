@@ -29,6 +29,7 @@ from engineer_kit.adapters.registry import (
     resolve_auto,
 )
 from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
+from engineer_kit.connectors.dedup import resolve_dedup_keys
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import IncrementalMode
 from engineer_kit.connectors.pagination import PaginationStrategy, resolve_pagination
@@ -279,7 +280,7 @@ class ConnectorConfig:
     select: list[str] | str | dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
     state_key: Optional[str] = None
-    dedup: bool = False
+    dedup: list[str] | str | bool | None = False
     # 0.2 aliases retained for existing Python configs and the current Local Lab.
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
@@ -287,8 +288,11 @@ class ConnectorConfig:
     max_pages: int = DEFAULT_MAX_PAGES
 
     def __post_init__(self) -> None:
-        if not isinstance(self.dedup, bool):
-            raise PipelineConfigError("connector.dedup deve ser booleano.")
+        try:
+            keys = resolve_dedup_keys(self.dedup)
+        except (TypeError, ValueError) as exc:
+            raise PipelineConfigError(f"connector.dedup invalido: {exc}") from exc
+        self.dedup = list(keys) if keys else False
 
     def resolved_records(self) -> str | None:
         if self.records and self.records_path and self.records != self.records_path:
@@ -621,11 +625,7 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         select=connector_data.get("select"),
         params=connector_data.get("params") or {},
         state_key=connector_data.get("state_key"),
-        dedup=_strict_bool(
-            connector_data.get("dedup"),
-            path="connector.dedup",
-            default=False,
-        ),
+        dedup=connector_data.get("dedup", False),
         records_path=connector_data.get("records_path"),
         static_params=connector_data.get("static_params") or {},
         extraction_batch_size=connector_data.get(
