@@ -22,12 +22,18 @@ class Watermark:
     cursor_value: Optional[str]
 
 
+class StateConflictError(RuntimeError):
+    """Raised when a checkpoint changed after an extraction window was resolved."""
+
+
 class StateStore(ABC):
     """Persistence port used by incremental strategies.
 
     Implementations only need to read and atomically replace the watermark
-    for a connector. The connector therefore never needs to know whether
-    state lives in DuckDB, Delta, a SQL table, or another service.
+    for a connector. New implementations should override
+    :meth:`compare_and_set_watermark` atomically when the backend supports it.
+    The compatibility fallback detects conflicts but cannot make the read/write
+    pair atomic across processes.
     """
 
     @abstractmethod
@@ -37,6 +43,29 @@ class StateStore(ABC):
     @abstractmethod
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
         """Persist a checkpoint after the destination has confirmed the load."""
+
+    @property
+    def supports_atomic_compare_and_set(self) -> bool:
+        return False
+
+    def compare_and_set_watermark(
+        self,
+        connector_name: str,
+        expected: Watermark | None,
+        watermark: Watermark,
+    ) -> None:
+        """Commit only when state still matches the window's starting checkpoint.
+
+        This default keeps third-party StateStore implementations compatible.
+        Official mutable backends override it with a backend-atomic operation.
+        """
+        current = self.get_watermark(connector_name)
+        if current != expected:
+            raise StateConflictError(
+                f"Checkpoint de '{connector_name}' mudou durante a execucao; "
+                "o novo watermark nao foi confirmado. Reexecute a partir do estado atual."
+            )
+        self.set_watermark(connector_name, watermark)
 
 
 _DUCKDB_EXPORTS = {"DuckDBStateStore", "IngestionStateStore"}
@@ -62,4 +91,4 @@ def __getattr__(name: str):
 
 # ``__getattr__`` preserves explicit legacy imports. Wildcard exports remain
 # backend-neutral so static tooling and core-only installations see only ports.
-__all__ = ["StateStore", "Watermark"]
+__all__ = ["StateConflictError", "StateStore", "Watermark"]
