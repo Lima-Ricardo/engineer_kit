@@ -51,11 +51,20 @@
                 <div class="field-hint">Default: <code>25.000</code> registros. Limita a quantidade entregue ao consumidor por vez. É independente do tamanho da página da API e do write batch do destino.</div>
             </div>
             <div class="field">
-                <label>PK para deduplicação</label>
-                <input type="text" name="dedup_key" value="{{ config.connector.dedup | join(',') if config and config.connector.dedup else '' }}" placeholder="customer_id ou tenant_id,customer_id">
-                <div class="field-hint">Opcional. Declare a coluna (ou chave composta) que identifica o registro. Quando a PK reaparece, o registro inteiro seguinte é descartado; a primeira ocorrência vence. Use <strong>Data Profile</strong> para validar missing/null/duplicatas antes de ativar.</div>
+                <label>Primary key / identidade</label>
+                <input type="text" name="primary_key" value="{{ config.connector.primary_key | join(',') if config and config.connector.primary_key else '' }}" placeholder="customer_id ou tenant_id,customer_id">
+                <div class="field-hint">Opcional para profiling; obrigatória quando dedup está ativo. A PK pode ser simples ou composta e deve referenciar o registro emitido depois de <code>select</code>.</div>
+            </div>
+            <div class="field">
+                <label>Deduplicação por PK</label>
+                <select name="dedup">
+                    <option value="off" {{ "selected" if not config or not config.connector.dedup else "" }}>Desligada</option>
+                    <option value="on" {{ "selected" if config and config.connector.dedup else "" }}>Ativa — manter primeira ocorrência</option>
+                </select>
+                <div class="field-hint">O toggle só define a política. A identidade vem de <strong>Primary key</strong>. Se a PK repetir, o registro inteiro posterior é descartado.</div>
             </div>
         </div>
+        <div class="architecture-note"><strong>Recomendação:</strong> use <strong>Data Profile</strong> para medir completude, nulls/missing e duplicatas da PK candidata antes de ativar a deduplicação.</div>
     </fieldset>
 
     <fieldset>
