@@ -230,6 +230,7 @@ def create_app(
         selected_metrics: list[str] | tuple[str, ...] = (),
         scope: str = "sample",
         limit: int = PROFILE_SAMPLE_LIMIT,
+        candidate_key: str = "",
     ) -> dict:
         return {
             "config": config,
@@ -237,6 +238,7 @@ def create_app(
             "selected_metrics": tuple(selected_metrics),
             "scope": scope,
             "limit": limit,
+            "candidate_key": candidate_key,
             "report": report,
             "error": error,
         }
@@ -244,10 +246,15 @@ def create_app(
     @app.get("/pipelines/{name}/profile", response_class=HTMLResponse)
     def profile_form(request: Request, name: str, _: None = Depends(check_auth)):
         config = _load_or_404(name)
+        configured_key = (
+            ",".join(config.connector.dedup)
+            if isinstance(config.connector.dedup, list)
+            else ""
+        )
         return templates.TemplateResponse(
             request,
             "profile_report.html",
-            _profile_context(config),
+            _profile_context(config, candidate_key=configured_key),
         )
 
     @app.post("/pipelines/{name}/profile", response_class=HTMLResponse)
@@ -257,11 +264,17 @@ def create_app(
         form = await request.form()
         selected = tuple(form.getlist("metric")) if hasattr(form, "getlist") else ()
         scope = str(form.get("scope") or "sample").strip().lower()
+        candidate_key = str(form.get("candidate_key") or "").strip()
+        key = [item.strip() for item in candidate_key.split(",") if item.strip()] or None
         if scope not in {"sample", "full"}:
             return templates.TemplateResponse(
                 request,
                 "profile_report.html",
-                _profile_context(config, error="Scope deve ser sample ou full."),
+                _profile_context(
+                    config,
+                    error="Scope deve ser sample ou full.",
+                    candidate_key=candidate_key,
+                ),
                 status_code=400,
             )
         try:
@@ -280,6 +293,7 @@ def create_app(
                     ),
                     selected_metrics=selected,
                     scope=scope,
+                    candidate_key=candidate_key,
                 ),
                 status_code=400,
             )
@@ -292,6 +306,7 @@ def create_app(
                 *selected,
                 scope=scope,
                 limit=resolved_limit,
+                key=key,
             )
         except Exception as exc:
             return templates.TemplateResponse(
@@ -303,6 +318,7 @@ def create_app(
                     selected_metrics=selected,
                     scope=scope,
                     limit=requested_limit,
+                    candidate_key=candidate_key,
                 ),
                 status_code=502,
             )
@@ -316,6 +332,7 @@ def create_app(
                 selected_metrics=selected,
                 scope=scope,
                 limit=requested_limit,
+                candidate_key=candidate_key,
             ),
         )
 
@@ -517,6 +534,9 @@ def create_app(
                     )
                 )
 
+        dedup_key = str(form.get("dedup_key") or "").strip()
+        dedup = [item.strip() for item in dedup_key.split(",") if item.strip()] or False
+
         connector = ConnectorConfig(
             base_url=base_url,
             method=form.get("method", "GET"),
@@ -541,7 +561,7 @@ def create_app(
                 format=form.get("date_param_format") or "%Y-%m-%d",
             ),
             records_path=form.get("records_path") or None,
-            dedup=(form.get("dedup") or "off") == "on",
+            dedup=dedup,
             extraction_batch_size=int(
                 form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
             ),
