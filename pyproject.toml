@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "engineer_kit"
-version = "0.3.0"
-description = "Reliable, streaming-first REST API ingestion for analytical destinations"
+version = "0.3.1"
+description = "Intent-driven, streaming-first REST ingestion with profiling, data quality, safe checkpoints, and analytical destinations"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Ricardo Alex De Lima" }]
 requires-python = ">=3.10"
-keywords = ["data-engineering", "api-ingestion", "etl", "elt", "rest-api", "incremental", "duckdb", "parquet", "delta-lake", "databricks", "microsoft-fabric"]
+keywords = ["data-engineering", "api-ingestion", "etl", "elt", "rest-api", "profiling", "data-quality", "primary-key", "deduplication", "incremental", "duckdb", "parquet", "delta-lake", "databricks", "microsoft-fabric"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
