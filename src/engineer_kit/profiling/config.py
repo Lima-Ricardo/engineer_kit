@@ -45,7 +45,7 @@ def connector_from_config(config: PipelineConfig) -> RestConnector:
         params=params or None,
         records=config.connector.resolved_records(),
         select=config.connector.select,
-        dedup=bool(getattr(config.connector, "dedup", False)),
+        dedup=config.connector.dedup,
         extraction_batch_size=config.connector.extraction_batch_size,
         max_pages=config.connector.max_pages,
     )
