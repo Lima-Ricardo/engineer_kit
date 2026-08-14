@@ -15,11 +15,12 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 - Profiling de `duplicates`, `nulls`, `missing`, `empty`, tipos JSON nativos, cardinalidade, schema/path map e contagem de registros.
 - Análise de PK candidata via `profile(..., key=...)`, incluindo duplicatas por chave e registros com PK ausente/null/blank/não escalar.
 - Relatório de profiling/Data Quality no terminal, HTML standalone, CLI `profile-config` e Local Lab.
-- Deduplicação opt-in por PK simples ou composta (`dedup="customer_id"` / `dedup=["tenant_id", "order_id"]`), com `False` por padrão.
+- `primary_key` como identidade simples ou composta independente da política de deduplicação, disponível em Python, YAML e Local Lab.
+- `dedup=False` por padrão e `dedup=True` opt-in para remover registros inteiros repetidos pela `primary_key`; a primeira ocorrência vence.
 - Deduplicação exata disk-backed por fingerprints SHA-256 da PK em SQLite temporário, compartilhada por `collect()`, `stream()` e managed ingestion.
 - Paths declarativos com índices de arrays e chaves entre aspas, além de aliases explícitos em `select`.
 - `state_key` para namespaces de checkpoint independentes do nome lógico do connector.
-- `capability_manifest()` serializável para descoberta de capacidades por CLI/UI, incluindo profiling e dedup por PK.
+- `capability_manifest()` serializável para descoberta de capacidades por CLI/UI, incluindo `primary_key`, profiling e política de dedup.
 - `StateStore.compare_and_set_watermark()` e `StateConflictError` para recusar commits derivados de checkpoints obsoletos.
 
 ### Changed
@@ -28,8 +29,9 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 - Profiling preserva os tipos JSON nativos mesmo quando a ingestão normaliza valores para o contrato Bronze atual.
 - Métricas de Data Quality não calculadas permanecem semanticamente distintas de resultados calculados com valor zero.
 - Cardinalidade de profiling é exata enquanto limitada e passa a estimativa HyperLogLog com erro relativo declarado quando cresce.
-- `dedup=True` passa a ser recusado por ambiguidade; deduplicação exige uma PK explícita. A primeira ocorrência vence e o registro inteiro posterior com a mesma chave é removido.
-- Dedup por PK é aplicado depois de `select`; quando existe projeção, as chaves devem referenciar aliases emitidos. `profile()` observa o conjunto antes da remoção e pode validar a mesma PK candidata.
+- Identidade e deduplicação passam a ser ortogonais: `primary_key="customer_id", dedup=False` mapeia identidade sem remover linhas; `dedup=True` exige `primary_key` explícita.
+- `profile("duplicates")` reutiliza `primary_key` configurada mesmo quando dedup está desligado, permitindo validar a identidade antes de ativar a política.
+- Dedup por PK é aplicado depois de `select`; quando existe projeção, `primary_key` deve referenciar aliases emitidos. Quando a PK reaparece, o registro inteiro posterior é removido.
 - DuckDB faz compare-and-set do checkpoint dentro de uma transação.
 - O StateStore JSON usa lock interprocess em POSIX para serializar leitura/compare/write local.
 - `__version__` passa a vir do metadata do pacote instalado, eliminando a duplicação manual com `pyproject.toml`.
@@ -44,7 +46,8 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 ### Security
 
 - YAML usa loader derivado de `yaml.SafeLoader`, rejeita chaves duplicadas e campos desconhecidos em blocos conhecidos.
-- `connector.dedup` recusa booleano `true`, chaves vazias e PKs inválidas; uma PK configurada com valor ausente/null/blank/não escalar interrompe a ingestão em vez de colapsar identidades indefinidas.
+- `connector.dedup` é estritamente booleano no YAML; `true` exige `connector.primary_key`, e strings/listas são recusadas para evitar contratos ambíguos.
+- Uma deduplicação ativa com PK ausente/null/blank/não escalar interrompe a ingestão em vez de colapsar identidades indefinidas.
 - O `ProfileReport` é aggregate-only e seus renderers não persistem valores reais da fonte; HTML faz escaping de paths/warnings.
 - Colunas reservadas da Bronze (`_raw`, `_extra`, `_source`, `_run_id`, `_ingestion_key` e demais metadata internos) não podem ser declaradas pela origem.
 - Flattening e seleção falham explicitamente quando paths distintos colidem no mesmo nome de coluna/alias, evitando sobrescrita silenciosa de dados.
@@ -53,6 +56,7 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 
 - `collect()` e `stream()` preservam seus tipos de retorno; profiling é uma operação separada e opt-in.
 - `dedup=False` preserva o comportamento anterior sem custo do tracker temporário.
+- A forma programática intermediária e ainda não publicada `dedup=<PK>` é convertida para `primary_key=<PK>, dedup=True` com `DeprecationWarning`; YAML novo aceita apenas o contrato separado.
 - `records_path`, `static_params`, `state_store` e as formas declarativas da `0.2` continuam aceitos.
 - Objetos programáticos `IncrementalConfig(...)` continuam habilitando incremental por padrão; o novo default não incremental aplica-se ao happy path declarativo quando esse bloco é omitido.
 
