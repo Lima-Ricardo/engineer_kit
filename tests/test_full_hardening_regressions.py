@@ -11,6 +11,8 @@ from engineer_kit.connectors.pagination import (
     ParsedPage,
     resolve_pagination,
 )
+from engineer_kit.connectors.rest import RestConnector
+from engineer_kit.orchestration.pipeline import _source_config_identity
 from engineer_kit.ui.app import create_app
 from engineer_kit.ui.run_manager import RunState
 
@@ -79,6 +81,47 @@ def test_direct_page_strategy_preserves_legacy_short_page_stop():
     params = strategy.initial_params()
     short_page = ParsedPage(records=[{"id": 1}], raw=None)
     assert strategy.next_params(short_page, params) is None
+
+
+def test_retry_source_identity_changes_with_source_or_filter_config():
+    first = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        params={"status": "open"},
+        incremental=False,
+    )
+    different_source = RestConnector(
+        name="orders",
+        base_url="https://other.example.test/orders",
+        params={"status": "open"},
+        incremental=False,
+    )
+    different_filter = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        params={"status": "closed"},
+        incremental=False,
+    )
+
+    first_identity = _source_config_identity(first)
+    assert _source_config_identity(different_source) != first_identity
+    assert _source_config_identity(different_filter) != first_identity
+
+
+def test_retry_source_identity_does_not_depend_on_secret_value():
+    first = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        params={"token": "secret-a", "status": "open"},
+        incremental=False,
+    )
+    rotated = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        params={"token": "secret-b", "status": "open"},
+        incremental=False,
+    )
+    assert _source_config_identity(first) == _source_config_identity(rotated)
 
 
 def test_run_state_bounds_single_log_line_memory():
