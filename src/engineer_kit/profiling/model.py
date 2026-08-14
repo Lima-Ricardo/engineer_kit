@@ -46,6 +46,24 @@ class FieldProfile:
 class DuplicateProfile:
     duplicate_rows: int
     unique_rows: int
+    key_fields: tuple[str, ...] | None = None
+    invalid_key_rows: int = 0
+
+    @property
+    def mode(self) -> str:
+        return "primary_key" if self.key_fields else "complete_row"
+
+    @property
+    def key_complete(self) -> bool | None:
+        if self.key_fields is None:
+            return None
+        return self.invalid_key_rows == 0
+
+    @property
+    def key_unique(self) -> bool | None:
+        if self.key_fields is None:
+            return None
+        return self.duplicate_rows == 0
 
 
 @dataclass(frozen=True)
@@ -53,6 +71,7 @@ class DataQualitySummary:
     """Aggregate quality view without confusing uncomputed metrics with zero."""
 
     duplicate_rows: int | None
+    invalid_key_rows: int | None
     fields_with_missing: int | None
     fields_with_nulls: int | None
     fields_with_empty: int | None
@@ -98,6 +117,7 @@ class ProfileReport:
 
         return DataQualitySummary(
             duplicate_rows=(self.duplicates.duplicate_rows if self.duplicates else None),
+            invalid_key_rows=(self.duplicates.invalid_key_rows if self.duplicates else None),
             fields_with_missing=missing,
             fields_with_nulls=nulls,
             fields_with_empty=empty,
