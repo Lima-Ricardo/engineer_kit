@@ -18,13 +18,13 @@ A CLI gera uma senha temporária quando necessário e a UI fica em loopback por 
 
 ## Dashboard
 
-![Dashboard](../assets/ui/dashboard.svg)
+![Dashboard da Local Lab](../assets/ui/dashboard.png)
 
 O dashboard mostra pipelines, última execução, status e quantidade de registros.
 
 ## Editor
 
-![Editor](../assets/ui/pipeline-editor.svg)
+![Editor](../assets/ui/pipeline-editor.png)
 
 O formulário separa:
 
@@ -37,6 +37,12 @@ O formulário separa:
 7. destination;
 8. transformação;
 9. auditoria.
+
+## Data Profile
+
+![Data Profile](../assets/ui/data-profile.png)
+
+O perfil usa o mesmo `ProfileReport` da API Python, com temas claro/escuro, PT-BR/EN, KPIs de qualidade, busca e filtros de campos.
 
 ## Arquitetura
 

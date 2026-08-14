@@ -103,15 +103,15 @@ A UI local compartilha os mesmos contratos da API Python e do YAML.
 
 ### Dashboard
 
-![Local Lab dashboard](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/dashboard.svg)
+![Dashboard da nova Local Lab](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/dashboard.png)
 
 ### Pipeline editor — identidade e deduplicação separadas
 
-![Pipeline editor with primary key and dedup](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/pipeline-editor.svg)
+![Novo editor de pipeline com primary key e deduplicação](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/pipeline-editor.png)
 
 ### Data Profile — qualidade e validação de PK antes da Bronze
 
-![Data Profile interface](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/data-profile.svg)
+![Nova interface bilíngue do Data Profile](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/data-profile.png)
 
 Inicie com:
 
