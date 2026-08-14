@@ -5,7 +5,11 @@ from datetime import date
 import pytest
 
 from engineer_kit.adapters.files.state_store import JsonFileStateStore
-from engineer_kit.connectors.dedup import ExactRowDeduplicator
+from engineer_kit.connectors.dedup import (
+    ExactKeyDeduplicator,
+    ExactRowDeduplicator,
+    InvalidDeduplicationKeyError,
+)
 from engineer_kit.connectors.rest import RestConnector
 from engineer_kit.profiling.engine import UnknownProfileMetricError, profile_records
 
@@ -27,7 +31,7 @@ class _Response:
         return {
             "data": [
                 duplicate,
-                dict(duplicate),
+                {**duplicate, "name": "changed payload"},
                 {
                     "id": 2,
                     "name": "   ",
@@ -48,7 +52,7 @@ class _Client:
         return _Response()
 
 
-def _connector(*, dedup: bool = False, client: _Client | None = None, **kwargs):
+def _connector(*, dedup=False, client: _Client | None = None, **kwargs):
     return RestConnector(
         base_url="https://example.test/items",
         pagination=False,
@@ -66,18 +70,29 @@ def test_profile_without_selectors_runs_complete_profile_on_native_json_types():
     assert report.has("duplicates")
     assert report.has("cardinality")
     assert report.duplicates is not None
-    assert report.duplicates.duplicate_rows == 1
-    assert report.duplicates.unique_rows == 2
+    assert report.duplicates.duplicate_rows == 0
+    assert report.duplicates.unique_rows == 3
     assert report.fields["id"].types == {"integer": 3}
     assert report.fields["active"].types == {"boolean": 3}
     assert report.fields["email"].nulls == 2
     assert report.fields["email"].missing == 1
-    assert report.fields["name"].empty_strings == 2
+    assert report.fields["name"].empty_strings == 1
     assert report.fields["name"].blank_strings == 1
     assert report.fields["tags"].empty_arrays == 2
     assert report.fields["meta"].types == {"object": 3}
     assert report.fields["meta.score"].cardinality is not None
     assert report.fields["meta.score"].cardinality.count == 2
+
+
+def test_profile_candidate_pk_reports_duplicate_keys_even_when_rows_differ():
+    report = _connector().profile("duplicates", key="id")
+
+    assert report.duplicates is not None
+    assert report.duplicates.key_fields == ("id",)
+    assert report.duplicates.duplicate_rows == 1
+    assert report.duplicates.invalid_key_rows == 0
+    assert report.duplicates.key_complete is True
+    assert report.duplicates.key_unique is False
 
 
 def test_profile_metric_selection_changes_execution_contract_not_only_rendering():
@@ -97,7 +112,7 @@ def test_profile_quality_preset_and_field_filter_are_composable():
 
     assert set(report.fields) == {"email"}
     assert report.duplicates is not None
-    assert report.quality.duplicate_rows == 1
+    assert report.quality.duplicate_rows == 0
     assert report.quality.fields_with_missing == 1
     assert report.quality.fields_with_nulls == 1
 
@@ -128,33 +143,79 @@ def test_profile_does_not_commit_incremental_state(tmp_path):
     assert not state_path.exists()
 
 
-def test_dedup_is_off_by_default_and_true_filters_exact_output_rows():
+def test_dedup_is_off_by_default_and_pk_key_filters_complete_duplicate_records():
     default_records = _connector().collect()
-    dedup_records = _connector(dedup=True).collect()
+    dedup_records = _connector(dedup=["id"]).collect()
 
     assert len(default_records) == 3
     assert len(dedup_records) == 2
-    assert default_records[0] == default_records[1]
-    assert dedup_records[0] != dedup_records[1]
+    assert default_records[0]["id"] == default_records[1]["id"]
+    assert default_records[0]["name"] != default_records[1]["name"]
+    assert [record["id"] for record in dedup_records] == ["1", "2"]
 
 
-def test_profile_still_reports_source_duplicates_when_ingestion_dedup_is_enabled():
-    connector = _connector(dedup=True)
+def test_dedup_true_is_rejected_because_identity_must_be_explicit():
+    with pytest.raises(TypeError, match="dedup=True e ambiguo"):
+        _connector(dedup=True)
+
+
+def test_profile_reuses_configured_dedup_pk_automatically():
+    connector = _connector(dedup=["id"])
 
     report = connector.profile("duplicates")
     records = connector.collect()
 
     assert report.duplicates is not None
+    assert report.duplicates.key_fields == ("id",)
     assert report.duplicates.duplicate_rows == 1
     assert len(records) == 2
 
 
 def test_dedup_occurs_after_select_on_the_emitted_dataset():
-    connector = _connector(dedup=True, select=["active"])
+    connector = _connector(
+        dedup=["customer_id"],
+        select={"id": "customer_id", "active": "active"},
+    )
 
     records = connector.collect()
 
-    assert records == [{"active": "True"}, {"active": "False"}]
+    assert records == [
+        {"customer_id": "1", "active": "True"},
+        {"customer_id": "2", "active": "False"},
+    ]
+
+
+def test_dedup_supports_composite_primary_keys():
+    tracker = ExactKeyDeduplicator(["tenant_id", "customer_id"])
+    try:
+        assert tracker.add({"tenant_id": "a", "customer_id": 1, "value": "x"}) is True
+        assert tracker.add({"tenant_id": "a", "customer_id": 1, "value": "y"}) is False
+        assert tracker.add({"tenant_id": "b", "customer_id": 1, "value": "z"}) is True
+    finally:
+        tracker.close()
+
+
+def test_dedup_pk_must_be_present_non_null_non_blank_and_scalar():
+    tracker = ExactKeyDeduplicator("id")
+    try:
+        for record in ({}, {"id": None}, {"id": "  "}, {"id": [1]}):
+            with pytest.raises(InvalidDeduplicationKeyError):
+                tracker.add(record)
+    finally:
+        tracker.close()
+
+
+def test_profile_counts_invalid_candidate_pk_rows_instead_of_aborting():
+    report = profile_records(
+        [{"id": 1}, {"id": None}, {}, {"id": 1}],
+        "duplicates",
+        key="id",
+    )
+
+    assert report.duplicates is not None
+    assert report.duplicates.duplicate_rows == 1
+    assert report.duplicates.invalid_key_rows == 2
+    assert report.quality.invalid_key_rows == 2
 
 
 def test_nested_array_presence_is_counted_per_record_not_per_element():
