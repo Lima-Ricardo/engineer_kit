@@ -13,6 +13,7 @@ at-least-once semantics unless they implement ``load_with_context``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -29,6 +30,20 @@ from engineer_kit.storage.state_store import Watermark
 from engineer_kit.terminal_log import visual_logger
 
 logger = logging.getLogger("engineer_kit.pipeline")
+
+_SENSITIVE_IDENTITY_KEYS = {
+    "password",
+    "passwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+    "authorization",
+}
+_RUNTIME_PAGINATION_FIELDS = {"_resolved", "resolved_type"}
 
 
 @dataclass(frozen=True)
@@ -417,14 +432,92 @@ def _watermark_json(watermark: Watermark | None) -> str | None:
     return json.dumps(asdict(watermark), ensure_ascii=False, default=str, sort_keys=True)
 
 
-def _checkpoint_identity(connector: APIConnector, window) -> str:
-    """Bind retry identity to both state namespace and checkpoint-before.
+def _identity_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and key.strip().lower().replace("-", "_") in _SENSITIVE_IDENTITY_KEYS:
+        return "<secret>"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if callable(value):
+        module = getattr(value, "__module__", type(value).__module__)
+        qualname = getattr(value, "__qualname__", type(value).__qualname__)
+        return {"callable": f"{module}.{qualname}"}
+    if isinstance(value, dict):
+        return {
+            str(nested_key): _identity_value(nested, key=str(nested_key))
+            for nested_key, nested in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_identity_value(item) for item in value]
+    values = getattr(value, "__dict__", None)
+    if isinstance(values, dict):
+        return {
+            "class": f"{type(value).__module__}.{type(value).__qualname__}",
+            "config": {
+                str(nested_key): _identity_value(nested, key=str(nested_key))
+                for nested_key, nested in sorted(values.items())
+                if nested_key not in _RUNTIME_PAGINATION_FIELDS
+            },
+        }
+    return f"{type(value).__module__}.{type(value).__qualname__}"
 
-    ``state_key`` is optional for third-party connectors. Falling back to
-    ``connector.name`` preserves the pre-namespace deterministic identity.
+
+def _source_config_identity(connector: APIConnector) -> str:
+    """Return a stable, non-secret fingerprint of the logical source config.
+
+    Official REST connectors expose enough stable structural data through
+    ``explain()`` plus their resolved request configuration. Third-party
+    connectors degrade conservatively to class + name rather than serializing
+    arbitrary object state or credentials.
     """
+    payload: dict[str, Any] = {
+        "class": f"{type(connector).__module__}.{type(connector).__qualname__}",
+        "name": connector.name,
+    }
+    explain = getattr(connector, "explain", None)
+    if callable(explain):
+        try:
+            described = explain()
+        except Exception:
+            described = None
+        if isinstance(described, dict):
+            payload["explain"] = _identity_value(described)
+
+    for attribute, label in (
+        ("_static_params", "params"),
+        ("_date_params", "date_params"),
+        ("_date_field", "date_field"),
+        ("_pagination", "pagination_config"),
+    ):
+        if hasattr(connector, attribute):
+            value = getattr(connector, attribute)
+            if label == "pagination_config":
+                values = getattr(value, "__dict__", {})
+                value = {
+                    "class": f"{type(value).__module__}.{type(value).__qualname__}",
+                    "config": {
+                        key: nested
+                        for key, nested in values.items()
+                        if key not in _RUNTIME_PAGINATION_FIELDS
+                    },
+                }
+            payload[label] = _identity_value(value)
+
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _checkpoint_identity(connector: APIConnector, window) -> str:
+    """Bind retry identity to source config, state namespace and checkpoint-before."""
     return json.dumps(
         {
+            "source": _source_config_identity(connector),
             "state_key": str(getattr(connector, "state_key", connector.name)),
             "watermark": _watermark_json(_window_watermark_before(window)),
         },
