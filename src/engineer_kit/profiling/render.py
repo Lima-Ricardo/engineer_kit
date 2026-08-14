@@ -30,11 +30,13 @@ def render_text(report: ProfileReport) -> str:
         if report.duplicates.key_fields:
             lines.append(f"dedup_key={','.join(report.duplicates.key_fields)}")
             lines.append(f"invalid_key_rows={report.duplicates.invalid_key_rows:,}")
+            unique_label = "unique_valid_pk_rows"
         else:
             lines.append("duplicate_mode=complete_row")
+            unique_label = "unique_rows"
         lines.extend(
             [
-                f"unique_rows={report.duplicates.unique_rows:,}",
+                f"{unique_label}={report.duplicates.unique_rows:,}",
                 f"duplicate_rows={report.duplicates.duplicate_rows:,} "
                 f"({_pct(report.duplicates.duplicate_rows, report.records_analyzed)})",
                 "",
@@ -122,6 +124,7 @@ def render_html(report: ProfileReport) -> str:
     duplicate_html = ""
     if report.duplicates is not None:
         key_html = ""
+        unique_title = "Unique rows"
         if report.duplicates.key_fields:
             key_text = ", ".join(escape(value) for value in report.duplicates.key_fields)
             key_html = (
@@ -130,11 +133,12 @@ def render_html(report: ProfileReport) -> str:
                 "<div class='profile-card'><strong>Invalid PK rows</strong>"
                 f"<span>{report.duplicates.invalid_key_rows:,}</span></div>"
             )
+            unique_title = "Unique valid PK rows"
         duplicate_html = (
             key_html
             + "<div class='profile-card'><strong>Duplicate rows</strong>"
             f"<span>{report.duplicates.duplicate_rows:,}</span></div>"
-            "<div class='profile-card'><strong>Unique rows</strong>"
+            f"<div class='profile-card'><strong>{unique_title}</strong>"
             f"<span>{report.duplicates.unique_rows:,}</span></div>"
         )
     warning_html = "".join(f"<li>{escape(warning)}</li>" for warning in report.warnings)
