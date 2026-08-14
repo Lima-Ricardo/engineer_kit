@@ -167,12 +167,17 @@ class Pipeline:
                 records = connector.extract()
                 window = getattr(connector, "current_window", None)
 
-            if window is not None:
+            # Deterministic retry identity is safe only when a persistent
+            # checkpoint transition exists. Older third-party/duck-typed
+            # connectors predate ``checkpoint_enabled``; preserve their legacy
+            # incremental semantics by treating an observed window as stateful.
+            checkpoint_enabled = bool(getattr(connector, "checkpoint_enabled", True))
+            if window is not None and checkpoint_enabled:
                 context = LoadContext.for_window(
                     connector.name,
                     _window_start(window),
                     _window_end(window),
-                    checkpoint_identity=_watermark_json(_window_watermark_before(window)),
+                    checkpoint_identity=_checkpoint_identity(connector, window),
                     started_at=started_at,
                     run_id=run_id,
                 )
@@ -410,3 +415,19 @@ def _watermark_json(watermark: Watermark | None) -> str | None:
     if watermark is None:
         return None
     return json.dumps(asdict(watermark), ensure_ascii=False, default=str, sort_keys=True)
+
+
+def _checkpoint_identity(connector: APIConnector, window) -> str:
+    """Bind retry identity to both state namespace and checkpoint-before.
+
+    ``state_key`` is optional for third-party connectors. Falling back to
+    ``connector.name`` preserves the pre-namespace deterministic identity.
+    """
+    return json.dumps(
+        {
+            "state_key": str(getattr(connector, "state_key", connector.name)),
+            "watermark": _watermark_json(_window_watermark_before(window)),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )

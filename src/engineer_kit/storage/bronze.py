@@ -15,19 +15,9 @@ from typing import Any
 
 from engineer_kit.storage.destination import LoadContext
 from engineer_kit.storage.flatten import flatten_record
-from engineer_kit.storage.schema import EndpointSchema
+from engineer_kit.storage.schema import EndpointSchema, RESERVED_COLUMN_NAMES
 
-METADATA_COLUMNS = [
-    "_source",
-    "_endpoint",
-    "_ingested_at",
-    "_run_id",
-    "_ingestion_key",
-    "_window_start",
-    "_window_end",
-    "_raw",
-    "_extra",
-]
+METADATA_COLUMNS = list(RESERVED_COLUMN_NAMES)
 
 
 def _bronze_scalar(value: Any) -> str | None:
@@ -75,3 +65,6 @@ def build_bronze_rows(
         rows.append(row)
 
     return rows, extra_fields
+
+
+__all__ = ["METADATA_COLUMNS", "build_bronze_rows"]

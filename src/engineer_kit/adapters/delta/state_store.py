@@ -8,9 +8,7 @@ import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 
 from engineer_kit.adapters.delta._paths import join_table_uri
-from engineer_kit.storage.identifiers import validate_identifier
-from engineer_kit.storage.state_store import StateStore, Watermark
-
+from engineer_kit.storage.state_store import StateStore, Watermark, validate_state_key
 
 _STATE_SCHEMA = pa.schema(
     [
@@ -20,6 +18,11 @@ _STATE_SCHEMA = pa.schema(
         pa.field("cursor_value", pa.string()),
     ]
 )
+
+
+def _predicate_literal(value: str) -> str:
+    """Escape a validated data value for delta-rs predicate syntax."""
+    return value.replace("'", "''")
 
 
 class DeltaStateStore(StateStore):
@@ -43,7 +46,7 @@ class DeltaStateStore(StateStore):
         return self._table_uri
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
-        connector = validate_identifier(connector_name, "connector_name")
+        connector = validate_state_key(connector_name)
         options = self._storage_options or None
         if not DeltaTable.is_deltatable(self._table_uri, storage_options=options):
             return None
@@ -67,7 +70,7 @@ class DeltaStateStore(StateStore):
         )
 
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
-        connector = validate_identifier(connector_name, "connector_name")
+        connector = validate_state_key(connector_name)
         options = self._storage_options or None
         data = pa.Table.from_pylist(
             [
@@ -86,7 +89,7 @@ class DeltaStateStore(StateStore):
                 self._table_uri,
                 data,
                 mode="overwrite",
-                predicate=f"connector_name = '{connector}'",
+                predicate=f"connector_name = '{_predicate_literal(connector)}'",
                 storage_options=options,
             )
             return

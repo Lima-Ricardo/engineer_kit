@@ -17,7 +17,12 @@ from engineer_kit.connectors.extraction import (
     ExtractionSession,
     validate_extraction_batch_size,
 )
-from engineer_kit.connectors.incremental import IncrementalMode, IncrementalStrategy, IncrementalWindow
+from engineer_kit.connectors.incremental import (
+    IncrementalMode,
+    IncrementalStrategy,
+    IncrementalWindow,
+    NoIncrementalStrategy,
+)
 from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
 from engineer_kit.storage.state_store import StateStore, Watermark
@@ -128,6 +133,17 @@ class APIConnector(Connector):
     def max_pages(self) -> int:
         """Maximum pages one extraction attempt may request."""
         return self._max_pages
+
+    @property
+    def checkpoint_enabled(self) -> bool:
+        """Whether successful extraction advances persistent incremental state.
+
+        A no-op incremental strategy still gives callers one uniform
+        ``ExtractionSession`` API, but managed destinations must treat those
+        executions as independent ad-hoc runs because there is no persistent
+        checkpoint transition that can identify a retry safely.
+        """
+        return not isinstance(self._incremental, NoIncrementalStrategy)
 
     @property
     def current_window(self) -> IncrementalWindow | None:

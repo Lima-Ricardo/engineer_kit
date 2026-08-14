@@ -4,6 +4,37 @@ Todas as mudanças relevantes do projeto serão documentadas aqui.
 
 O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando aplicável.
 
+## [Unreleased]
+
+### Added
+
+- Paridade declarativa com a superfície intent-driven: YAML aceita `records`, `select`, `params`, paginação curta e incremental opcional.
+- `version: 1` para o formato de configuração, com recusa explícita de versões desconhecidas.
+- `RestConnector.probe()` / `preview()` para Test Connection e preview de uma página sem destination write ou commit de checkpoint.
+- Paths declarativos com índices de arrays e chaves entre aspas, além de aliases explícitos em `select`.
+- `state_key` para namespaces de checkpoint independentes do nome lógico do connector.
+- `capability_manifest()` serializável para descoberta de capacidades por CLI/UI.
+- `StateStore.compare_and_set_watermark()` e `StateConflictError` para recusar commits derivados de checkpoints obsoletos.
+
+### Changed
+
+- O happy path YAML sem `incremental` não cria mais um `StateStore`, alinhando-se a `RestConnector(base_url=...)`.
+- DuckDB faz compare-and-set do checkpoint dentro de uma transação.
+- O StateStore JSON usa lock interprocess em POSIX para serializar leitura/compare/write local.
+- `__version__` passa a vir do metadata do pacote instalado, eliminando a duplicação manual com `pyproject.toml`.
+- A referência YAML e a referência Python PT/EN foram atualizadas para os novos contratos.
+
+### Security
+
+- YAML usa loader derivado de `yaml.SafeLoader`, rejeita chaves duplicadas e campos desconhecidos em blocos conhecidos.
+- Colunas reservadas da Bronze (`_raw`, `_extra`, `_source`, `_run_id`, `_ingestion_key` e demais metadata internos) não podem ser declaradas pela origem.
+- Flattening e seleção falham explicitamente quando paths distintos colidem no mesmo nome de coluna/alias, evitando sobrescrita silenciosa de dados.
+
+### Compatibility
+
+- `records_path`, `static_params`, `state_store` e as formas declarativas da `0.2` continuam aceitos.
+- Objetos programáticos `IncrementalConfig(...)` continuam habilitando incremental por padrão; o novo default não incremental aplica-se ao happy path declarativo quando esse bloco é omitido.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added

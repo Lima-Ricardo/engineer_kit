@@ -1,8 +1,9 @@
 """Declarative YAML configuration -> backend-agnostic ingestion Pipeline.
 
-Configuration describes concepts (connector, state, destination, audit and
-optional transform) rather than hard-coding DuckDB. Concrete implementations
-are resolved lazily through the adapter registry.
+The declarative surface mirrors the intent-driven Python API while keeping the
+strict typed runtime underneath. Configuration files are versioned, reject
+unknown/duplicate keys and keep 0.2 aliases readable for backwards
+compatibility.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 import yaml
+from yaml.constructor import ConstructorError
 
 from engineer_kit.adapters.registry import (
     AdapterContext,
@@ -29,7 +31,7 @@ from engineer_kit.adapters.registry import (
 from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import IncrementalMode
-from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES, PaginationStrategy
+from engineer_kit.connectors.pagination import PaginationStrategy, resolve_pagination
 from engineer_kit.connectors.rest import DateParams, RestConnector
 from engineer_kit.http.auth import ApiKeyAuth, AuthStrategy, BearerAuth, NoAuth
 from engineer_kit.orchestration.pipeline import Pipeline
@@ -38,29 +40,68 @@ from engineer_kit.storage.schema import ColumnSpec, EndpointSchema
 
 logger = logging.getLogger("engineer_kit.config")
 
+CURRENT_PIPELINE_CONFIG_VERSION = 1
 MAX_PIPELINE_CONFIG_BYTES = 1024 * 1024
 _SECRET_REF_RE = re.compile(r"^\$\{SECRET:([A-Za-z0-9_.-]+)\}$")
 _SENSITIVE_OPTION_KEYS = {
-    "password",
-    "passwd",
-    "token",
-    "access_token",
-    "refresh_token",
-    "api_key",
-    "apikey",
-    "secret",
-    "client_secret",
-    "aws_access_key_id",
-    "aws_secret_access_key",
-    "aws_session_token",
-    "account_key",
-    "sas_token",
-    "connection_string",
+    "password", "passwd", "token", "access_token", "refresh_token", "api_key", "apikey",
+    "secret", "client_secret", "aws_access_key_id", "aws_secret_access_key",
+    "aws_session_token", "account_key", "sas_token", "connection_string",
 }
+
+_ROOT_KEYS = {
+    "version", "name", "connector", "columns", "destination", "state", "state_store",
+    "transform", "secrets", "run_log",
+}
+_CONNECTOR_KEYS = {
+    "base_url", "method", "auth", "pagination", "incremental", "date_params", "records",
+    "records_path", "select", "params", "static_params", "state_key", "extraction_batch_size",
+    "max_pages",
+}
+_AUTH_KEYS = {"type", "secret_key", "param_name", "location"}
+_PAGINATION_KEYS = {
+    "type", "params", "cursor_param", "cursor_field", "cursor", "cursor_path", "param",
+    "page_param", "page_size_param", "page_size", "start_page", "size", "size_param",
+    "offset_param", "limit_param", "limit", "start_offset", "next_url_field", "field", "path",
+    "header_name", "header",
+}
+_INCREMENTAL_KEYS = {"enabled", "mode", "initial_start", "date_field", "field"}
+_DATE_PARAM_KEYS = {"start", "end", "format"}
+_COLUMN_KEYS = {"name", "dtype"}
+_DESTINATION_KEYS = {"type", "path", "schema", "batch_size", "write_mode", "partition_by", "options"}
+_STATE_KEYS = {"type", "path", "options"}
+_RUN_LOG_KEYS = {"enabled", "type", "path", "options"}
+_SECRETS_KEYS = {"type", "path", "allow_inline_values"}
+_TRANSFORM_KEYS = {"type", "select"}
 
 
 class PipelineConfigError(ValueError):
     """Raised when a declarative pipeline is invalid or cannot be built."""
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe loader that refuses duplicate mapping keys instead of last-write-wins."""
+
+
+def _construct_unique_mapping(loader: yaml.SafeLoader, node, deep: bool = False):
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"duplicate key: {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 @dataclass
@@ -102,27 +143,28 @@ class AuthConfig:
                 param_name=self.param_name,
                 location=self.location,
             )
-        raise PipelineConfigError(f"auth.type '{self.type}' desconhecido (use 'none', 'bearer' ou 'api_key').")
+        raise PipelineConfigError(
+            f"auth.type '{self.type}' desconhecido (use 'none', 'bearer' ou 'api_key')."
+        )
 
 
 @dataclass
 class PaginationConfig:
-    type: str = "none"
+    type: str = "auto"
     params: dict[str, Any] = field(default_factory=dict)
 
     def build(self) -> PaginationStrategy:
-        strategy_cls = STANDARD_PAGINATION_TYPES.get(self.type)
-        if strategy_cls is None:
-            valid = ", ".join(STANDARD_PAGINATION_TYPES)
-            raise PipelineConfigError(f"pagination.type '{self.type}' desconhecido. Use um de: {valid}.")
         try:
-            return strategy_cls(**self.params)
-        except TypeError as exc:
-            raise PipelineConfigError(f"pagination.params invalido para '{self.type}': {exc}") from exc
+            return resolve_pagination({"type": self.type, **self.params})
+        except (TypeError, ValueError) as exc:
+            raise PipelineConfigError(str(exc)) from exc
 
 
 @dataclass
 class IncrementalConfig:
+    # Programmatic 0.2 compatibility: explicitly constructing this class still
+    # enables incremental mode. ConnectorConfig's default factory disables it.
+    enabled: bool = True
     mode: str = "data_date"
     initial_start: Optional[str] = None
     date_field: Optional[str] = None
@@ -162,12 +204,30 @@ class ConnectorConfig:
     method: str = "GET"
     auth: AuthConfig = field(default_factory=AuthConfig)
     pagination: PaginationConfig = field(default_factory=PaginationConfig)
-    incremental: IncrementalConfig = field(default_factory=IncrementalConfig)
+    incremental: IncrementalConfig = field(
+        default_factory=lambda: IncrementalConfig(enabled=False, mode="ingestion_date")
+    )
     date_params: DateParamsConfig = field(default_factory=DateParamsConfig)
+    records: Optional[str] = None
+    select: list[str] | str | dict[str, str] | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    state_key: Optional[str] = None
+    # 0.2 aliases retained for existing Python configs and the current Local Lab.
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
     extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE
     max_pages: int = DEFAULT_MAX_PAGES
+
+    def resolved_records(self) -> str | None:
+        if self.records and self.records_path and self.records != self.records_path:
+            raise PipelineConfigError(
+                "connector.records e connector.records_path foram definidos com valores diferentes. "
+                "Use apenas connector.records em configs novas."
+            )
+        return self.records if self.records is not None else self.records_path
+
+    def resolved_params(self) -> dict[str, Any]:
+        return {**self.static_params, **self.params}
 
 
 @dataclass
@@ -223,6 +283,7 @@ class TransformConfig:
 class PipelineConfig:
     name: str
     connector: ConnectorConfig
+    version: int = CURRENT_PIPELINE_CONFIG_VERSION
     columns: list[ColumnConfig] = field(default_factory=list)
     destination: DestinationConfig = field(default_factory=DestinationConfig)
     state: StateConfig = field(default_factory=StateConfig)
@@ -231,9 +292,113 @@ class PipelineConfig:
     run_log: RunLogConfig | bool = field(default_factory=RunLogConfig)
 
     def __post_init__(self) -> None:
-        # 0.1 compatibility: PipelineConfig(..., run_log=True/False) still works.
         if isinstance(self.run_log, bool):
             self.run_log = RunLogConfig(enabled=self.run_log)
+        if self.version != CURRENT_PIPELINE_CONFIG_VERSION:
+            raise PipelineConfigError(
+                f"config version {self.version} nao suportada; "
+                f"esta versao da biblioteca aceita version={CURRENT_PIPELINE_CONFIG_VERSION}."
+            )
+
+
+def _validate_keys(value: Any, allowed: set[str], path: str) -> None:
+    if not isinstance(value, dict):
+        raise PipelineConfigError(f"'{path}' deve ser um objeto/mapping.")
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise PipelineConfigError(
+            f"Campo(s) desconhecido(s) em '{path}': {', '.join(unknown)}. "
+            "Corrija o nome ou remova a opcao nao suportada."
+        )
+
+
+def _validate_shape(data: dict[str, Any]) -> None:
+    _validate_keys(data, _ROOT_KEYS, "root")
+    connector = data.get("connector")
+    _validate_keys(connector, _CONNECTOR_KEYS, "connector")
+
+    if "auth" in connector:
+        _validate_keys(connector.get("auth") or {}, _AUTH_KEYS, "connector.auth")
+    pagination = connector.get("pagination")
+    if isinstance(pagination, dict):
+        _validate_keys(pagination, _PAGINATION_KEYS, "connector.pagination")
+        if "params" in pagination and not isinstance(pagination["params"], dict):
+            raise PipelineConfigError("connector.pagination.params deve ser um mapping.")
+    incremental = connector.get("incremental")
+    if isinstance(incremental, dict):
+        _validate_keys(incremental, _INCREMENTAL_KEYS, "connector.incremental")
+    if "date_params" in connector:
+        _validate_keys(connector.get("date_params") or {}, _DATE_PARAM_KEYS, "connector.date_params")
+
+    columns = data.get("columns", [])
+    if not isinstance(columns, list):
+        raise PipelineConfigError("columns deve ser uma lista.")
+    for index, column in enumerate(columns):
+        _validate_keys(column, _COLUMN_KEYS, f"columns[{index}]")
+
+    if "destination" in data:
+        _validate_keys(data.get("destination") or {}, _DESTINATION_KEYS, "destination")
+    if "state" in data and "state_store" in data:
+        raise PipelineConfigError("Use 'state' ou o alias legado 'state_store', nao os dois.")
+    state = data.get("state", data.get("state_store"))
+    if isinstance(state, dict):
+        _validate_keys(state, _STATE_KEYS, "state")
+    if "secrets" in data:
+        _validate_keys(data.get("secrets") or {}, _SECRETS_KEYS, "secrets")
+    run_log = data.get("run_log")
+    if isinstance(run_log, dict):
+        _validate_keys(run_log, _RUN_LOG_KEYS, "run_log")
+    transform = data.get("transform")
+    if isinstance(transform, dict):
+        _validate_keys(transform, _TRANSFORM_KEYS, "transform")
+
+
+def _pagination_from_value(value: Any) -> PaginationConfig:
+    if value is None or value is True:
+        return PaginationConfig(type="auto")
+    if value is False:
+        return PaginationConfig(type="none")
+    if isinstance(value, str):
+        return PaginationConfig(type=value)
+    if isinstance(value, dict):
+        params = dict(value.get("params") or {})
+        params.update({key: nested for key, nested in value.items() if key not in {"type", "params"}})
+        return PaginationConfig(type=str(value.get("type", "auto")), params=params)
+    raise PipelineConfigError("connector.pagination deve ser string, bool ou objeto.")
+
+
+def _incremental_from_value(value: Any, *, present: bool) -> IncrementalConfig:
+    if not present or value is None or value is False:
+        return IncrementalConfig(enabled=False, mode="ingestion_date")
+    if value is True:
+        return IncrementalConfig(enabled=True, mode="ingestion_date")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"none", "off", "false", "no"}:
+            return IncrementalConfig(enabled=False, mode="ingestion_date")
+        return IncrementalConfig(enabled=True, mode="data_date", date_field=value)
+    if isinstance(value, dict):
+        enabled = bool(value.get("enabled", True))
+        field_value = value.get("date_field", value.get("field"))
+        date_field = str(field_value) if field_value is not None else None
+        mode = str(value.get("mode") or ("data_date" if date_field else "ingestion_date"))
+        return IncrementalConfig(
+            enabled=enabled,
+            mode=mode,
+            initial_start=str(value["initial_start"]) if value.get("initial_start") else None,
+            date_field=date_field,
+        )
+    raise PipelineConfigError("connector.incremental deve ser bool, string ou objeto.")
+
+
+def _transform_from_value(value: Any) -> TransformConfig:
+    if value is None:
+        return TransformConfig()
+    if isinstance(value, str):
+        return TransformConfig(type=value)
+    if isinstance(value, dict):
+        return TransformConfig(**value)
+    raise PipelineConfigError("transform deve ser string ou objeto.")
 
 
 def _run_log_from_value(value: Any) -> RunLogConfig:
@@ -250,18 +415,17 @@ def _is_secret_ref(value: Any) -> bool:
     return isinstance(value, str) and _SECRET_REF_RE.fullmatch(value) is not None
 
 
-def _validate_sensitive_mapping(
-    value: Any,
-    *,
-    path: str,
-    allow_inline_values: bool,
-) -> None:
+def _validate_sensitive_mapping(value: Any, *, path: str, allow_inline_values: bool) -> None:
     if allow_inline_values or not isinstance(value, dict):
         return
     for key, nested in value.items():
         normalized = str(key).strip().lower().replace("-", "_")
         current_path = f"{path}.{key}"
-        if normalized in _SENSITIVE_OPTION_KEYS and nested not in (None, "") and not _is_secret_ref(nested):
+        if (
+            normalized in _SENSITIVE_OPTION_KEYS
+            and nested not in (None, "")
+            and not _is_secret_ref(nested)
+        ):
             raise PipelineConfigError(
                 f"Valor sensivel inline em '{current_path}' foi recusado. "
                 "Use ${SECRET:NOME} e configure secrets.type, ou habilite "
@@ -281,11 +445,12 @@ def _validate_no_inline_secrets(data: dict[str, Any], secrets: SecretsConfig) ->
     run_log = data.get("run_log") or {}
 
     if isinstance(connector, dict):
-        _validate_sensitive_mapping(
-            connector.get("static_params") or {},
-            path="connector.static_params",
-            allow_inline_values=secrets.allow_inline_values,
-        )
+        for key in ("params", "static_params"):
+            _validate_sensitive_mapping(
+                connector.get(key) or {},
+                path=f"connector.{key}",
+                allow_inline_values=secrets.allow_inline_values,
+            )
     if isinstance(destination, dict):
         _validate_sensitive_mapping(
             destination.get("options") or {},
@@ -320,6 +485,10 @@ def _resolve_secret_refs(value: Any, provider: SecretProvider) -> Any:
 
 
 def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
+    if not isinstance(data, dict):
+        raise PipelineConfigError("Configuracao deve ser um mapping.")
+    _validate_shape(data)
+
     try:
         name = data["name"]
         connector_data = data["connector"]
@@ -327,16 +496,32 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
     except KeyError as exc:
         raise PipelineConfigError(f"Campo obrigatorio faltando na configuracao: {exc}") from exc
 
+    try:
+        version = int(data.get("version", CURRENT_PIPELINE_CONFIG_VERSION))
+    except (TypeError, ValueError) as exc:
+        raise PipelineConfigError("version deve ser um inteiro.") from exc
+    if version != CURRENT_PIPELINE_CONFIG_VERSION:
+        raise PipelineConfigError(
+            f"config version {version} nao suportada; use version={CURRENT_PIPELINE_CONFIG_VERSION}."
+        )
+
     secrets = SecretsConfig(**(data.get("secrets", {}) or {}))
     _validate_no_inline_secrets(data, secrets)
 
     connector = ConnectorConfig(
         base_url=base_url,
         method=connector_data.get("method", "GET"),
-        auth=AuthConfig(**connector_data.get("auth", {})),
-        pagination=PaginationConfig(**connector_data.get("pagination", {})),
-        incremental=IncrementalConfig(**connector_data.get("incremental", {})),
-        date_params=DateParamsConfig(**connector_data.get("date_params", {})),
+        auth=AuthConfig(**(connector_data.get("auth", {}) or {})),
+        pagination=_pagination_from_value(connector_data.get("pagination", "auto")),
+        incremental=_incremental_from_value(
+            connector_data.get("incremental"),
+            present="incremental" in connector_data,
+        ),
+        date_params=DateParamsConfig(**(connector_data.get("date_params", {}) or {})),
+        records=connector_data.get("records"),
+        select=connector_data.get("select"),
+        params=connector_data.get("params") or {},
+        state_key=connector_data.get("state_key"),
         records_path=connector_data.get("records_path"),
         static_params=connector_data.get("static_params") or {},
         extraction_batch_size=connector_data.get(
@@ -353,12 +538,13 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         state_data = {"type": state_data}
 
     return PipelineConfig(
+        version=version,
         name=name,
         connector=connector,
         columns=columns,
         destination=DestinationConfig(**(data.get("destination", {}) or {})),
         state=StateConfig(**state_data),
-        transform=TransformConfig(**(data.get("transform", {}) or {})),
+        transform=_transform_from_value(data.get("transform")),
         secrets=secrets,
         run_log=_run_log_from_value(data.get("run_log", True)),
     )
@@ -368,6 +554,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
     run_log = config.run_log
     assert isinstance(run_log, RunLogConfig)
     return {
+        "version": config.version,
         "name": config.name,
         "connector": {
             "base_url": config.connector.base_url,
@@ -376,6 +563,10 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "pagination": asdict(config.connector.pagination),
             "incremental": asdict(config.connector.incremental),
             "date_params": asdict(config.connector.date_params),
+            "records": config.connector.records,
+            "select": config.connector.select,
+            "params": config.connector.params,
+            "state_key": config.connector.state_key,
             "records_path": config.connector.records_path,
             "static_params": config.connector.static_params,
             "extraction_batch_size": config.connector.extraction_batch_size,
@@ -401,10 +592,18 @@ def load_pipeline_config(path: Union[str, Path]) -> PipelineConfig:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise PipelineConfigError(f"Configuracao YAML deve usar UTF-8: '{path}'.") from exc
+
+    # Instantiate our SafeLoader subclass directly rather than calling
+    # yaml.load(). This preserves SafeLoader's restricted constructors while
+    # letting us reject duplicate mapping keys before building the config.
+    loader = _UniqueKeySafeLoader(text)
     try:
-        data = yaml.safe_load(text)
+        data = loader.get_single_data()
     except yaml.YAMLError as exc:
-        raise PipelineConfigError(f"Configuracao YAML invalida em '{path}'.") from exc
+        raise PipelineConfigError(f"Configuracao YAML invalida em '{path}': {exc}") from exc
+    finally:
+        loader.dispose()
+
     if not isinstance(data, dict):
         raise PipelineConfigError(f"Configuracao YAML invalida em '{path}'.")
     return pipeline_config_from_dict(data)
@@ -417,8 +616,6 @@ def save_pipeline_config(config: PipelineConfig, path: Union[str, Path]) -> None
         yaml.safe_dump(pipeline_config_to_dict(config), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
-    # Pipeline YAML should not contain literal secrets by default, but endpoint
-    # names, paths and secret-reference names can still be sensitive metadata.
     if os.name != "nt":
         destination.chmod(0o600)
 
@@ -439,10 +636,9 @@ def list_pipeline_configs(directory: Union[str, Path]) -> list[tuple[Path, Pipel
 def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
     """Build a Pipeline by resolving state/destination/audit adapters lazily.
 
-    ``runtime`` carries adapter-specific resources when needed. DuckDB uses an
-    existing connection; Parquet and Delta do not require a runtime object.
-    Secret references in static/adapter options use ``${SECRET:name}`` and are
-    resolved only in memory immediately before an adapter/connector is built.
+    State is only constructed when incrementality is enabled. This makes the
+    declarative happy path equivalent to ``RestConnector(base_url=...)`` while
+    preserving explicit StateStore configuration for incremental pipelines.
     """
     if config.transform.type not in {"none", "dbt"}:
         raise PipelineConfigError(
@@ -455,14 +651,12 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
     try:
         secret_provider = config.secrets.build()
         destination_config = copy.deepcopy(config.destination)
-        destination_config.options = _resolve_secret_refs(
-            destination_config.options, secret_provider
-        )
+        destination_config.options = _resolve_secret_refs(destination_config.options, secret_provider)
         state_config = copy.deepcopy(config.state)
         state_config.options = _resolve_secret_refs(state_config.options, secret_provider)
         run_log_config = copy.deepcopy(run_log)
         run_log_config.options = _resolve_secret_refs(run_log_config.options, secret_provider)
-        static_params = _resolve_secret_refs(config.connector.static_params, secret_provider)
+        connector_params = _resolve_secret_refs(config.connector.resolved_params(), secret_provider)
 
         context = AdapterContext(
             pipeline_name=config.name,
@@ -474,12 +668,15 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             destination_config,
             context,
         )
-        state_type = resolve_auto(
-            state_config.type,
-            destination_type=destination_config.type,
-            kind="state",
-        )
-        state_store = build_state_store(state_type, state_config, context)
+
+        state_store = None
+        if config.connector.incremental.enabled:
+            state_type = resolve_auto(
+                state_config.type,
+                destination_type=destination_config.type,
+                kind="state",
+            )
+            state_store = build_state_store(state_type, state_config, context)
 
         run_log_backend = None
         if run_log_config.enabled:
@@ -494,15 +691,18 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             name=config.name,
             base_url=config.connector.base_url,
             state_store=state_store,
+            state_key=config.connector.state_key,
             incremental_mode=config.connector.incremental.resolve_mode(),
             initial_start=config.connector.incremental.resolve_initial_start(),
             date_field=config.connector.incremental.date_field,
+            incremental=None if config.connector.incremental.enabled else False,
             pagination=config.connector.pagination.build(),
             method=config.connector.method,
             auth=config.connector.auth.build(secret_provider),
             date_params=config.connector.date_params.build(),
-            static_params=static_params or None,
-            records_path=config.connector.records_path,
+            params=connector_params or None,
+            records=config.connector.resolved_records(),
+            select=config.connector.select,
             extraction_batch_size=config.connector.extraction_batch_size,
             max_pages=config.connector.max_pages,
         )
@@ -536,3 +736,28 @@ def _dependency_hint(exc: ModuleNotFoundError, destination_type: str) -> str:
     if missing == "deltalake":
         return 'Delta Lake e opcional. Instale `pip install "engineer_kit[delta]"`.'
     return f"Dependencia opcional ausente: {missing}."
+
+
+__all__ = [
+    "CURRENT_PIPELINE_CONFIG_VERSION",
+    "MAX_PIPELINE_CONFIG_BYTES",
+    "AuthConfig",
+    "ColumnConfig",
+    "ConnectorConfig",
+    "DateParamsConfig",
+    "DestinationConfig",
+    "IncrementalConfig",
+    "PaginationConfig",
+    "PipelineConfig",
+    "PipelineConfigError",
+    "RunLogConfig",
+    "SecretsConfig",
+    "StateConfig",
+    "TransformConfig",
+    "build_pipeline",
+    "list_pipeline_configs",
+    "load_pipeline_config",
+    "pipeline_config_from_dict",
+    "pipeline_config_to_dict",
+    "save_pipeline_config",
+]

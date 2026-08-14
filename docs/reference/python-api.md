@@ -26,6 +26,7 @@ RestConnector(
     records=None,
     select=None,
     params=None,
+    state_key=None,
     method="GET",
 )
 ```
@@ -35,11 +36,24 @@ Seletores simples aceitos:
 - `pagination`: `"auto"`, `"cursor"`, `"page"`, `"offset"`, `"link_header"`, `"next_url"`, `False`, dict ou `PaginationStrategy`;
 - `incremental`: `False`/`None`, `True`, nome do campo de data, dict ou `IncrementalStrategy`;
 - `auth`: string para Bearer ou `AuthStrategy` explícita;
-- `records`: caminho pontuado para a lista de registros, por exemplo `"payload.items"`;
-- `select`: campos que devem permanecer no resultado;
-- `params`: parâmetros estáticos da request.
+- `records`: caminho para a lista de registros, por exemplo `"payload.items"`;
+- `select`: lista/string de campos ou mapping `{path: alias}`;
+- `params`: parâmetros estáticos da request;
+- `state_key`: namespace explícito do checkpoint; por default usa o nome do connector.
+
+Paths declarativos aceitam objetos, índices de arrays e chaves entre aspas, por exemplo `items[0].sku` e `payload["odd.key"].value`. Wildcards não são usados para evitar mudança implícita de cardinalidade. Colisões de aliases são recusadas e exigem alias explícito.
 
 As opções legadas `name`, `records_path`, `static_params`, `state_store`, `date_params`, `date_field`, `incremental_mode` e os objetos de estratégia continuam suportados.
+
+### `probe()` / `preview()`
+
+```python
+probe = connector.probe(limit=25)
+```
+
+Faz **uma única página** para diagnóstico e devolve um `ProbeResult` com registros limitados, payload bruto, headers, caminho de registros resolvido, estratégia de paginação detectada, status HTTP, latência e tamanho da resposta quando disponível.
+
+`probe()` e `preview()` são read-only em relação ao runtime de ingestão: não escrevem em `Destination` e não confirmam checkpoint. A detecção de paginação `auto` reutiliza a página já buscada e não dispara uma segunda request apenas para inferência.
 
 ### `collect()`
 
@@ -89,7 +103,7 @@ O projeto dbt é descoberto a partir do diretório atual e ancestrais. `project_
 plan = connector.explain()
 ```
 
-Retorna um resumo seguro da resolução do conector, sem executar outra chamada HTTP e sem retornar o valor de autenticação.
+Retorna um resumo seguro da resolução do conector, sem executar outra chamada HTTP e sem retornar o valor de autenticação. O resumo inclui `state_key` e os pares path/alias de `select`.
 
 ## Paginação avançada
 
@@ -115,6 +129,8 @@ incremental={
 
 Em managed mode, um state store escolhido automaticamente pode ser substituído pelo backend natural do destino. Quando `state_store` é passado explicitamente, ele é respeitado.
 
+O commit do watermark usa compare-and-set: se outro run avançar o mesmo checkpoint depois que a janela foi resolvida, a execução obsoleta recebe `StateConflictError` em vez de sobrescrever silenciosamente o estado mais novo. DuckDB implementa esse check dentro de transação; o state JSON local usa lock interprocess em POSIX.
+
 ## `ExtractionSession`
 
 A API de baixo nível permanece disponível:
@@ -128,10 +144,20 @@ run.commit()
 
 A sessão é single-pass e recusa commit parcial.
 
+## `capability_manifest()`
+
+```python
+from engineer_kit import capability_manifest
+
+manifest = capability_manifest()
+```
+
+Retorna metadata serializável sobre métodos REST, autenticação, paginação, incremental, destinations registrados, state stores, run logs e comandos dbt. O objetivo é permitir que CLI/UI descubram capabilities sem manter listas duplicadas; a execução continua definida pelos contratos tipados do core.
+
 ## Contratos estáveis
 
 - `PaginationStrategy`: `initial_params()` e `next_params(...)`;
-- `StateStore`: `get_watermark(...)` e `set_watermark(...)`;
+- `StateStore`: `get_watermark(...)`, `set_watermark(...)` e `compare_and_set_watermark(...)`;
 - `Destination`: contrato de persistência Bronze;
 - `RunLogBackend`: `record(RunLogEntry)`;
 - `SecretProvider`: `get(name)`;

@@ -1,10 +1,24 @@
 # YAML configuration reference
 
-This page describes the blocks accepted by declarative pipelines.
+This page describes the blocks accepted by declarative pipelines. The configuration surface mirrors the intent-driven Python API and is validated strictly before execution.
+
+## Happy path
+
+A public, non-incremental API can start with:
+
+```yaml
+version: 1
+name: orders
+connector:
+  base_url: https://api.example.com/orders
+```
+
+`GET`, `auto` pagination, and conservative record-list discovery are the defaults. No `StateStore` is created unless incremental ingestion is enabled.
 
 ## Complete structure
 
 ```yaml
+version: 1
 name: orders
 connector: {}
 columns: []
@@ -15,9 +29,13 @@ secrets: {}
 transform: {}
 ```
 
+## `version`
+
+The current configuration format is `1`. The field is optional for files created before versioning was introduced; omitted files are interpreted as version `1`. Unknown versions are rejected rather than partially interpreted.
+
 ## `name`
 
-Logical pipeline identifier. It also participates in state identity and default naming.
+Logical pipeline identifier. For compatibility it is also the default checkpoint key. Use `connector.state_key` when pipelines sharing the same logical name need independent state namespaces.
 
 ## `connector`
 
@@ -25,14 +43,57 @@ Logical pipeline identifier. It also participates in state identity and default 
 |---|---|---:|---|
 | `base_url` | string | required | absolute API URL |
 | `method` | `GET`/`POST` | `GET` | extraction method |
-| `records_path` | string/null | null | key containing the record list |
-| `static_params` | mapping | `{}` | fixed request parameters |
+| `records` | string/null | auto | path to the record list in JSON |
+| `select` | list/string/mapping | null | projected fields; mappings support `path: alias` |
+| `params` | mapping | `{}` | fixed API parameters |
+| `state_key` | string/null | `name` | explicit checkpoint namespace |
 | `extraction_batch_size` | int | `25000` | records delivered per extraction batch |
 | `max_pages` | int | core limit | defensive pagination bound |
 | `auth` | object | none | authentication strategy |
-| `pagination` | object | conceptually required | page strategy |
-| `incremental` | object | data_date | window calculation |
+| `pagination` | string/bool/object | `auto` | pagination strategy |
+| `incremental` | bool/string/object | `false` | incremental checkpoint/window behavior |
 | `date_params` | object | empty | API date-parameter names |
+
+`records_path` and `static_params` remain readable as `0.2` compatibility aliases. New configurations should use `records` and `params`. If both `records` and `records_path` are supplied with different values, validation fails.
+
+### `records`
+
+```yaml
+records: data.orders
+```
+
+When omitted, the first response is inspected conservatively for list candidates such as `data`, `results`, `items`, `records`, or nested equivalents. Ambiguous payloads require an explicit path.
+
+### `select`
+
+Simple list:
+
+```yaml
+select:
+  - id
+  - amount
+  - customer.id
+```
+
+Explicit aliases:
+
+```yaml
+select:
+  customer.id: customer_id
+  totals.net: net_amount
+```
+
+Paths support object traversal and explicit indexes, for example `items[0].sku` and `payload["odd.key"].value`. Wildcards are intentionally unsupported because selectors must not change row cardinality implicitly. If two paths normalize to the same output alias, validation fails and explicit aliases are required.
+
+### `params`
+
+```yaml
+params:
+  status: open
+  region: BR
+```
+
+Inline sensitive values remain blocked by default; use `${SECRET:NAME}` references.
 
 ### `auth`
 
@@ -46,22 +107,61 @@ auth:
 
 ### `pagination`
 
+Short form:
+
 ```yaml
-pagination:
-  type: page  # none | page | offset | cursor | link_header | next_url
-  params: {}
+pagination: cursor
 ```
 
-Parameters depend on the strategy. See [Pagination](../guides/pagination.md).
+Supported values:
+
+```text
+auto none page offset cursor link_header next_url
+```
+
+Pagination can also be disabled with `pagination: false`, or configured with guided options:
+
+```yaml
+pagination:
+  type: page
+  size: 1000
+  param: page
+  start_page: 1
+```
+
+The expert/legacy `params: {}` form remains valid. See [Pagination](../guides/pagination.md).
 
 ### `incremental`
 
+Disabled, which is also the default:
+
+```yaml
+incremental: false
+```
+
+Checkpoint by execution date:
+
+```yaml
+incremental: true
+```
+
+Known watermark field:
+
+```yaml
+incremental: updated_at
+```
+
+Explicit form:
+
 ```yaml
 incremental:
+  enabled: true
   mode: data_date   # data_date | ingestion_date
   initial_start: "2026-01-01"
   date_field: updated_at
 ```
+
+The checkpoint is committed only after the destination confirms the write. Commit also verifies that the watermark used to resolve the extraction window is still current; a stale concurrent run is rejected instead of silently overwriting newer state.
 
 ### `date_params`
 
@@ -86,6 +186,8 @@ Known logical types:
 string integer bigint float decimal boolean date timestamp json
 ```
 
+Bronze metadata names (`_raw`, `_extra`, `_source`, `_run_id`, `_ingestion_key`, and the other internal fields) are reserved and cannot be declared by a source schema. Duplicate declared columns are rejected as well.
+
 ## `destination`
 
 ```yaml
@@ -99,7 +201,7 @@ destination:
   options: {}
 ```
 
-`type` can be any registered adapter, including `duckdb`, `parquet`, and `delta`.
+`type` can be any registered adapter, including `duckdb`, `parquet`, and `delta`. Physical options are adapter-specific; the runtime keeps `Destination`, `StateStore`, and `RunLogBackend` as separate contracts.
 
 ## `state`
 
@@ -110,7 +212,7 @@ state:
   options: {}
 ```
 
-`auto` resolves the natural state implementation for known destinations.
+This block is materialized only when incremental ingestion is enabled. `auto` resolves the natural state implementation for known destinations. The legacy `state_store` alias is still accepted, but `state` and `state_store` cannot both appear in one file.
 
 ## `run_log`
 
@@ -147,6 +249,10 @@ transform:
   select: null
 ```
 
-## File safety
+The short form `transform: dbt` is also accepted.
 
-The loader enforces a YAML size bound and uses `yaml.safe_load`. Non-UTF-8 files and invalid structures are rejected.
+## File validation and safety
+
+The loader enforces a YAML size bound, accepts UTF-8 only, and instantiates a loader derived from `yaml.SafeLoader`. Duplicate mapping keys and unknown fields in known blocks are rejected. This prevents typos such as `pagniation:` from being silently ignored.
+
+Configuration validation complements rather than replaces runtime security: HTTPS/TLS, secret redaction, response/pagination limits, and redirect protections remain centralized in the core.

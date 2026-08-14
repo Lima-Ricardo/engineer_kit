@@ -39,6 +39,10 @@ class IncrementalStrategy:
         self._mode = mode
         self._initial_start = initial_start
 
+    @property
+    def state_key(self) -> str:
+        return self._connector_name
+
     def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
         resolved_end = date.today() if end == "today" else end
         if not isinstance(resolved_end, date):
@@ -68,13 +72,17 @@ class IncrementalStrategy:
         window: IncrementalWindow,
         max_data_date: Optional[date] = None,
     ) -> Watermark:
-        """Persist and return the checkpoint after downstream success."""
+        """Persist and return a checkpoint only if the starting state is unchanged."""
         watermark = Watermark(
             last_run_at=datetime.now(timezone.utc),
             last_data_date=max_data_date or window.end,
             cursor_value=None,
         )
-        self._state_store.set_watermark(self._connector_name, watermark)
+        self._state_store.compare_and_set_watermark(
+            self._connector_name,
+            window.watermark_before,
+            watermark,
+        )
         return watermark
 
 
