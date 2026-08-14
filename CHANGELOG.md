@@ -11,27 +11,46 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 - Paridade declarativa com a superfície intent-driven: YAML aceita `records`, `select`, `params`, paginação curta e incremental opcional.
 - `version: 1` para o formato de configuração, com recusa explícita de versões desconhecidas.
 - `RestConnector.probe()` / `preview()` para Test Connection e preview de uma página sem destination write ou commit de checkpoint.
+- `RestConnector.profile()` e `ProfileReport v1` para profiling/data quality agregado antes da Bronze, com seletores de métricas, presets, filtros de campos e modos full/sample.
+- Profiling de `duplicates`, `nulls`, `missing`, `empty`, tipos JSON nativos, cardinalidade, schema/path map e contagem de registros.
+- Relatório de profiling/Data Quality no terminal, HTML standalone, CLI `profile-config` e Local Lab.
+- `dedup=False` por padrão e `dedup=True` opt-in em Python, YAML e Local Lab para remover duplicatas exatas das linhas emitidas.
+- Deduplicação exata disk-backed por fingerprints SHA-256 em SQLite temporário, compartilhada por `collect()`, `stream()` e managed ingestion.
 - Paths declarativos com índices de arrays e chaves entre aspas, além de aliases explícitos em `select`.
 - `state_key` para namespaces de checkpoint independentes do nome lógico do connector.
-- `capability_manifest()` serializável para descoberta de capacidades por CLI/UI.
+- `capability_manifest()` serializável para descoberta de capacidades por CLI/UI, incluindo profiling e dedup.
 - `StateStore.compare_and_set_watermark()` e `StateConflictError` para recusar commits derivados de checkpoints obsoletos.
 
 ### Changed
 
 - O happy path YAML sem `incremental` não cria mais um `StateStore`, alinhando-se a `RestConnector(base_url=...)`.
+- Profiling preserva os tipos JSON nativos mesmo quando a ingestão normaliza valores para o contrato Bronze atual.
+- Métricas de Data Quality não calculadas permanecem semanticamente distintas de resultados calculados com valor zero.
+- Cardinalidade de profiling é exata enquanto limitada e passa a estimativa HyperLogLog com erro relativo declarado quando cresce.
+- `dedup=True` é aplicado depois de `select`; `profile()` observa o conjunto antes da remoção para que duplicatas continuem visíveis no relatório de qualidade.
 - DuckDB faz compare-and-set do checkpoint dentro de uma transação.
 - O StateStore JSON usa lock interprocess em POSIX para serializar leitura/compare/write local.
 - `__version__` passa a vir do metadata do pacote instalado, eliminando a duplicação manual com `pyproject.toml`.
 - A referência YAML e a referência Python PT/EN foram atualizadas para os novos contratos.
 
+### Performance
+
+- Contadores de presença, missing/null/empty e tipos do profiler mantêm estado proporcional aos paths/campos observados, não ao total de registros.
+- A deduplicação mantém fingerprints em disco e confirma transações SQLite periodicamente, evitando materialização de registros e um set de hashes ilimitado em RAM.
+- Métricas não solicitadas por `profile(...)` não ativam seus agregadores.
+
 ### Security
 
 - YAML usa loader derivado de `yaml.SafeLoader`, rejeita chaves duplicadas e campos desconhecidos em blocos conhecidos.
+- `connector.dedup` exige booleano real no YAML; strings truthy como `"false"` são recusadas.
+- O `ProfileReport` é aggregate-only e seus renderers não persistem valores reais da fonte; HTML faz escaping de paths/warnings.
 - Colunas reservadas da Bronze (`_raw`, `_extra`, `_source`, `_run_id`, `_ingestion_key` e demais metadata internos) não podem ser declaradas pela origem.
 - Flattening e seleção falham explicitamente quando paths distintos colidem no mesmo nome de coluna/alias, evitando sobrescrita silenciosa de dados.
 
 ### Compatibility
 
+- `collect()` e `stream()` preservam seus tipos de retorno; profiling é uma operação separada e opt-in.
+- `dedup=False` preserva o comportamento anterior sem custo do tracker temporário.
 - `records_path`, `static_params`, `state_store` e as formas declarativas da `0.2` continuam aceitos.
 - Objetos programáticos `IncrementalConfig(...)` continuam habilitando incremental por padrão; o novo default não incremental aplica-se ao happy path declarativo quando esse bloco é omitido.
 
