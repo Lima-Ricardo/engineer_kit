@@ -3,12 +3,14 @@
 {% block content %}
 <div class="page-heading">
     <div><h1>{{ config.name }}</h1><p class="subtitle">{{ config.connector.method }} {{ config.connector.base_url }}</p></div>
-    <div><form method="post" action="/pipelines/{{ config.name }}/run" style="display:inline"><button type="submit" class="btn btn-primary">▶ Rodar agora</button></form> <a href="/pipelines/{{ config.name }}/edit" class="btn">Editar</a></div>
+    <div><a href="/pipelines/{{ config.name }}/profile" class="btn">Data Profile</a> <form method="post" action="/pipelines/{{ config.name }}/run" style="display:inline"><button type="submit" class="btn btn-primary">▶ Rodar agora</button></form> <a href="/pipelines/{{ config.name }}/edit" class="btn">Editar</a></div>
 </div>
 
 <h2>Fluxo</h2>
 <div class="flow-strip">
     <div class="flow-node active"><strong>REST API</strong><span>RestConnector</span><small>{{ config.connector.pagination.type }} pagination</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active"><strong>Profile</strong><span>opcional</span><small>quality antes da Bronze</small></div>
     <div class="flow-arrow">→</div>
     <div class="flow-node active"><strong>Watermark</strong><span>StateStore</span><small>{{ config.state.type if config.state.type != 'auto' else config.destination.type ~ ' (auto)' }}</small></div>
     <div class="flow-arrow">→</div>
@@ -18,7 +20,7 @@
     <div class="flow-node active"><strong>dbt</strong><span>Transform</span><small>staging → silver → gold</small></div>
     {% endif %}
 </div>
-<div class="architecture-note">O Pipeline trabalha com contratos. O adapter determina onde dados, estado e auditoria vivem. Retries de uma mesma janela usam uma <code>ingestion_key</code> determinística nos destinations oficiais.</div>
+<div class="architecture-note">O Pipeline trabalha com contratos. O profile é somente leitura: não grava Bronze nem avança checkpoint. Retries de uma mesma janela usam uma <code>ingestion_key</code> determinística nos destinations oficiais.</div>
 
 <div class="grid-2">
     <div class="card">
@@ -26,6 +28,7 @@
         <dl class="facts">
             <dt>Paginação</dt><dd>{{ config.connector.pagination.type }}</dd>
             <dt>Incremental</dt><dd>{{ config.connector.incremental.mode }}{% if config.connector.incremental.date_field %}<br><code>{{ config.connector.incremental.date_field }}</code>{% endif %}</dd>
+            <dt>Deduplicação</dt><dd>{{ "ativa" if config.connector.dedup else "desligada" }}</dd>
             <dt>Autenticação</dt><dd>{{ config.connector.auth.type }}</dd>
             <dt>Destination</dt><dd>{{ config.destination.type }}</dd>
             <dt>Schema Bronze</dt><dd>{{ config.destination.schema }}</dd>
