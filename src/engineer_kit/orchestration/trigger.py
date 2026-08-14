@@ -23,6 +23,8 @@ class CronTrigger(Trigger):
     """Ex.: CronTrigger("0 3 * * *") -- todo dia as 3h."""
 
     def __init__(self, cron_expression: str) -> None:
+        if not isinstance(cron_expression, str) or not cron_expression.strip():
+            raise ValueError("cron_expression deve ser uma string cron nao vazia.")
         self._cron_expression = cron_expression
 
     def to_apscheduler_trigger(self) -> Any:
@@ -31,6 +33,12 @@ class CronTrigger(Trigger):
 
 class IntervalTrigger(Trigger):
     def __init__(self, seconds: int = 0, minutes: int = 0, hours: int = 0) -> None:
+        values = {"seconds": seconds, "minutes": minutes, "hours": hours}
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} deve ser um inteiro maior ou igual a zero.")
+        if seconds == 0 and minutes == 0 and hours == 0:
+            raise ValueError("IntervalTrigger exige um intervalo total maior que zero.")
         self._seconds = seconds
         self._minutes = minutes
         self._hours = hours
