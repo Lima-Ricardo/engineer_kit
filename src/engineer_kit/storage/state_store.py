@@ -12,6 +12,25 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
+MAX_STATE_KEY_CHARS = 512
+
+
+def validate_state_key(value: str) -> str:
+    """Validate a portable checkpoint namespace stored as data.
+
+    State keys may contain dots, dashes and other normal namespace characters;
+    they are not SQL identifiers. Empty, unbounded and control-character values
+    are rejected consistently before reaching any official backend.
+    """
+    key = str(value)
+    if not key or len(key) > MAX_STATE_KEY_CHARS:
+        raise ValueError(
+            f"state_key deve conter entre 1 e {MAX_STATE_KEY_CHARS} caracteres."
+        )
+    if any(ord(char) < 32 or ord(char) == 127 for char in key):
+        raise ValueError("state_key nao pode conter caracteres de controle.")
+    return key
+
 
 @dataclass(frozen=True)
 class Watermark:
@@ -59,13 +78,14 @@ class StateStore(ABC):
         This default keeps third-party StateStore implementations compatible.
         Official mutable backends override it with a backend-atomic operation.
         """
-        current = self.get_watermark(connector_name)
+        key = validate_state_key(connector_name)
+        current = self.get_watermark(key)
         if current != expected:
             raise StateConflictError(
-                f"Checkpoint de '{connector_name}' mudou durante a execucao; "
+                f"Checkpoint de '{key}' mudou durante a execucao; "
                 "o novo watermark nao foi confirmado. Reexecute a partir do estado atual."
             )
-        self.set_watermark(connector_name, watermark)
+        self.set_watermark(key, watermark)
 
 
 _DUCKDB_EXPORTS = {"DuckDBStateStore", "IngestionStateStore"}
@@ -91,4 +111,10 @@ def __getattr__(name: str):
 
 # ``__getattr__`` preserves explicit legacy imports. Wildcard exports remain
 # backend-neutral so static tooling and core-only installations see only ports.
-__all__ = ["StateConflictError", "StateStore", "Watermark"]
+__all__ = [
+    "MAX_STATE_KEY_CHARS",
+    "StateConflictError",
+    "StateStore",
+    "Watermark",
+    "validate_state_key",
+]
