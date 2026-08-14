@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from abc import abstractmethod
 from datetime import date
-from typing import Any, Callable, Iterator, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, Union
 from urllib.parse import urlsplit
 
 import requests
@@ -25,6 +25,8 @@ from engineer_kit.connectors.incremental import (
 )
 from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
+from engineer_kit.profiling.engine import profile_records, resolve_profile_metrics
+from engineer_kit.profiling.model import ProfileReport
 from engineer_kit.storage.state_store import StateStore, Watermark
 
 VALID_HTTP_METHODS = ("GET", "POST")
@@ -85,6 +87,7 @@ class APIConnector(Connector):
         max_pages: int = DEFAULT_MAX_PAGES,
         allow_cross_origin_pagination: bool = False,
         record_transform: Callable[[dict], dict] | None = None,
+        dedup: bool = False,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -93,6 +96,8 @@ class APIConnector(Connector):
             )
         if max_pages <= 0:
             raise ValueError("max_pages deve ser maior que zero.")
+        if not isinstance(dedup, bool):
+            raise TypeError("dedup deve ser booleano.")
 
         self.name = name
         self._http = http_client
@@ -100,6 +105,7 @@ class APIConnector(Connector):
         self._method = method
         self._date_field = date_field
         self._record_transform = record_transform
+        self._dedup = dedup
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
         self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
@@ -133,6 +139,11 @@ class APIConnector(Connector):
     def max_pages(self) -> int:
         """Maximum pages one extraction attempt may request."""
         return self._max_pages
+
+    @property
+    def dedup_enabled(self) -> bool:
+        """Whether extraction suppresses exact duplicate output rows."""
+        return self._dedup
 
     @property
     def checkpoint_enabled(self) -> bool:
@@ -192,7 +203,53 @@ class APIConnector(Connector):
             date_field=self._date_field,
             batch_size=resolved_batch_size,
             record_transform=self._record_transform,
+            dedup=self._dedup,
         )
+
+    def profile(
+        self,
+        *metrics: str,
+        end: Union[date, str] = "today",
+        scope: str = "full",
+        limit: int | None = None,
+        fields: Sequence[str] | None = None,
+    ) -> ProfileReport:
+        """Inspect source data and return aggregate profiling/data-quality metrics.
+
+        No metric selector means a complete profile. Explicit selectors such as
+        ``profile("duplicates", "nulls", "missing")`` activate only the
+        required aggregators. Profiling never writes a destination and never
+        commits a checkpoint. It deliberately observes rows before ``dedup=True``
+        filtering so duplicate quality problems remain visible.
+        """
+        plan = resolve_profile_metrics(metrics)
+        window = self._incremental.resolve_window(end)
+        records = self._iter_profile_records(window)
+        try:
+            return profile_records(
+                records,
+                *plan,
+                scope=scope,
+                limit=limit,
+                fields=fields,
+            )
+        finally:
+            close = getattr(records, "close", None)
+            if callable(close):
+                close()
+
+    def _iter_profile_records(
+        self,
+        window: IncrementalWindow,
+    ) -> Iterator[dict[str, Any]]:
+        records = self._iter_records(window)
+        try:
+            for record in records:
+                yield self._record_transform(record) if self._record_transform else record
+        finally:
+            close = getattr(records, "close", None)
+            if callable(close):
+                close()
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
         """Return the legacy lazy record stream.
@@ -211,9 +268,16 @@ class APIConnector(Connector):
             # contain cursor/token values.
             return f"url:{next_url}"
         try:
-            serialized = json.dumps(page_params, sort_keys=True, default=str, separators=(",", ":"))
+            serialized = json.dumps(
+                page_params,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
         except (TypeError, ValueError):
-            serialized = repr(sorted((str(k), type(v).__name__) for k, v in page_params.items()))
+            serialized = repr(
+                sorted((str(key), type(value).__name__) for key, value in page_params.items())
+            )
         return f"params:{serialized}"
 
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
