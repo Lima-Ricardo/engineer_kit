@@ -197,18 +197,23 @@ class RestConnector(APIConnector):
             raise MissingDateFieldError("incremental DATA_DATE exige date_field.")
 
         self._client_side_incremental_filter = False
-        if not isinstance(runtime_incremental, NoIncrementalStrategy) and not self._date_params.start:
-            if mode is IncrementalMode.DATA_DATE and field is not None:
+        self._incremental_filter_mode = "disabled"
+        if not isinstance(runtime_incremental, NoIncrementalStrategy):
+            if self._date_params.start:
+                self._incremental_filter_mode = "source-param"
+            elif mode is IncrementalMode.DATA_DATE and field is not None:
                 # Preserve the ergonomic incremental='updated_at' path without
                 # pretending the API was filtered: scan the source and enforce
                 # the checkpoint window locally. This is correct but may be more
                 # expensive than configuring date_params.start.
                 self._client_side_incremental_filter = True
+                self._incremental_filter_mode = "client-side"
             else:
-                raise ValueError(
-                    "incremental INGESTION_DATE exige date_params.start para que o checkpoint "
-                    "filtre a fonte. Configure o parametro de inicio ou desative incremental."
-                )
+                # Backwards-compatible INGESTION_DATE without a source parameter
+                # is conservative rather than lossy: re-read the full source and
+                # use the watermark only for state/retry identity. It may replay
+                # rows on append-only destinations, but it cannot skip source rows.
+                self._incremental_filter_mode = "checkpoint-only"
 
         self._auto_state = auto_state
         self._resolved_incremental_mode = mode
@@ -476,9 +481,7 @@ class RestConnector(APIConnector):
             "primary_key": list(self.primary_key) if self.primary_key else None,
             "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
-            "incremental_filter": (
-                "client-side" if self._client_side_incremental_filter else "source-param-or-disabled"
-            ),
+            "incremental_filter": self._incremental_filter_mode,
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,
             "batch_size": self.extraction_batch_size,
