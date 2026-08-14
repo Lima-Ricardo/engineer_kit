@@ -10,11 +10,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 import requests
 
-from engineer_kit.connectors.api_connector import (
-    DEFAULT_MAX_PAGES,
-    APIConnector,
-    MissingDateFieldError,
-)
+from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES, APIConnector, MissingDateFieldError
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import (
@@ -33,12 +29,7 @@ from engineer_kit.connectors.intent import (
     resolve_select,
 )
 from engineer_kit.connectors.normalize import stringify
-from engineer_kit.connectors.pagination import (
-    AutoPagination,
-    PaginationStrategy,
-    ParsedPage,
-    resolve_pagination,
-)
+from engineer_kit.connectors.pagination import AutoPagination, PaginationStrategy, ParsedPage, resolve_pagination
 from engineer_kit.http.auth import AuthStrategy
 from engineer_kit.http.auth_intent import resolve_auth
 from engineer_kit.http.client import HttpClient
@@ -107,9 +98,7 @@ class RestConnector(APIConnector):
         self._base_url = base_url
         self._static_params = {**(static_params or {}), **(params or {})}
         self._records_path = records if records is not None else records_path
-        self._resolved_records_path = (
-            self._records_path if isinstance(self._records_path, str) else None
-        )
+        self._resolved_records_path = self._records_path if isinstance(self._records_path, str) else None
         self._select = resolve_select(select)
         self._date_params = self._date_params_from(date_params)
         self._state_key = resolved_state_key
@@ -127,8 +116,7 @@ class RestConnector(APIConnector):
             strategy_state_key = validate_state_key(incremental.state_key)
             if state_key is not None and resolved_state_key != strategy_state_key:
                 raise ValueError(
-                    "state_key diverge da IncrementalStrategy explicita. "
-                    "Use a chave da strategy ou remova state_key da facade."
+                    "state_key diverge da IncrementalStrategy explicita. Use a chave da strategy ou remova state_key da facade."
                 )
             resolved_state_key = strategy_state_key
             self._state_key = strategy_state_key
@@ -137,9 +125,7 @@ class RestConnector(APIConnector):
         elif isinstance(incremental, str):
             field, mode = incremental, IncrementalMode.DATA_DATE
             auto_state = state_store is None
-            runtime_incremental, state_store = self._stateful(
-                resolved_state_key, state_store, mode, start
-            )
+            runtime_incremental, state_store = self._stateful(resolved_state_key, state_store, mode, start)
         elif isinstance(incremental, dict):
             config = dict(incremental)
             field_value = config.get("field", config.get("date_field"))
@@ -155,23 +141,17 @@ class RestConnector(APIConnector):
                 self._date_params = DateParams(
                     start=str(start_param) if start_param else None,
                     end=str(config["end_param"]) if config.get("end_param") else None,
-                    date_format=str(
-                        config.get("format", config.get("date_format", "%Y-%m-%d"))
-                    ),
+                    date_format=str(config.get("format", config.get("date_format", "%Y-%m-%d"))),
                 )
             if state_store is None and config.get("state_path"):
                 state_store = self._local_state(Path(str(config["state_path"])))
             elif state_store is None:
                 auto_state = True
-            runtime_incremental, state_store = self._stateful(
-                resolved_state_key, state_store, mode, start
-            )
+            runtime_incremental, state_store = self._stateful(resolved_state_key, state_store, mode, start)
         elif incremental is True:
             mode = IncrementalMode.DATA_DATE if field else IncrementalMode.INGESTION_DATE
             auto_state = state_store is None
-            runtime_incremental, state_store = self._stateful(
-                resolved_state_key, state_store, mode, start
-            )
+            runtime_incremental, state_store = self._stateful(resolved_state_key, state_store, mode, start)
         elif incremental is False or state_store is None:
             runtime_incremental = NoIncrementalStrategy()
         else:
@@ -180,8 +160,7 @@ class RestConnector(APIConnector):
         if runtime_incremental is None and state_store is not None:
             if mode is IncrementalMode.DATA_DATE and field is None:
                 raise MissingDateFieldError(
-                    "incremental_mode=DATA_DATE precisa de date_field. Use "
-                    "IncrementalMode.INGESTION_DATE quando o checkpoint for a data da execucao."
+                    "incremental_mode=DATA_DATE precisa de date_field. Use IncrementalMode.INGESTION_DATE quando o checkpoint for a data da execucao."
                 )
             runtime_incremental = IncrementalStrategy(
                 resolved_state_key,
@@ -304,17 +283,11 @@ class RestConnector(APIConnector):
     def resolved_records_path(self) -> str | None:
         return self._resolved_records_path
 
-    def build_request(
-        self,
-        window: IncrementalWindow,
-        page_params: dict[str, Any],
-    ) -> dict[str, Any]:
+    def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
         payload = {**self._static_params, **page_params}
         request_start = window.request_start
         if self._date_params.start and request_start:
-            payload[self._date_params.start] = request_start.strftime(
-                self._date_params.date_format
-            )
+            payload[self._date_params.start] = request_start.strftime(self._date_params.date_format)
         if self._date_params.end and window.end:
             payload[self._date_params.end] = window.end.strftime(self._date_params.date_format)
         return (
@@ -323,8 +296,18 @@ class RestConnector(APIConnector):
             else {"url": self._base_url, "params": payload}
         )
 
+    @staticmethod
+    def _json_payload(response: requests.Response) -> Any:
+        status_code = getattr(response, "status_code", None)
+        content = getattr(response, "content", None)
+        if status_code in {204, 205}:
+            return []
+        if isinstance(content, (bytes, bytearray)) and not bytes(content).strip():
+            return []
+        return response.json()
+
     def parse_response(self, response: requests.Response) -> ParsedPage:
-        raw = response.json()
+        raw = self._json_payload(response)
         items = self._extract_items(raw)
         return ParsedPage(
             records=[stringify(item) for item in items],
@@ -333,7 +316,7 @@ class RestConnector(APIConnector):
         )
 
     def parse_profile_response(self, response: requests.Response) -> ParsedPage:
-        raw = response.json()
+        raw = self._json_payload(response)
         return ParsedPage(
             records=self._extract_items(raw),
             raw=raw,
@@ -381,12 +364,7 @@ class RestConnector(APIConnector):
         *,
         limit: int = 25,
     ) -> ProbeResult:
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or limit <= 0
-            or limit > 1000
-        ):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 1000:
             raise ValueError("probe limit deve ser um inteiro entre 1 e 1000.")
 
         self._pagination.reset()
@@ -401,9 +379,7 @@ class RestConnector(APIConnector):
         if isinstance(self._pagination, AutoPagination):
             self._pagination.next_params(page, page_params)
 
-        records = [record for record in page.records if self._include_record(record, window)][
-            :limit
-        ]
+        records = [record for record in page.records if self._include_record(record, window)][:limit]
         if self._select:
             records = [self._project_record(record) for record in records]
 
@@ -425,12 +401,7 @@ class RestConnector(APIConnector):
             response_bytes=response_bytes,
         )
 
-    def preview(
-        self,
-        end: Union[date, str] = "today",
-        *,
-        limit: int = 25,
-    ) -> ProbeResult:
+    def preview(self, end: Union[date, str] = "today", *, limit: int = 25) -> ProbeResult:
         return self.probe(end=end, limit=limit)
 
     def collect(self, end: Union[date, str] = "today") -> list[dict[str, Any]]:
@@ -470,10 +441,7 @@ class RestConnector(APIConnector):
             "base_url": self._base_url,
             "pagination": pagination,
             "records": self._resolved_records_path or "auto",
-            "select": [
-                {"path": item.path, "alias": item.alias}
-                for item in (self._select or ())
-            ],
+            "select": [{"path": item.path, "alias": item.alias} for item in (self._select or ())],
             "primary_key": list(self.primary_key) if self.primary_key else None,
             "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
