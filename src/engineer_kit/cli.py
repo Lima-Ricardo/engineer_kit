@@ -133,7 +133,7 @@ def profile_config(
         "--key",
         help=(
             "PK candidata para a metrica duplicates. Use virgula para chave composta. "
-            "Se omitida, reutiliza connector.dedup quando configurado."
+            "Se omitida, reutiliza connector.primary_key quando configurado."
         ),
     ),
     scope: str = typer.Option(
