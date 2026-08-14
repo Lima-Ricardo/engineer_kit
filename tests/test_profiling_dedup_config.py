@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from engineer_kit.capabilities import capability_manifest
 from engineer_kit.config.pipeline_config import (
     PipelineConfigError,
     pipeline_config_from_dict,
@@ -90,6 +91,16 @@ def test_configured_primary_key_is_available_to_profile_with_dedup_disabled():
 
     assert connector.primary_key == ("customer_id",)
     assert connector.dedup_enabled is False
+
+
+def test_capability_manifest_separates_primary_key_identity_from_dedup_policy():
+    connector = capability_manifest()["connector"]
+
+    assert "primary_key" in connector["intent_fields"]
+    assert connector["primary_key"]["required_for_dedup"] is True
+    assert connector["dedup"]["type"] == "boolean"
+    assert connector["dedup"]["identity"] == "primary_key"
+    assert connector["dedup"]["default"] is False
 
 
 def test_quality_summary_preserves_not_computed_semantics():
