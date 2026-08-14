@@ -1,8 +1,9 @@
 """Run configured pipelines without blocking the localhost learning UI.
 
 The Local Lab is deliberately bounded: completed runs are retained in a small
-in-memory history, log buffers are ring buffers, and duplicate/concurrent heavy
-runs are constrained so a browser session cannot grow memory without bound.
+in-memory history, log buffers are ring buffers, individual log lines are
+truncated, and duplicate/concurrent heavy runs are constrained so a browser
+session cannot grow memory without bound.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from engineer_kit.transform.dbt_runner import DbtRunner
 
 DEFAULT_MAX_RETAINED_RUNS = 100
 DEFAULT_MAX_LOG_LINES = 2_000
+DEFAULT_MAX_LOG_CHARS = 16_384
 DEFAULT_MAX_CONCURRENT_RUNS = 4
 
 
@@ -44,7 +46,15 @@ class RunState:
         default_factory=threading.Condition, repr=False
     )
 
-    def append_log(self, line: str, *, max_lines: int) -> None:
+    def append_log(
+        self,
+        line: str,
+        *,
+        max_lines: int,
+        max_chars: int = DEFAULT_MAX_LOG_CHARS,
+    ) -> None:
+        if len(line) > max_chars:
+            line = line[:max_chars] + "... [truncated]"
         with self._condition:
             self._logs.append((self._next_log_index, line))
             self._next_log_index += 1
@@ -85,11 +95,13 @@ class RunManager:
         *,
         max_retained_runs: int = DEFAULT_MAX_RETAINED_RUNS,
         max_log_lines: int = DEFAULT_MAX_LOG_LINES,
+        max_log_chars: int = DEFAULT_MAX_LOG_CHARS,
         max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS,
     ) -> None:
         for name, value in {
             "max_retained_runs": max_retained_runs,
             "max_log_lines": max_log_lines,
+            "max_log_chars": max_log_chars,
             "max_concurrent_runs": max_concurrent_runs,
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -98,6 +110,7 @@ class RunManager:
         self._dbt_project_dir = Path(dbt_project_dir).resolve() if dbt_project_dir else None
         self._max_retained_runs = max_retained_runs
         self._max_log_lines = max_log_lines
+        self._max_log_chars = max_log_chars
         self._runs: dict[str, RunState] = {}
         self._lock = threading.RLock()
         self._slots = threading.BoundedSemaphore(max_concurrent_runs)
@@ -152,7 +165,9 @@ class RunManager:
         with self._slots:
             sink_id = visual_logger.add(
                 lambda message: state.append_log(
-                    redact_text(message), max_lines=self._max_log_lines
+                    redact_text(message),
+                    max_lines=self._max_log_lines,
+                    max_chars=self._max_log_chars,
                 ),
                 filter=lambda record: record["extra"].get("run_id") == run_id,
                 format="{time:HH:mm:ss} | {level: <8} | {message}",
@@ -261,6 +276,7 @@ class RunManager:
 
 __all__ = [
     "DEFAULT_MAX_CONCURRENT_RUNS",
+    "DEFAULT_MAX_LOG_CHARS",
     "DEFAULT_MAX_LOG_LINES",
     "DEFAULT_MAX_RETAINED_RUNS",
     "RunManager",
