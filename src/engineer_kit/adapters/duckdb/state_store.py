@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import duckdb
 
-from engineer_kit.storage.state_store import StateConflictError, StateStore, Watermark
+from engineer_kit.storage.state_store import (
+    StateConflictError,
+    StateStore,
+    Watermark,
+    validate_state_key,
+)
 
 
 class DuckDBStateStore(StateStore):
@@ -52,7 +57,7 @@ class DuckDBStateStore(StateStore):
         )
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
-        return self._get_watermark(connector_name)
+        return self._get_watermark(validate_state_key(connector_name))
 
     def _replace_watermark(self, connector_name: str, watermark: Watermark) -> None:
         self._conn.execute(
@@ -71,9 +76,10 @@ class DuckDBStateStore(StateStore):
 
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
         """Replace a checkpoint in one transaction."""
+        key = validate_state_key(connector_name)
         self._conn.execute("BEGIN TRANSACTION")
         try:
-            self._replace_watermark(connector_name, watermark)
+            self._replace_watermark(key, watermark)
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
@@ -86,15 +92,16 @@ class DuckDBStateStore(StateStore):
         watermark: Watermark,
     ) -> None:
         """Atomically reject a stale writer before replacing the checkpoint."""
+        key = validate_state_key(connector_name)
         self._conn.execute("BEGIN TRANSACTION")
         try:
-            current = self._get_watermark(connector_name)
+            current = self._get_watermark(key)
             if current != expected:
                 raise StateConflictError(
-                    f"Checkpoint de '{connector_name}' mudou durante a execucao; "
+                    f"Checkpoint de '{key}' mudou durante a execucao; "
                     "o commit concorrente foi recusado."
                 )
-            self._replace_watermark(connector_name, watermark)
+            self._replace_watermark(key, watermark)
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
