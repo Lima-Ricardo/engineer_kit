@@ -40,12 +40,7 @@ def _positive_int(value: Any, *, name: str, allow_zero: bool = False) -> int:
 
 class PaginationStrategy(ABC):
     def reset(self) -> None:
-        """Reset per-extraction state, if any.
-
-        Stateless strategies intentionally do nothing. Stateful strategies such
-        as AutoPagination override this so one probe/extraction can never freeze
-        the pagination decision of a later extraction.
-        """
+        """Reset per-extraction state, if any."""
 
     @abstractmethod
     def initial_params(self) -> dict[str, Any]: ...
@@ -67,12 +62,12 @@ class NoPagination(PaginationStrategy):
 
 
 class PageNumberPagination(PaginationStrategy):
-    """Increment a page number until the server returns an empty page.
+    """Increment a page number until pagination is exhausted.
 
-    Historically engineer_kit stopped whenever ``len(records) < page_size``.
-    That silently truncated APIs which cap page size below the requested value.
-    ``stop_on_short_page=True`` preserves that legacy optimization only when the
-    operator knows the API honors the requested page size exactly.
+    The direct strategy keeps the historical short-page termination behavior for
+    backwards compatibility. Intent/declarative resolution opts out by default,
+    because some APIs cap the returned page size below the requested value and a
+    short-page stop would silently truncate those sources.
     """
 
     def __init__(
@@ -81,7 +76,7 @@ class PageNumberPagination(PaginationStrategy):
         page_size_param: str = "per_page",
         page_size: int = 100,
         start_page: int = 1,
-        stop_on_short_page: bool = False,
+        stop_on_short_page: bool = True,
     ) -> None:
         self._page_param = str(page_param)
         self._page_size_param = str(page_size_param)
@@ -108,9 +103,10 @@ class PageNumberPagination(PaginationStrategy):
 
 
 class OffsetPagination(PaginationStrategy):
-    """Advance an offset until an empty page is observed.
+    """Advance an offset until pagination is exhausted.
 
-    See :class:`PageNumberPagination` for why short-page termination is opt-in.
+    Direct construction preserves the historical short-page stop; intent mode
+    defaults to exhaustive pagination for the same reason as page-number mode.
     """
 
     def __init__(
@@ -119,7 +115,7 @@ class OffsetPagination(PaginationStrategy):
         limit_param: str = "limit",
         limit: int = 100,
         start_offset: int = 0,
-        stop_on_short_page: bool = False,
+        stop_on_short_page: bool = True,
     ) -> None:
         self._offset_param = str(offset_param)
         self._limit_param = str(limit_param)
@@ -167,11 +163,7 @@ class CursorPagination(PaginationStrategy):
 
 
 class LinkHeaderPagination(PaginationStrategy):
-    """Follow RFC-style Link headers conservatively.
-
-    The parser accepts quoted/unquoted ``rel=next`` and arbitrary parameter
-    ordering without attempting to interpret unrelated link parameters.
-    """
+    """Follow RFC-style Link headers conservatively."""
 
     _LINK_PART_RE = re.compile(r"<([^>]+)>\s*(?:;\s*[^,]+)*", re.IGNORECASE)
     _REL_NEXT_RE = re.compile(
@@ -365,6 +357,8 @@ def _translate_options(kind: str, options: dict[str, Any]) -> dict[str, Any]:
     for source, target in aliases.items():
         if source in values and target not in values:
             values[target] = values.pop(source)
+    if kind in {"page", "offset"} and "stop_on_short_page" not in values:
+        values["stop_on_short_page"] = False
     return values
 
 
@@ -384,6 +378,8 @@ def resolve_pagination(
         if strategy_cls is None:
             valid = ", ".join(sorted(STANDARD_PAGINATION_TYPES))
             raise ValueError(f"pagination '{value}' desconhecida. Use: {valid}.")
+        if kind in {"page", "offset"}:
+            return strategy_cls(stop_on_short_page=False)
         return strategy_cls()
     if isinstance(value, dict):
         kind = _normalize_type(str(value.get("type", "auto")))
