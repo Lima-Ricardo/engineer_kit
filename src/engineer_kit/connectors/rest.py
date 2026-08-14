@@ -179,10 +179,6 @@ class RestConnector(APIConnector):
         else:
             runtime_incremental = None
 
-        # Legacy/typed construction may provide StateStore plus mode/date_field
-        # without an explicit ``incremental=`` selector. Resolve that strategy
-        # here so the new state namespace is honored consistently instead of
-        # letting APIConnector fall back to connector.name.
         if runtime_incremental is None and state_store is not None:
             if mode is IncrementalMode.DATA_DATE and field is None:
                 raise MissingDateFieldError(
@@ -311,6 +307,15 @@ class RestConnector(APIConnector):
             headers=dict(response.headers),
         )
 
+    def parse_profile_response(self, response: requests.Response) -> ParsedPage:
+        """Preserve native JSON values for schema and type profiling."""
+        raw = response.json()
+        return ParsedPage(
+            records=self._extract_items(raw),
+            raw=raw,
+            headers=dict(response.headers),
+        )
+
     def _project_record(self, record: dict[str, Any]) -> dict[str, Any]:
         return project(record, self._select)
 
@@ -357,9 +362,6 @@ class RestConnector(APIConnector):
         page = self.parse_response(response)
 
         if isinstance(self._pagination, AutoPagination):
-            # Detection uses the already-fetched page and deliberately does not
-            # follow the next request. The resolved strategy can then be reused
-            # by the real extraction without a second discovery request.
             self._pagination.next_params(page, page_params)
 
         records = page.records[:limit]
