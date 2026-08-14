@@ -24,6 +24,7 @@ from engineer_kit.config.pipeline_config import (
 )
 from engineer_kit.connectors.incremental import IncrementalStrategy
 from engineer_kit.connectors.intent import read_path
+from engineer_kit.orchestration.pipeline import _checkpoint_identity
 from engineer_kit.storage.flatten import flatten_record
 
 
@@ -268,6 +269,31 @@ def test_state_key_can_namespace_same_logical_connector(tmp_path):
     )
     assert first.state_key == "tenant_a.orders"
     assert second.state_key == "tenant_b.orders"
+
+
+def test_state_key_participates_in_deterministic_ingestion_identity(tmp_path):
+    state = JsonFileStateStore(tmp_path / "identity-state.json")
+    first = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        pagination=False,
+        incremental=True,
+        state_store=state,
+        state_key="tenant_a.orders",
+    )
+    second = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        pagination=False,
+        incremental=True,
+        state_store=state,
+        state_key="tenant_b.orders",
+    )
+
+    first_window = first.extract_incremental(end=date(2026, 1, 1)).window
+    second_window = second.extract_incremental(end=date(2026, 1, 1)).window
+
+    assert _checkpoint_identity(first, first_window) != _checkpoint_identity(second, second_window)
 
 
 def test_capability_manifest_is_serializable_and_adapter_aware():
