@@ -12,7 +12,7 @@ from typing import Any, Iterable, Iterator, Sequence
 from engineer_kit.connectors.dedup import (
     ExactKeyDeduplicator,
     ExactRowDeduplicator,
-    resolve_dedup_keys,
+    resolve_primary_key,
 )
 from engineer_kit.profiling.model import (
     PROFILE_REPORT_VERSION,
@@ -228,7 +228,7 @@ def profile_records(
     )
     accumulators: dict[str, _FieldAccumulator] = {}
     records_analyzed = 0
-    duplicate_keys = resolve_dedup_keys(key) if key is not None else None
+    duplicate_keys = resolve_primary_key(key) if key is not None else None
     duplicate_tracker: ExactKeyDeduplicator | ExactRowDeduplicator | None = None
     if "duplicates" in plan:
         duplicate_tracker = (
@@ -335,12 +335,10 @@ def profile_records(
             if isinstance(duplicate_tracker, ExactKeyDeduplicator)
             else 0
         )
-        unique_rows = records_analyzed - duplicate_rows
-        if duplicate_keys is not None:
-            unique_rows -= invalid_key_rows
+        valid_unique_rows = records_analyzed - duplicate_rows - invalid_key_rows
         duplicates = DuplicateProfile(
             duplicate_rows=duplicate_rows,
-            unique_rows=unique_rows,
+            unique_rows=valid_unique_rows,
             key_fields=duplicate_keys,
             invalid_key_rows=invalid_key_rows,
         )
