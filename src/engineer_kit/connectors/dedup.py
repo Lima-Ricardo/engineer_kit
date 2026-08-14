@@ -1,4 +1,4 @@
-"""Streaming exact deduplication with bounded memory.
+"""Streaming exact primary-key deduplication with bounded memory.
 
 Deduplication stores only SHA-256 fingerprints in a temporary SQLite database.
 It therefore avoids materializing either records or an unbounded in-memory set
@@ -29,46 +29,60 @@ class InvalidDeduplicationKeyError(DeduplicationError):
     """Raised when a record does not contain a usable declared primary key."""
 
 
-def resolve_dedup_keys(
-    value: str | Sequence[str] | bool | None,
-) -> tuple[str, ...] | None:
-    """Normalize the public ``dedup`` contract to declared primary-key paths.
+def resolve_primary_key(value: str | Sequence[str] | None) -> tuple[str, ...] | None:
+    """Normalize a simple/composite record identity.
 
-    ``False``/``None`` disable deduplication. ``True`` is deliberately rejected:
-    deduplication must declare the business identity that governs which complete
-    record is kept. A string denotes one key and a sequence denotes a composite
-    key.
+    ``None`` means no declared identity. A string denotes one key path and a
+    sequence denotes a composite key. This function validates identity only;
+    whether deduplication is enabled is a separate policy decision.
     """
-    if value is None or value is False:
+    if value is None:
         return None
-    if value is True:
+    if isinstance(value, bool):
         raise TypeError(
-            "dedup=True e ambiguo. Declare a PK, por exemplo "
-            "dedup='customer_id' ou dedup=['tenant_id', 'customer_id']."
+            "primary_key deve ser uma coluna ou lista de colunas, nao booleano."
         )
     if isinstance(value, str):
         raw_values = [value]
     elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         raw_values = list(value)
     else:
-        raise TypeError("dedup deve ser False/None, uma coluna PK ou uma lista de colunas PK.")
+        raise TypeError("primary_key deve ser uma coluna ou uma lista de colunas.")
 
     keys: list[str] = []
     seen: set[str] = set()
     for raw in raw_values:
         if not isinstance(raw, str):
-            raise TypeError("cada coluna de dedup deve ser uma string.")
+            raise TypeError("cada coluna de primary_key deve ser uma string.")
         key = raw.strip()
         if not key:
-            raise ValueError("coluna de dedup nao pode ser vazia.")
+            raise ValueError("coluna de primary_key nao pode ser vazia.")
         parse_path(key)
         if key in seen:
             continue
         seen.add(key)
         keys.append(key)
     if not keys:
-        raise ValueError("dedup precisa declarar pelo menos uma coluna PK.")
+        raise ValueError("primary_key precisa declarar pelo menos uma coluna.")
     return tuple(keys)
+
+
+def resolve_dedup_keys(
+    value: str | Sequence[str] | bool | None,
+) -> tuple[str, ...] | None:
+    """Compatibility alias for the pre-separation key normalizer.
+
+    New code should call :func:`resolve_primary_key`. ``False``/``None`` keep
+    the historical disabled meaning; ``True`` remains invalid because it does
+    not carry identity.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        raise TypeError(
+            "dedup=True nao declara identidade. Use primary_key=<...> e dedup=True."
+        )
+    return resolve_primary_key(value)
 
 
 def canonical_record_bytes(record: dict[str, Any]) -> bytes:
@@ -97,11 +111,11 @@ def _key_values(record: dict[str, Any], keys: tuple[str, ...]) -> list[Any]:
         value = read_path(record, key)
         if value is None or (isinstance(value, str) and not value.strip()):
             raise InvalidDeduplicationKeyError(
-                f"PK de dedup invalida: '{key}' esta ausente, null ou blank."
+                f"primary_key invalida: '{key}' esta ausente, null ou blank."
             )
         if isinstance(value, (dict, list)):
             raise InvalidDeduplicationKeyError(
-                f"PK de dedup invalida: '{key}' deve resolver para valor escalar."
+                f"primary_key invalida: '{key}' deve resolver para valor escalar."
             )
         values.append(value)
     return values
@@ -217,7 +231,7 @@ class ExactKeyDeduplicator:
 
     ``add(record)`` returns ``True`` only for the first occurrence of the PK.
     Missing/null/blank/non-scalar key values fail fast by default because a
-    declared dedup key is a primary-key contract, not a best-effort hint.
+    declared primary key is an identity contract, not a best-effort hint.
     Profiling may opt into ``strict=False`` to count invalid-key rows instead of
     stopping the scan.
     """
@@ -229,7 +243,7 @@ class ExactKeyDeduplicator:
         strict: bool = True,
         directory: str | os.PathLike[str] | None = None,
     ) -> None:
-        resolved = resolve_dedup_keys(keys)
+        resolved = resolve_primary_key(keys)
         assert resolved is not None
         self.keys = resolved
         self.strict = strict
@@ -277,4 +291,5 @@ __all__ = [
     "key_fingerprint",
     "record_fingerprint",
     "resolve_dedup_keys",
+    "resolve_primary_key",
 ]
