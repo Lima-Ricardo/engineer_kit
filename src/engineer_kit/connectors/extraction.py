@@ -14,7 +14,7 @@ from datetime import date
 from typing import Callable, Iterator, Optional, Sequence
 
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
-from engineer_kit.connectors.dedup import ExactKeyDeduplicator, resolve_dedup_keys
+from engineer_kit.connectors.dedup import ExactKeyDeduplicator, resolve_primary_key
 from engineer_kit.connectors.incremental import IncrementalStrategy, IncrementalWindow
 from engineer_kit.storage.state_store import Watermark
 
@@ -44,10 +44,11 @@ class ExtractionSession:
 
     ``record_transform`` is applied only after incremental date tracking. This
     allows ergonomic projections to hide fields from the caller without hiding
-    a watermark field from checkpoint logic. When ``dedup`` declares one or more
-    primary-key fields, later records whose PK already occurred are suppressed
-    after transformation. The complete duplicate record is removed; the key
-    column itself is never mutated.
+    a watermark field from checkpoint logic. At this low-level boundary,
+    ``dedup`` receives the already-resolved primary-key fields only when the
+    higher-level connector policy enabled deduplication. ``False``/``None`` keep
+    deduplication disabled for 0.2 compatibility. The complete duplicate record
+    is removed; the key column itself is never mutated.
     """
 
     def __init__(
@@ -67,7 +68,9 @@ class ExtractionSession:
         self._incremental = incremental
         self._date_field = date_field
         self._record_transform = record_transform
-        self._dedup_keys = resolve_dedup_keys(dedup)
+        self._dedup_keys = (
+            None if dedup is False or dedup is None else resolve_primary_key(dedup)
+        )
         self._started = False
         self._exhausted = False
         self._aborted = False
