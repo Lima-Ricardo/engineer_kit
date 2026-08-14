@@ -176,7 +176,17 @@ class APIConnector(Connector):
 
     @abstractmethod
     def parse_response(self, response: requests.Response) -> ParsedPage:
-        """Extract records, raw response and headers."""
+        """Extract normalized records, raw response and headers."""
+
+    def parse_profile_response(self, response: requests.Response) -> ParsedPage:
+        """Parse records for profiling.
+
+        Connectors whose ingestion parser normalizes values may override this
+        hook to preserve native source types for profiling. By default profiling
+        uses the regular parsed page, which keeps third-party connectors fully
+        compatible.
+        """
+        return self.parse_response(response)
 
     def extract_incremental(
         self,
@@ -214,7 +224,7 @@ class APIConnector(Connector):
         limit: int | None = None,
         fields: Sequence[str] | None = None,
     ) -> ProfileReport:
-        """Inspect source data and return aggregate profiling/data-quality metrics.
+        """Return aggregate profiling/data-quality metrics without persistence.
 
         No metric selector means a complete profile. Explicit selectors such as
         ``profile("duplicates", "nulls", "missing")`` activate only the
@@ -242,21 +252,18 @@ class APIConnector(Connector):
         self,
         window: IncrementalWindow,
     ) -> Iterator[dict[str, Any]]:
-        records = self._iter_records(window)
+        pages = self._iter_pages(window, self.parse_profile_response)
         try:
-            for record in records:
-                yield self._record_transform(record) if self._record_transform else record
+            for page in pages:
+                for record in page.records:
+                    yield self._record_transform(record) if self._record_transform else record
         finally:
-            close = getattr(records, "close", None)
+            close = getattr(pages, "close", None)
             if callable(close):
                 close()
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
-        """Return the legacy lazy record stream.
-
-        New code should prefer ``extract_incremental()`` and normal session
-        iteration so bounded batches are the default user experience.
-        """
+        """Return the legacy lazy record stream."""
         session = self.extract_incremental(end)
         self._legacy_session = session
         return session.iter_records()
@@ -281,6 +288,15 @@ class APIConnector(Connector):
         return f"params:{serialized}"
 
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
+        for page in self._iter_pages(window, self.parse_response):
+            yield from page.records
+
+    def _iter_pages(
+        self,
+        window: IncrementalWindow,
+        parser: Callable[[requests.Response], ParsedPage],
+    ) -> Iterator[ParsedPage]:
+        """Yield pages through one shared pagination/safety state machine."""
         page_params = self._pagination.initial_params()
         next_url: Optional[str] = None
         seen_requests: set[str] = set()
@@ -324,9 +340,8 @@ class APIConnector(Connector):
 
             response = self._http.request(self._method, **request_kwargs)
             pages_requested += 1
-            page = self.parse_response(response)
-
-            yield from page.records
+            page = parser(response)
+            yield page
 
             next_params = self._pagination.next_params(page, page_params)
             if next_params is None:
