@@ -2,14 +2,15 @@
 
 [🇧🇷 Português](README.md) · **🇺🇸 English**
 
-> **Intent-driven REST ingestion for analytics — a small surface API over a typed, streaming-first runtime.**
+> **Intent-driven REST ingestion for analytics — 95% abstraction at the surface, with a typed, streaming-first and secure runtime underneath.**
 
+[![PyPI](https://img.shields.io/pypi/v/engineer-kit)](https://pypi.org/project/engineer-kit/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](#installation)
 [![CI](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/ci.yml)
 [![Docs](https://github.com/Lima-Ricardo/engineer_kit/actions/workflows/docs.yml/badge.svg)](https://lima-ricardo.github.io/engineer_kit/en/)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`engineer_kit` abstracts HTTP, authentication, pagination, incrementality, batching, checkpoints, Bronze persistence, destinations, and audit logging. The caller declares **intent**; the library resolves the internal contracts when it can do so safely.
+`engineer_kit` abstracts HTTP, authentication, pagination, incrementality, batching, profiling/Data Quality, primary-key identity, deduplication, checkpoints, Bronze persistence, destinations, and audit logging. You declare **intent**; the library resolves internal contracts when it can do so safely.
 
 ## ⚡ Happy path
 
@@ -17,45 +18,106 @@
 from engineer_kit import RestConnector
 
 records = RestConnector(
-    base_url=url,
-    auth=token,
-    pagination="cursor",
-    incremental=True,
-).collect()
-```
-
-No `if/else` to choose pagination, no manual factory, and no need to instantiate `CursorPagination`, `StateStore`, or `Destination` for the common case.
-
-A simple public API can be as small as:
-
-```python
-records = RestConnector(
     base_url="https://api.example.com/orders",
 ).collect()
 ```
 
-`GET` is the default, the connector name is derived from the URL, the records list is detected when unambiguous, and `pagination="auto"` is conservative.
-
-## 🎯 95% abstraction, 5% selectors
-
-When the source requires details, provide only those details:
+When the source needs more context, provide only the relevant selectors:
 
 ```python
 connector = RestConnector(
-    base_url=url,
+    base_url="https://api.example.com/orders",
     auth=token,
-    pagination={"type": "page", "size": 1000},
-    incremental={
-        "field": "updated_at",
-        "param": "updated_from",
-        "initial_start": "2026-01-01",
-    },
+    pagination="cursor",
+    incremental="updated_at",
     records="payload.orders",
     select=["id", "customer_id", "amount", "updated_at"],
 )
 ```
 
-The same API still accepts typed objects when advanced control is required.
+No manual factories and no strategy-selection `if/else` for the common path. Typed objects remain available for expert control.
+
+## 🔎 Profile before ingestion
+
+`profile()` lets you inspect the source **before Bronze**, without destination writes and without advancing checkpoints:
+
+```python
+report = connector.profile(
+    "duplicates",
+    "nulls",
+    "missing",
+    "cardinality",
+)
+
+print(report.to_text())
+```
+
+With no selectors, profiling computes every supported metric. Presets such as `quality`, `statistics`, and `schema` are also available.
+
+For large sources, the UI defaults to `sample`; Python can explicitly choose `scope="sample"` or `scope="full"`.
+
+## 🔑 Primary key first, dedup second
+
+Identity and policy are independent:
+
+```python
+connector = RestConnector(
+    base_url="https://api.example.com/customers",
+    primary_key="customer_id",
+    dedup=False,
+)
+```
+
+A PK may exist while deduplication is disabled for profiling and identity metadata. Test a candidate before enabling the policy:
+
+```python
+report = connector.profile(
+    "duplicates",
+    "missing",
+    "nulls",
+    key="customer_id",
+)
+```
+
+Then, if the identity contract is appropriate:
+
+```python
+connector = RestConnector(
+    base_url="https://api.example.com/customers",
+    primary_key="customer_id",
+    dedup=True,
+)
+```
+
+Composite keys are supported:
+
+```python
+primary_key=["tenant_id", "order_id"]
+```
+
+With `dedup=True`, the first occurrence wins. When the same PK appears again, **the entire later record** is discarded. Missing, `null`, blank, or non-scalar keys fail ingestion instead of collapsing undefined identities.
+
+## 🖥️ Local Lab
+
+The local UI shares the same contracts as the Python API and YAML.
+
+### Dashboard
+
+![Local Lab dashboard](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/dashboard.svg)
+
+### Pipeline editor — identity and deduplication are separate
+
+![Pipeline editor with primary key and dedup](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/pipeline-editor.svg)
+
+### Data Profile — quality and PK validation before Bronze
+
+![Data Profile interface](https://raw.githubusercontent.com/Lima-Ricardo/engineer_kit/main/docs/assets/ui/data-profile.svg)
+
+Start it with:
+
+```bash
+engineer_kit ui --workspace .
+```
 
 ## 📦 Installation
 
@@ -77,6 +139,14 @@ pip install "engineer-kit[all]"
 
 DuckDB, PyArrow, Delta, dbt, and the UI remain lazy optional integrations.
 
+## 🧪 Side-effect-free probe / preview
+
+```python
+probe = connector.probe(limit=25)
+```
+
+`probe()` / `preview()` read one page for diagnosis, reuse that response for pagination detection, and do not write to a `Destination` or commit a checkpoint.
+
 ## 📄 Intent-driven pagination
 
 ```python
@@ -88,7 +158,7 @@ pagination="next_url"
 pagination=False
 ```
 
-Strings are case-insensitive. For non-standard APIs:
+For non-standard APIs:
 
 ```python
 pagination={
@@ -98,39 +168,15 @@ pagination={
 }
 ```
 
-`auto` reuses a response already fetched by extraction; it does not issue extra discovery requests.
+`pagination="auto"` is conservative and reuses a response already fetched by extraction; it does not issue extra discovery requests.
 
-## 🔐 Authentication
-
-A string passed to `auth` means Bearer auth:
-
-```python
-auth=token
-```
-
-For production, the secret source can remain explicit:
-
-```python
-from engineer_kit import BearerAuth, EnvSecretProvider
-
-auth = BearerAuth(EnvSecretProvider(), "API_TOKEN")
-```
-
-`FileSecretProvider`, `ApiKeyAuth`, and custom `SecretProvider` implementations remain available.
-
-## ⏱️ Incremental extraction
-
-```python
-incremental=True
-```
-
-or, when the watermark field is known:
+## ⏱️ Incremental extraction and safe checkpoints
 
 ```python
 incremental="updated_at"
 ```
 
-When the source requires a specific incremental filter:
+or:
 
 ```python
 incremental={
@@ -140,9 +186,9 @@ incremental={
 }
 ```
 
-The checkpoint advances only after the correct success boundary. `select=` projections do not hide watermark fields from internal checkpoint tracking.
+The checkpoint advances only after the success boundary. `state_key` separates namespaces, and official stores use compare-and-set to reject commits derived from stale state.
 
-## 🌊 `collect()` and `stream()`
+## 🌊 Streaming-first
 
 Small dataset:
 
@@ -157,36 +203,28 @@ for batch in connector.stream():
     process(batch)
 ```
 
-Extraction remains streaming-first; the default extraction batch is 25,000 records.
+The default extraction batch is 25,000 records. Convenience stays in setup; the hot path remains streaming and bounded.
 
-## 🦆 DuckDB without boilerplate
+## 🦆 Managed ingestion
+
+DuckDB:
 
 ```python
-result = RestConnector(
-    base_url=url,
-    auth=token,
-    pagination="cursor",
-    incremental=True,
-).to(
+result = connector.to(
     "duckdb",
     "bronze.orders",
     path="analytics.duckdb",
 ).run()
 ```
 
-Managed mode resolves the connection, destination, initial schema, compatible state store, and audit backend. `Destination`, `StateStore`, and `RunLogBackend` remain separate contracts internally.
-
-## 🗂️ Parquet and Delta
+Parquet and Delta:
 
 ```python
 connector.to("parquet", "bronze.orders", path="./lake").run()
-```
-
-```python
 connector.to("delta", "bronze.orders", path="s3://bucket/lake").run()
 ```
 
-## 🔧 Chained dbt
+Optional chained dbt:
 
 ```python
 result = (
@@ -197,51 +235,33 @@ result = (
 )
 ```
 
-The dbt project can be discovered from the current directory and its ancestors. `project_dir`, `profiles_dir`, and `target` remain available when needed.
+## 📝 YAML and CLI
 
-## 🔎 Transparency
+The declarative contract uses `version: 1`, strict validation, duplicate-YAML-key rejection, and parity with the main Python intents.
+
+```yaml
+version: 1
+name: customers
+connector:
+  base_url: https://api.example.com/customers
+  records: data
+  primary_key: customer_id
+  dedup: true
+```
+
+```bash
+engineer_kit run-config pipelines/customers.yaml
+engineer_kit profile-config pipelines/customers.yaml --key customer_id
+engineer_kit profile-config pipelines/customers.yaml --html profile.html
+```
+
+## 🔎 Transparency and capabilities
 
 ```python
 print(connector.explain())
 ```
 
-`explain()` reports connector resolution without issuing another HTTP request or exposing the authentication value.
-
-## 🧠 Performance
-
-Convenience stays in setup, not in the hot path:
-
-```text
-simple input
-    ↓
-one-time resolution
-    ↓
-cached strategy and paths
-    ↓
-direct streaming + batches
-```
-
-There is no per-record inference. Managed schema inference consumes only a bounded sample and chains that sample back into the same iterator, without fetching the API again.
-
-## 🧩 Expert mode
-
-```python
-from engineer_kit import BearerAuth, CursorPagination, RestConnector
-
-connector = RestConnector(
-    name="orders",
-    base_url=url,
-    pagination=CursorPagination(
-        cursor_param="after",
-        cursor_field="next_cursor",
-    ),
-    auth=BearerAuth(provider, "API_TOKEN"),
-    incremental=custom_incremental_strategy,
-    state_store=custom_state_store,
-)
-```
-
-The ergonomic facade resolves the contracts; it does not replace them.
+`explain()` reports connector resolution without another HTTP request or exposing authentication values. `capability_manifest()` exposes a serializable capability contract for CLI/UI surfaces.
 
 ## 🧱 Architecture
 
@@ -249,6 +269,8 @@ The ergonomic facade resolves the contracts; it does not replace them.
 REST API
    ↓
 RestConnector
+   ├── probe / preview   → read-only diagnosis
+   ├── profile           → Data Quality / PK candidate
    ↓
 ExtractionSession
    ├── embedded → your code / Spark / Pandas / Polars
@@ -261,26 +283,17 @@ DuckDB is the local reference adapter, not an architectural premise.
 
 ## 🛡️ Secure by default
 
-The library keeps secure HTTPS/TLS defaults, secret redaction, response and pagination limits, loop detection, cross-origin and metadata/link-local protections, safe retry policy, filesystem/YAML/subprocess hardening, and CI with Ruff, Bandit, `pip-audit`, package checks, and synthetic stress tests.
+Secure HTTPS/TLS defaults, secret redaction, response/pagination limits, cross-origin and metadata/link-local protections, controlled retries, filesystem/YAML/subprocess hardening, reserved Bronze names, explicit alias-collision failures, and CI with Ruff, Bandit, `pip-audit`, package validation, and multi-Python tests.
 
 Read [`SECURITY.md`](SECURITY.md) before production use.
 
-## 📝 YAML, CLI, and Local Lab
-
-```bash
-engineer_kit run-config pipelines/orders.yaml
-engineer_kit ui --workspace .
-```
-
-The simplified Python API, declarative mode, and UI share the same internal contracts.
-
 ## 📚 Documentation
 
-English: **https://lima-ricardo.github.io/engineer_kit/en/**
-
-Português: **https://lima-ricardo.github.io/engineer_kit/**
-
-Start with [First pipeline](https://lima-ricardo.github.io/engineer_kit/en/getting-started/first-pipeline/) and the [Python API reference](https://lima-ricardo.github.io/engineer_kit/en/reference/python-api/).
+- English: **https://lima-ricardo.github.io/engineer_kit/en/**
+- Português: **https://lima-ricardo.github.io/engineer_kit/**
+- [First pipeline](https://lima-ricardo.github.io/engineer_kit/en/getting-started/first-pipeline/)
+- [Python API reference](https://lima-ricardo.github.io/engineer_kit/en/reference/python-api/)
+- [YAML configuration](https://lima-ricardo.github.io/engineer_kit/en/reference/configuration/)
 
 ## 🤝 Contributing and license
 
