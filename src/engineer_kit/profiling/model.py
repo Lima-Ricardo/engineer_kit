@@ -50,11 +50,13 @@ class DuplicateProfile:
 
 @dataclass(frozen=True)
 class DataQualitySummary:
+    """Aggregate quality view without confusing uncomputed metrics with zero."""
+
     duplicate_rows: int | None
-    fields_with_missing: int
-    fields_with_nulls: int
-    fields_with_empty: int
-    mixed_type_fields: int
+    fields_with_missing: int | None
+    fields_with_nulls: int | None
+    fields_with_empty: int | None
+    mixed_type_fields: int | None
 
 
 @dataclass(frozen=True)
@@ -73,24 +75,27 @@ class ProfileReport:
 
     @property
     def quality(self) -> DataQualitySummary:
-        mixed = 0
-        missing = 0
-        nulls = 0
-        empty = 0
+        missing: int | None = 0 if self.has("missing") else None
+        nulls: int | None = 0 if self.has("nulls") else None
+        empty: int | None = 0 if self.has("empty") else None
+        mixed: int | None = 0 if self.has("types") or self.has("schema") else None
+
         for profile in self.fields.values():
-            if (profile.missing or 0) > 0:
+            if missing is not None and (profile.missing or 0) > 0:
                 missing += 1
-            if (profile.nulls or 0) > 0:
+            if nulls is not None and (profile.nulls or 0) > 0:
                 nulls += 1
-            if (profile.empty or 0) > 0:
+            if empty is not None and (profile.empty or 0) > 0:
                 empty += 1
-            non_null_types = {
-                name: count
-                for name, count in (profile.types or {}).items()
-                if name != "null" and count > 0
-            }
-            if len(non_null_types) > 1:
-                mixed += 1
+            if mixed is not None:
+                non_null_types = {
+                    name: count
+                    for name, count in (profile.types or {}).items()
+                    if name != "null" and count > 0
+                }
+                if len(non_null_types) > 1:
+                    mixed += 1
+
         return DataQualitySummary(
             duplicate_rows=(self.duplicates.duplicate_rows if self.duplicates else None),
             fields_with_missing=missing,
