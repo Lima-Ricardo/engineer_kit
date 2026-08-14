@@ -2,7 +2,8 @@
 
 The tracker stores only SHA-256 fingerprints in a temporary SQLite database.
 It therefore avoids materializing either records or an unbounded in-memory set
-while keeping source values out of the temporary dedup store.
+while keeping source values out of the temporary dedup store. Disk usage grows
+with the number of unique rows; memory does not.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_DEDUP_COMMIT_INTERVAL = 10_000
 
 
 class DeduplicationError(RuntimeError):
@@ -45,6 +48,8 @@ class ExactRowDeduplicator:
 
     ``add(record)`` returns ``True`` only for the first occurrence. The SQLite
     file is process-local, contains only fingerprints, and is removed on close.
+    Inserts are committed periodically so a very large scan does not become one
+    enormous SQLite transaction.
     """
 
     def __init__(self, *, directory: str | os.PathLike[str] | None = None) -> None:
@@ -62,11 +67,13 @@ class ExactRowDeduplicator:
             self._conn.execute(
                 "CREATE TABLE seen (fingerprint BLOB PRIMARY KEY) WITHOUT ROWID"
             )
+            self._conn.commit()
         except Exception:
             self._path.unlink(missing_ok=True)
             raise
         self.unique_count = 0
         self.duplicate_count = 0
+        self._pending = 0
         self._closed = False
 
     @property
@@ -87,12 +94,18 @@ class ExactRowDeduplicator:
             self.unique_count += 1
         else:
             self.duplicate_count += 1
+        self._pending += 1
+        if self._pending >= _DEDUP_COMMIT_INTERVAL:
+            self._conn.commit()
+            self._pending = 0
         return is_new
 
     def close(self) -> None:
         if self._closed:
             return
         try:
+            if self._pending:
+                self._conn.commit()
             self._conn.close()
         finally:
             self._path.unlink(missing_ok=True)
