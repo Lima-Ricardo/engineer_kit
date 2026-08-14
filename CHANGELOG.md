@@ -47,6 +47,7 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 
 - YAML usa loader derivado de `yaml.SafeLoader`, rejeita chaves duplicadas e campos desconhecidos em blocos conhecidos.
 - `connector.dedup` é estritamente booleano no YAML; `true` exige `connector.primary_key`, e strings/listas são recusadas para evitar contratos ambíguos.
+- `connector.primary_key` aceita somente string/lista/null; booleanos como `true`/`false` são recusados para não confundir identidade com política de deduplicação.
 - Uma deduplicação ativa com PK ausente/null/blank/não escalar interrompe a ingestão em vez de colapsar identidades indefinidas.
 - O `ProfileReport` é aggregate-only e seus renderers não persistem valores reais da fonte; HTML faz escaping de paths/warnings.
 - Colunas reservadas da Bronze (`_raw`, `_extra`, `_source`, `_run_id`, `_ingestion_key` e demais metadata internos) não podem ser declaradas pela origem.
