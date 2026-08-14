@@ -112,6 +112,10 @@ class ProfileReport:
 
         return render_html(self)
 
+    def __str__(self) -> str:
+        """Make ``print(connector.profile(...))`` a terminal data-quality report."""
+        return self.to_text().rstrip()
+
 
 __all__ = [
     "PROFILE_REPORT_VERSION",
