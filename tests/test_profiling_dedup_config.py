@@ -78,7 +78,10 @@ def test_declarative_dedup_must_be_boolean():
 
 
 def test_declarative_primary_key_rejects_boolean_empty_and_non_string_members():
-    for primary_key in (True, "", [], ["id", 123]):
+    # Both booleans are invalid identities. In particular, ``false`` must not be
+    # interpreted as the historical "dedup disabled" sentinel now that PK and
+    # deduplication policy are separate fields.
+    for primary_key in (True, False, "", [], ["id", 123]):
         with pytest.raises(PipelineConfigError, match="connector.primary_key invalido"):
             pipeline_config_from_dict(_config_dict(primary_key=primary_key))
 
