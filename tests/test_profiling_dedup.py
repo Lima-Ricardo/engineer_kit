@@ -52,11 +52,18 @@ class _Client:
         return _Response()
 
 
-def _connector(*, dedup=False, client: _Client | None = None, **kwargs):
+def _connector(
+    *,
+    primary_key=None,
+    dedup=False,
+    client: _Client | None = None,
+    **kwargs,
+):
     return RestConnector(
         base_url="https://example.test/items",
         pagination=False,
         records="data",
+        primary_key=primary_key,
         dedup=dedup,
         http_client=client or _Client(),
         **kwargs,
@@ -144,9 +151,23 @@ def test_profile_does_not_commit_incremental_state(tmp_path):
     assert not state_path.exists()
 
 
-def test_dedup_is_off_by_default_and_pk_key_filters_complete_duplicate_records():
-    default_records = _connector().collect()
-    dedup_records = _connector(dedup=["id"]).collect()
+def test_primary_key_does_not_enable_dedup_by_itself():
+    connector = _connector(primary_key=["id"])
+
+    records = connector.collect()
+    report = connector.profile("duplicates")
+
+    assert connector.primary_key == ("id",)
+    assert connector.dedup_enabled is False
+    assert len(records) == 3
+    assert report.duplicates is not None
+    assert report.duplicates.key_fields == ("id",)
+    assert report.duplicates.duplicate_rows == 1
+
+
+def test_dedup_is_off_by_default_and_enabled_policy_filters_complete_records_by_pk():
+    default_records = _connector(primary_key=["id"]).collect()
+    dedup_records = _connector(primary_key=["id"], dedup=True).collect()
 
     assert len(default_records) == 3
     assert len(dedup_records) == 2
@@ -155,13 +176,13 @@ def test_dedup_is_off_by_default_and_pk_key_filters_complete_duplicate_records()
     assert [record["id"] for record in dedup_records] == ["1", "2"]
 
 
-def test_dedup_true_is_rejected_because_identity_must_be_explicit():
-    with pytest.raises(TypeError, match="dedup=True e ambiguo"):
+def test_dedup_true_requires_explicit_primary_key():
+    with pytest.raises(ValueError, match="dedup=True exige primary_key"):
         _connector(dedup=True)
 
 
-def test_profile_reuses_configured_dedup_pk_automatically():
-    connector = _connector(dedup=["id"])
+def test_profile_reuses_configured_primary_key_even_when_dedup_is_disabled():
+    connector = _connector(primary_key=["id"], dedup=False)
 
     report = connector.profile("duplicates")
     records = connector.collect()
@@ -169,12 +190,13 @@ def test_profile_reuses_configured_dedup_pk_automatically():
     assert report.duplicates is not None
     assert report.duplicates.key_fields == ("id",)
     assert report.duplicates.duplicate_rows == 1
-    assert len(records) == 2
+    assert len(records) == 3
 
 
 def test_dedup_occurs_after_select_on_the_emitted_dataset():
     connector = _connector(
-        dedup=["customer_id"],
+        primary_key=["customer_id"],
+        dedup=True,
         select={"id": "customer_id", "active": "active"},
     )
 
@@ -186,12 +208,28 @@ def test_dedup_occurs_after_select_on_the_emitted_dataset():
     ]
 
 
-def test_dedup_key_must_reference_an_emitted_alias_after_select():
+def test_primary_key_must_reference_an_emitted_alias_after_select_even_if_dedup_off():
     with pytest.raises(ValueError, match="colunas emitidas"):
         _connector(
-            dedup=["id"],
+            primary_key=["id"],
+            dedup=False,
             select={"id": "customer_id", "active": "active"},
         )
+
+
+def test_legacy_dedup_key_shorthand_is_migrated_with_deprecation_warning():
+    with pytest.warns(DeprecationWarning, match="primary_key"):
+        connector = RestConnector(
+            base_url="https://example.test/items",
+            pagination=False,
+            records="data",
+            dedup=["id"],
+            http_client=_Client(),
+        )
+
+    assert connector.primary_key == ("id",)
+    assert connector.dedup_enabled is True
+    assert len(connector.collect()) == 2
 
 
 def test_dedup_supports_composite_primary_keys():
