@@ -22,7 +22,7 @@ def _saved_config(tmp_path):
                 "base_url": "https://example.test/orders",
                 "pagination": False,
                 "incremental": False,
-                "dedup": True,
+                "dedup": ["id"],
             },
             "run_log": False,
         }
@@ -31,23 +31,25 @@ def _saved_config(tmp_path):
     return config
 
 
-def test_local_lab_profile_renders_same_profile_report(tmp_path, monkeypatch):
+def test_local_lab_profile_renders_same_profile_report_and_candidate_pk(tmp_path, monkeypatch):
     _saved_config(tmp_path)
 
     class FakeConnector:
-        def profile(self, *metrics, scope="full", limit=None, **kwargs):
+        def profile(self, *metrics, scope="full", limit=None, key=None, **kwargs):
             assert scope == "sample"
             assert limit == 10_000
             assert metrics == ("duplicates", "nulls", "missing")
+            assert key == ["id"]
             return profile_records(
                 [
                     {"id": 1, "email": None},
-                    {"id": 1, "email": None},
+                    {"id": 1, "email": "changed"},
                     {"id": 2},
                 ],
                 *metrics,
                 scope=scope,
                 limit=limit,
+                key=key,
             )
 
     monkeypatch.setattr(ui_app, "connector_from_config", lambda config: FakeConnector())
@@ -58,12 +60,14 @@ def test_local_lab_profile_renders_same_profile_report(tmp_path, monkeypatch):
     page = client.get("/pipelines/orders/profile", headers=AUTH_HEADER)
     assert page.status_code == 200
     assert "Data Profile" in page.text
+    assert 'value="id"' in page.text
 
     response = client.post(
         "/pipelines/orders/profile",
         data={
             "scope": "sample",
             "limit": "10000",
+            "candidate_key": "id",
             "metric": ["duplicates", "nulls", "missing"],
         },
         headers=AUTH_HEADER,
@@ -71,10 +75,11 @@ def test_local_lab_profile_renders_same_profile_report(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert "Profile Report v1" in response.text
     assert "Duplicatas" in response.text
+    assert "PK: id" in response.text
     assert "email" in response.text
 
 
-def test_local_lab_form_persists_dedup_opt_in(tmp_path):
+def test_local_lab_form_persists_dedup_primary_key(tmp_path):
     client = TestClient(
         ui_app.create_app(workspace_dir=str(tmp_path), username="admin", password="admin")
     )
@@ -86,7 +91,7 @@ def test_local_lab_form_persists_dedup_opt_in(tmp_path):
             "method": "GET",
             "pagination_type": "none",
             "incremental_mode": "ingestion_date",
-            "dedup": "on",
+            "dedup_key": "tenant_id,customer_id",
         },
         headers=AUTH_HEADER,
         follow_redirects=False,
@@ -96,4 +101,4 @@ def test_local_lab_form_persists_dedup_opt_in(tmp_path):
     from engineer_kit.config.pipeline_config import load_pipeline_config
 
     saved = load_pipeline_config(tmp_path / "pipelines" / "dedup_ui.yaml")
-    assert saved.connector.dedup is True
+    assert saved.connector.dedup == ["tenant_id", "customer_id"]
