@@ -7,7 +7,7 @@ import warnings
 from abc import abstractmethod
 from datetime import date
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -66,13 +66,7 @@ def _url_origin(url: str) -> tuple[str, str, int | None]:
 
 
 class APIConnector(Connector):
-    """Base for API connectors with reusable pagination and incremental state.
-
-    The preferred public API is :meth:`extract_incremental`, which returns a
-    single-pass :class:`ExtractionSession`. Iterating that session yields bounded
-    batches (25,000 records by default). The legacy :meth:`extract` record stream
-    remains available for compatibility and for low-level consumers.
-    """
+    """Base for API connectors with reusable pagination and incremental state."""
 
     def __init__(
         self,
@@ -97,13 +91,9 @@ class APIConnector(Connector):
             raise InvalidHttpMethodError(
                 f"method deve ser um de {VALID_HTTP_METHODS}, recebido '{method}'."
             )
-        if max_pages <= 0:
-            raise ValueError("max_pages deve ser maior que zero.")
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages <= 0:
+            raise ValueError("max_pages deve ser um inteiro maior que zero.")
 
-        # Temporary compatibility for the unreleased profiling branch: callers
-        # that used ``dedup='id'`` or ``dedup=['tenant_id', 'id']`` are migrated
-        # to the new orthogonal contract. New code must declare identity with
-        # ``primary_key=...`` and policy with ``dedup=True/False``.
         if dedup is None:
             resolved_dedup = False
         elif isinstance(dedup, bool):
@@ -159,48 +149,34 @@ class APIConnector(Connector):
 
     @property
     def extraction_batch_size(self) -> int:
-        """Default batch size used by new ExtractionSession objects."""
         return self._extraction_batch_size
 
     @property
     def max_pages(self) -> int:
-        """Maximum pages one extraction attempt may request."""
         return self._max_pages
 
     @property
     def primary_key(self) -> tuple[str, ...] | None:
-        """Declared simple/composite identity, independent from dedup policy."""
         return self._primary_key
 
     @property
     def dedup_enabled(self) -> bool:
-        """Whether extraction suppresses repeated primary-key records."""
         return self._dedup_enabled
 
     @property
     def dedup_keys(self) -> tuple[str, ...] | None:
-        """Compatibility alias for the key used by active deduplication."""
         return self._primary_key if self._dedup_enabled else None
 
     @property
     def checkpoint_enabled(self) -> bool:
-        """Whether successful extraction advances persistent incremental state.
-
-        A no-op incremental strategy still gives callers one uniform
-        ``ExtractionSession`` API, but managed destinations must treat those
-        executions as independent ad-hoc runs because there is no persistent
-        checkpoint transition that can identify a retry safely.
-        """
         return not isinstance(self._incremental, NoIncrementalStrategy)
 
     @property
     def current_window(self) -> IncrementalWindow | None:
-        """Incremental window prepared by the latest legacy extraction attempt."""
         return self._legacy_session.window if self._legacy_session is not None else None
 
     @property
     def max_data_date_seen(self) -> date | None:
-        """Largest record date observed by the latest legacy extraction stream."""
         if self._legacy_session is None:
             return None
         return self._legacy_session.max_data_date_seen
@@ -216,14 +192,10 @@ class APIConnector(Connector):
         """Extract normalized records, raw response and headers."""
 
     def parse_profile_response(self, response: requests.Response) -> ParsedPage:
-        """Parse records for profiling.
-
-        Connectors whose ingestion parser normalizes values may override this
-        hook to preserve native source types for profiling. By default profiling
-        uses the regular parsed page, which keeps third-party connectors fully
-        compatible.
-        """
         return self.parse_response(response)
+
+    def _include_record(self, record: dict[str, Any], window: IncrementalWindow) -> bool:
+        return True
 
     def extract_incremental(
         self,
@@ -231,12 +203,6 @@ class APIConnector(Connector):
         *,
         batch_size: int | None = None,
     ) -> ExtractionSession:
-        """Create one streaming-first incremental extraction session.
-
-        Normal iteration yields batches. The checkpoint is not persisted until
-        ``session.commit()`` is called after complete consumption and successful
-        downstream processing.
-        """
         window = self._incremental.resolve_window(end)
         resolved_batch_size = (
             self._extraction_batch_size
@@ -262,14 +228,6 @@ class APIConnector(Connector):
         fields: Sequence[str] | None = None,
         key: str | Sequence[str] | None = None,
     ) -> ProfileReport:
-        """Return aggregate profiling/data-quality metrics without persistence.
-
-        No metric selector means a complete profile. Explicit selectors such as
-        ``profile("duplicates", "nulls", "missing")`` activate only the
-        required aggregators. ``key`` evaluates duplicates by a candidate PK;
-        when omitted, a configured ``primary_key`` is reused automatically.
-        Profiling never writes a destination and never commits a checkpoint.
-        """
         plan = resolve_profile_metrics(metrics)
         window = self._incremental.resolve_window(end)
         records = self._iter_profile_records(window)
@@ -295,6 +253,8 @@ class APIConnector(Connector):
         try:
             for page in pages:
                 for record in page.records:
+                    if not self._include_record(record, window):
+                        continue
                     yield self._record_transform(record) if self._record_transform else record
         finally:
             close = getattr(pages, "close", None)
@@ -302,7 +262,6 @@ class APIConnector(Connector):
                 close()
 
     def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
-        """Return the legacy lazy record stream."""
         session = self.extract_incremental(end)
         self._legacy_session = session
         return session.iter_records()
@@ -310,8 +269,6 @@ class APIConnector(Connector):
     @staticmethod
     def _pagination_fingerprint(next_url: str | None, page_params: dict[str, Any]) -> str:
         if next_url is not None:
-            # Never put this fingerprint in error messages/logs: next URLs may
-            # contain cursor/token values.
             return f"url:{next_url}"
         try:
             serialized = json.dumps(
@@ -328,19 +285,23 @@ class APIConnector(Connector):
 
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
         for page in self._iter_pages(window, self.parse_response):
-            yield from page.records
+            for record in page.records:
+                if self._include_record(record, window):
+                    yield record
 
     def _iter_pages(
         self,
         window: IncrementalWindow,
         parser: Callable[[requests.Response], ParsedPage],
     ) -> Iterator[ParsedPage]:
-        """Yield pages through one shared pagination/safety state machine."""
+        self._pagination.reset()
         page_params = self._pagination.initial_params()
         next_url: Optional[str] = None
         seen_requests: set[str] = set()
         pages_requested = 0
         initial_origin: tuple[str, str, int | None] | None = None
+        current_request_url: str | None = None
+        follow_request_extras: dict[str, Any] = {}
 
         while True:
             if pages_requested >= self._max_pages:
@@ -349,7 +310,15 @@ class APIConnector(Connector):
                     "interrompendo para evitar loop/custo de requisicoes sem limite."
                 )
 
-            fingerprint = self._pagination_fingerprint(next_url, page_params)
+            resolved_next_url: str | None = None
+            if next_url is not None:
+                if current_request_url is None:
+                    raise PaginationLoopError(
+                        f"'{self.name}' recebeu next URL antes da primeira requisicao."
+                    )
+                resolved_next_url = urljoin(current_request_url, str(next_url))
+
+            fingerprint = self._pagination_fingerprint(resolved_next_url, page_params)
             if fingerprint in seen_requests:
                 raise PaginationLoopError(
                     f"'{self.name}' repetiu o mesmo estado de paginacao; "
@@ -357,11 +326,11 @@ class APIConnector(Connector):
                 )
             seen_requests.add(fingerprint)
 
-            if next_url is not None:
+            if resolved_next_url is not None:
                 if (
                     initial_origin is not None
                     and not self._allow_cross_origin_pagination
-                    and _url_origin(next_url) != initial_origin
+                    and _url_origin(resolved_next_url) != initial_origin
                 ):
                     raise CrossOriginPaginationError(
                         f"'{self.name}' recebeu URL de proxima pagina em outra origem. "
@@ -369,15 +338,21 @@ class APIConnector(Connector):
                         "Use allow_cross_origin_pagination=True somente se a API documentar "
                         "explicitamente esse comportamento."
                     )
-                request_kwargs: dict[str, Any] = {"url": next_url}
+                request_kwargs = {**follow_request_extras, "url": resolved_next_url}
             else:
                 request_kwargs = self.build_request(window, page_params)
 
             request_url = str(request_kwargs.get("url") or "")
             if initial_origin is None:
                 initial_origin = _url_origin(request_url)
+                follow_request_extras = {
+                    key: value
+                    for key, value in request_kwargs.items()
+                    if key not in {"url", "params"}
+                }
 
             response = self._http.request(self._method, **request_kwargs)
+            current_request_url = request_url
             pages_requested += 1
             page = parser(response)
             yield page
@@ -386,13 +361,15 @@ class APIConnector(Connector):
             if next_params is None:
                 break
             if NEXT_URL_KEY in next_params:
-                next_url = next_params[NEXT_URL_KEY]
+                raw_next = next_params[NEXT_URL_KEY]
+                if not isinstance(raw_next, str) or not raw_next.strip():
+                    break
+                next_url = raw_next
             else:
                 next_url = None
                 page_params = next_params
 
     def commit_watermark(self, max_data_date: Optional[date] = None) -> Watermark:
-        """Compatibility wrapper for code that uses ``extract()`` directly."""
         if self._legacy_session is None:
             raise RuntimeError("commit_watermark() chamado antes de extract() rodar.")
         return self._legacy_session.commit(max_data_date=max_data_date)
