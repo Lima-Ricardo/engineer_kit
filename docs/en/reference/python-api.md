@@ -27,6 +27,7 @@ RestConnector(
     select=None,
     params=None,
     state_key=None,
+    primary_key=None,
     dedup=False,
     method="GET",
 )
@@ -41,9 +42,32 @@ Friendly selectors:
 - `select`: a list/string of fields or a `{path: alias}` mapping;
 - `params`: static request parameters;
 - `state_key`: explicit checkpoint namespace; defaults to the connector name;
-- `dedup`: defaults to `False`; pass a simple PK (`"customer_id"`) or composite PK (`["tenant_id", "order_id"]`) to remove complete records whose identity has already occurred.
+- `primary_key`: simple (`"customer_id"`) or composite (`["tenant_id", "order_id"]`) identity of the emitted record;
+- `dedup`: boolean, `False` by default. With `True`, complete records whose `primary_key` has already occurred are suppressed.
 
-`dedup=True` is rejected because it does not declare identity. The first occurrence of a PK wins. Missing, `null`, blank, or non-scalar key values fail ingestion explicitly. Deduplication runs after `select`; with projection enabled, dedup keys must name emitted aliases.
+`primary_key` and `dedup` are independent concepts. A PK may be declared with `dedup=False` for profiling, quality analysis, and dataset identity without removing rows:
+
+```python
+connector = RestConnector(
+    base_url=url,
+    primary_key="customer_id",
+    dedup=False,
+)
+```
+
+Enable deduplication explicitly:
+
+```python
+connector = RestConnector(
+    base_url=url,
+    primary_key="customer_id",
+    dedup=True,
+)
+```
+
+`dedup=True` without `primary_key` is rejected. The first occurrence wins; when the same PK appears again, the **entire later record** is removed even when other fields differ. Missing, `null`, blank, or non-scalar key values fail active deduplication. Identity is evaluated after `select`, so projected connectors must name emitted aliases in `primary_key`.
+
+The intermediate `dedup="customer_id"` / `dedup=[...]` form introduced only on the unreleased profiling branch is still migrated programmatically with a `DeprecationWarning`, but it is not the recommended contract. New YAML requires a separate `primary_key` and boolean `dedup`.
 
 Declarative paths support objects, explicit array indexes, and quoted keys, for example `items[0].sku` and `payload["odd.key"].value`. Wildcards are intentionally unsupported so selectors cannot change row cardinality implicitly. Alias collisions fail fast and require explicit aliases.
 
@@ -98,7 +122,7 @@ report = connector.profile(
 
 #### Validating a candidate primary key
 
-This is a core profiling use case. Before enabling deduplication, inspect the candidate identity:
+This is a core profiling use case. Before persisting an identity or enabling deduplication, inspect the candidate key:
 
 ```python
 report = connector.profile(
@@ -122,18 +146,19 @@ report = connector.profile(
 )
 ```
 
-Profiling does not assume that a field named `id` is automatically a valid PK. It measures the observed contract: key completeness, invalid key values, and uniqueness violations. The user still decides whether that business identity should be declared in `dedup=`.
+Profiling does not assume that a field named `id` is automatically a valid PK. It measures the observed contract: key completeness, invalid key values, and uniqueness violations. The user still decides whether that identity should be declared as `primary_key` and whether deduplication should be enabled.
 
-If the connector is already configured with:
+If the connector already has:
 
 ```python
 connector = RestConnector(
     base_url=url,
-    dedup=["customer_id"],
+    primary_key=["customer_id"],
+    dedup=False,
 )
 ```
 
-then `connector.profile("duplicates")` reuses that PK automatically. With no `key=` and no configured dedup key, the `duplicates` metric compares complete rows.
+then `connector.profile("duplicates")` reuses that PK automatically even while deduplication is disabled. With no `key=` and no configured `primary_key`, the `duplicates` metric compares complete rows.
 
 The return value is `ProfileReport v1`. The same object supports Python logic, terminal output, and standalone HTML:
 
@@ -153,7 +178,7 @@ Python defaults to `scope="full"`:
 report = connector.profile(scope="sample", limit=10_000)
 ```
 
-`profile()` **never writes a destination/Bronze table and never commits a checkpoint**. When a connector has `dedup=[...]`, profiling observes rows before removal and reuses the configured PK for duplicate analysis.
+`profile()` **never writes a destination/Bronze table and never commits a checkpoint**. When `primary_key` exists, profiling reuses it for duplicate analysis independently of `dedup`.
 
 The CLI intentionally uses a safer sample default:
 
@@ -165,7 +190,7 @@ engineer-kit profile-config pipeline.yaml --scope full
 engineer-kit profile-config pipeline.yaml --html profile.html
 ```
 
-Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. The UI starts with a 10,000-row sample, accepts a candidate PK, and requires an explicit `full` selection before scanning the entire configured source.
+Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. The UI starts with a 10,000-row sample, accepts a candidate PK, and requires an explicit `full` selection before scanning the entire configured source. The pipeline form keeps **Primary key / identity** and **PK deduplication** as separate controls.
 
 ### `collect()`
 
@@ -173,7 +198,7 @@ Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. 
 records = connector.collect()
 ```
 
-Materializes the complete extraction and commits the checkpoint only after collection finishes successfully. Use it for small datasets. With `dedup=["customer_id"]`, the first occurrence of each PK is retained and later complete records with the same key are suppressed.
+Materializes the complete extraction and commits the checkpoint only after collection finishes successfully. Use it for small datasets. With `primary_key=["customer_id"]` and `dedup=True`, the first PK occurrence is retained and later complete records with the same key are suppressed. With the same PK and `dedup=False`, no rows are removed.
 
 ### `stream()`
 
@@ -182,7 +207,7 @@ for batch in connector.stream():
     ...
 ```
 
-Yields bounded batches and commits only after complete consumption. The same configured PK deduplication applies to the stream and therefore to managed ingestion that consumes the same `ExtractionSession`.
+Yields bounded batches and commits only after complete consumption. When `dedup=True`, the same configured `primary_key` applies to the stream and therefore to managed ingestion that consumes the same `ExtractionSession`.
 
 ### `to()`
 
@@ -215,7 +240,7 @@ The dbt project is discovered from the current directory and its ancestors. `pro
 plan = connector.explain()
 ```
 
-Returns a safe summary of connector resolution without issuing another HTTP request or exposing the authentication value. The summary includes `state_key`, the configured `dedup` PK list when enabled, and `select` path/alias pairs.
+Returns a safe summary of connector resolution without issuing another HTTP request or exposing the authentication value. It exposes `primary_key` and `dedup` separately, along with `state_key` and `select` path/alias pairs.
 
 ## Advanced pagination
 
@@ -254,7 +279,7 @@ for batch in run:
 run.commit()
 ```
 
-Sessions are single-pass and reject partial checkpoint commits. Connectors configured with a `dedup` PK apply the same streaming deduplication before records/batches are emitted.
+Sessions are single-pass and reject partial checkpoint commits. When `dedup=True`, the connector supplies its configured `primary_key` to the session and applies streaming deduplication before records/batches are emitted.
 
 ## `capability_manifest()`
 
@@ -264,7 +289,7 @@ from engineer_kit import capability_manifest
 manifest = capability_manifest()
 ```
 
-Returns serializable metadata describing REST methods, authentication, pagination, incrementality, PK-based deduplication, profiling, registered destinations, state stores, run logs, and dbt commands. It is designed for CLI/UI capability discovery without duplicating option lists; typed core contracts remain the execution source of truth.
+Returns serializable metadata describing REST methods, authentication, pagination, incrementality, `primary_key`, boolean deduplication policy, profiling, registered destinations, state stores, run logs, and dbt commands. It is designed for CLI/UI capability discovery without duplicating option lists; typed core contracts remain the execution source of truth.
 
 ## Stable contracts
 
