@@ -91,8 +91,15 @@ def _html_metric(value: int | None) -> str:
     return "—" if value is None else f"{value:,}"
 
 
-def render_html(report: ProfileReport) -> str:
-    """Render a standalone escaped HTML representation of the same report."""
+def render_html(report: ProfileReport, language: str = "en") -> str:
+    """Render the standalone report through the current HTML presentation."""
+    from engineer_kit.profiling.standalone_html import render_html as render_standalone
+
+    return render_standalone(report, language=language)
+
+
+def _legacy_render_html(report: ProfileReport) -> str:
+    """Legacy implementation retained temporarily for source-level compatibility."""
     quality = report.quality
     rows: list[str] = []
     for path, field in report.fields.items():

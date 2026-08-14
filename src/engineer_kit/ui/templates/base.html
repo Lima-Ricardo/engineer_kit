@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,18 +13,23 @@
                 <span class="brand-mark">⚙</span>
                 <div><span class="brand-name">engineer_kit</span><small>local lab</small></div>
             </div>
-            <a href="/" class="nav-link">Pipelines</a>
-            <a href="/architecture" class="nav-link">Arquitetura & docs</a>
-            <a href="/data" class="nav-link">Dados locais</a>
+            <a href="/" class="nav-link" data-i18n="pipelines">Pipelines</a>
+            <a href="/architecture" class="nav-link" data-i18n="architecture">Arquitetura & docs</a>
+            <a href="/data" class="nav-link" data-i18n="local_data">Dados locais</a>
             <a href="/dbt" class="nav-link">dbt</a>
             <div class="sidebar-footer">
-                <div class="local-badge">Runtime local</div>
-                <a href="/pipelines/new" class="btn btn-primary btn-block">+ Novo pipeline</a>
+                <div class="local-badge" data-i18n="local_runtime">Runtime local</div>
+                <a href="/pipelines/new" class="btn btn-primary btn-block" data-i18n="new_pipeline">+ Novo pipeline</a>
             </div>
         </nav>
-        <main class="content">
-            {% block content %}{% endblock %}
-        </main>
+        <div class="main-area">
+            <div class="topbar"><div class="ui-controls"><button type="button" data-lang="pt-BR">PT-BR</button><button type="button" data-lang="en">EN</button><button type="button" data-theme-choice="light" data-i18n="light">Claro</button><button type="button" data-theme-choice="dark" data-i18n="dark">Escuro</button></div></div>
+            <main class="content">{% block content %}{% endblock %}</main>
+        </div>
     </div>
+    <script>
+    (() => { const T={"pt-BR":{pipelines:"Pipelines",architecture:"Arquitetura & docs",local_data:"Dados locais",local_runtime:"Runtime local",new_pipeline:"+ Novo pipeline",light:"Claro",dark:"Escuro"},en:{pipelines:"Pipelines",architecture:"Architecture & docs",local_data:"Local data",local_runtime:"Local runtime",new_pipeline:"+ New pipeline",light:"Light",dark:"Dark"}}; let lang=localStorage.getItem("ek-language")||"pt-BR"; const applyLanguage=()=>{document.documentElement.lang=lang;document.querySelectorAll("[data-i18n]").forEach(e=>{const value=(T[lang]||{})[e.dataset.i18n];if(value)e.textContent=value});document.querySelectorAll("[data-i18n-placeholder]").forEach(e=>{const value=(T[lang]||{})[e.dataset.i18nPlaceholder];if(value)e.placeholder=value});document.querySelectorAll("[data-lang]").forEach(e=>e.classList.toggle("active",e.dataset.lang===lang));document.dispatchEvent(new CustomEvent("ek:language",{detail:{lang}}))};document.querySelectorAll("[data-lang]").forEach(b=>b.addEventListener("click",()=>{lang=b.dataset.lang;localStorage.setItem("ek-language",lang);applyLanguage()}));document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{const theme=b.dataset.themeChoice;document.documentElement.dataset.theme=theme;localStorage.setItem("ek-theme",theme);document.querySelectorAll("[data-theme-choice]").forEach(x=>x.classList.toggle("active",x.dataset.themeChoice===theme))}));const theme=localStorage.getItem("ek-theme")||"light";document.documentElement.dataset.theme=theme;document.querySelectorAll("[data-theme-choice]").forEach(x=>x.classList.toggle("active",x.dataset.themeChoice===theme));applyLanguage() })();
+    </script>
+    {% block scripts %}{% endblock %}
 </body>
 </html>

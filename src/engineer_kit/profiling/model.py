@@ -132,10 +132,10 @@ class ProfileReport:
 
         return render_text(self)
 
-    def to_html(self) -> str:
-        from engineer_kit.profiling.render import render_html
+    def to_html(self, language: str = "en") -> str:
+        from engineer_kit.profiling.standalone_html import render_html
 
-        return render_html(self)
+        return render_html(self, language=language)
 
     def __str__(self) -> str:
         """Make ``print(connector.profile(...))`` a terminal data-quality report."""

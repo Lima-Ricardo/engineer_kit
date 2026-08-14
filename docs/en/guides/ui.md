@@ -18,15 +18,21 @@ The CLI generates a temporary password when necessary and binds to loopback by d
 
 ## Dashboard
 
-![Dashboard](../assets/ui/dashboard.svg)
+![Local Lab dashboard](../assets/ui/dashboard.png)
 
 The dashboard shows pipelines, latest execution, status, and record counts.
 
 ## Editor
 
-![Editor](../assets/ui/pipeline-editor.svg)
+![Editor](../assets/ui/pipeline-editor.png)
 
 The form separates source/connector, extraction batch, authentication, pagination, incremental state, schema, destination, transformation, and audit.
+
+## Data Profile
+
+![Data Profile](../assets/ui/data-profile.png)
+
+Profiling uses the same `ProfileReport` as the Python API, with Light/Dark themes, PT-BR/EN, quality KPIs, field search, and filters.
 
 ## Architecture
 
