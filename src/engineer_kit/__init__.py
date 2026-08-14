@@ -65,6 +65,16 @@ from engineer_kit.http.client import (
 from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult, PipelineSource, StepResult
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger, IntervalTrigger, Trigger
+from engineer_kit.profiling import (
+    PROFILE_REPORT_VERSION,
+    CardinalityEstimate,
+    DataQualitySummary,
+    DuplicateProfile,
+    FieldProfile,
+    ProfileReport,
+    UnknownProfileMetricError,
+    profile_records,
+)
 from engineer_kit.security.redaction import redact_text
 from engineer_kit.security.secrets import (
     EnvSecretProvider,
@@ -197,5 +207,7 @@ __all__ = [
     "flatten_record", "FlattenCollisionError", "InvalidIdentifierError", "visual_logger", "Dbt",
     "discover_dbt_project", "DbtRunner", "DbtResult", "write_staging_scaffold", "generate_sources_yml",
     "generate_staging_model", "Pipeline", "PipelineSource", "PipelineResult", "StepResult", "Scheduler",
-    "Trigger", "CronTrigger", "IntervalTrigger",
+    "Trigger", "CronTrigger", "IntervalTrigger", "PROFILE_REPORT_VERSION", "ProfileReport",
+    "FieldProfile", "DuplicateProfile", "DataQualitySummary", "CardinalityEstimate",
+    "UnknownProfileMetricError", "profile_records",
 ]
