@@ -26,9 +26,14 @@ def render_text(report: ProfileReport) -> str:
         "",
     ]
     if report.duplicates is not None:
+        lines.append("DATA QUALITY")
+        if report.duplicates.key_fields:
+            lines.append(f"dedup_key={','.join(report.duplicates.key_fields)}")
+            lines.append(f"invalid_key_rows={report.duplicates.invalid_key_rows:,}")
+        else:
+            lines.append("duplicate_mode=complete_row")
         lines.extend(
             [
-                "DATA QUALITY",
                 f"unique_rows={report.duplicates.unique_rows:,}",
                 f"duplicate_rows={report.duplicates.duplicate_rows:,} "
                 f"({_pct(report.duplicates.duplicate_rows, report.records_analyzed)})",
@@ -116,8 +121,18 @@ def render_html(report: ProfileReport) -> str:
         )
     duplicate_html = ""
     if report.duplicates is not None:
+        key_html = ""
+        if report.duplicates.key_fields:
+            key_text = ", ".join(escape(value) for value in report.duplicates.key_fields)
+            key_html = (
+                "<div class='profile-card'><strong>Dedup / candidate PK</strong>"
+                f"<span>{key_text}</span></div>"
+                "<div class='profile-card'><strong>Invalid PK rows</strong>"
+                f"<span>{report.duplicates.invalid_key_rows:,}</span></div>"
+            )
         duplicate_html = (
-            "<div class='profile-card'><strong>Duplicate rows</strong>"
+            key_html
+            + "<div class='profile-card'><strong>Duplicate rows</strong>"
             f"<span>{report.duplicates.duplicate_rows:,}</span></div>"
             "<div class='profile-card'><strong>Unique rows</strong>"
             f"<span>{report.duplicates.unique_rows:,}</span></div>"
