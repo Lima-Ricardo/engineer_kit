@@ -182,10 +182,6 @@ class Pipeline:
                 records = connector.extract()
                 window = getattr(connector, "current_window", None)
 
-            # Deterministic retry identity is safe only when a persistent
-            # checkpoint transition exists. Older third-party/duck-typed
-            # connectors predate ``checkpoint_enabled``; preserve their legacy
-            # incremental semantics by treating an observed window as stateful.
             checkpoint_enabled = bool(getattr(connector, "checkpoint_enabled", True))
             if window is not None and checkpoint_enabled:
                 context = LoadContext.for_window(
@@ -466,14 +462,7 @@ def _identity_value(value: Any, *, key: str | None = None) -> Any:
 
 
 def _source_config_identity(connector: APIConnector) -> str:
-    """Return a stable, non-secret fingerprint of the logical source config.
-
-    An optional ``retry_identity`` hook lets third-party connectors provide a
-    stronger identity without exposing credentials. Official API connectors are
-    fingerprinted from construction-time request/extraction attributes only;
-    runtime discovery such as resolved records paths or AutoPagination state is
-    deliberately excluded.
-    """
+    """Return a stable, non-secret fingerprint of the logical source config."""
     explicit = getattr(connector, "retry_identity", None)
     if callable(explicit):
         explicit = explicit()
@@ -517,6 +506,11 @@ def _source_config_identity(connector: APIConnector) -> str:
                 },
             }
         payload[label] = _identity_value(value)
+
+    http = getattr(connector, "_http", None)
+    auth_identity = getattr(http, "auth_identity", None)
+    if isinstance(auth_identity, dict):
+        payload["auth"] = _identity_value(auth_identity)
 
     serialized = json.dumps(
         payload,
