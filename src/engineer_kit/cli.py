@@ -14,6 +14,7 @@ from engineer_kit.adapters.registry import available_adapters
 from engineer_kit.orchestration.pipeline import Pipeline, PipelineResult
 from engineer_kit.orchestration.scheduler import Scheduler
 from engineer_kit.orchestration.trigger import CronTrigger
+from engineer_kit.security.redaction import redact_text
 
 app = typer.Typer(add_completion=False)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -39,7 +40,8 @@ def _load_pipeline(target: str) -> Pipeline:
 def _print_result(result: PipelineResult) -> None:
     typer.echo(f"run_id={result.run_id} | rows={result.rows_loaded} | success={result.success}")
     for step in result.steps:
-        status = "OK" if step.success else f"ERRO ({step.status}): {step.error}"
+        error = redact_text(step.error) if step.error else None
+        status = "OK" if step.success else f"ERRO ({step.status}): {error}"
         window = (
             f" | window={step.window_start}..{step.window_end}"
             if step.window_start or step.window_end
@@ -111,7 +113,7 @@ def run_config(path: Path) -> None:
     except typer.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"Falha ao executar configuracao: {exc}")
+        typer.echo(f"Falha ao executar configuracao: {redact_text(exc)}")
         raise typer.Exit(code=1) from None
 
     _print_result(result)
@@ -172,7 +174,7 @@ def profile_config(
             key=candidate_key,
         )
     except Exception as exc:
-        typer.echo(f"Falha ao gerar data profile: {exc}")
+        typer.echo(f"Falha ao gerar data profile: {redact_text(exc)}")
         raise typer.Exit(code=1) from None
 
     typer.echo(report.to_text(), nl=False)
@@ -235,12 +237,7 @@ def ui(
         )
 
     try:
-        _validate_ui_exposure(
-            host,
-            username,
-            password,
-            allow_remote=allow_remote,
-        )
+        _validate_ui_exposure(host, username, password, allow_remote=allow_remote)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--host") from None
 
