@@ -288,6 +288,34 @@ def test_state_key_can_namespace_same_logical_connector(tmp_path):
     assert second.state_key == "tenant_b.orders"
 
 
+def test_declarative_state_key_reaches_runtime_incremental_strategy():
+    config = pipeline_config_from_dict(
+        {
+            "name": "orders",
+            "connector": {
+                "base_url": "https://example.test/orders",
+                "incremental": {"mode": "ingestion_date"},
+                "state_key": "tenant-a.orders",
+            },
+        }
+    )
+    connector = build_pipeline(config, duckdb.connect())._sources[0].connector
+
+    assert connector.state_key == "tenant-a.orders"
+    assert connector._incremental.state_key == "tenant-a.orders"
+
+
+def test_state_key_rejects_control_characters_before_backend_access():
+    with pytest.raises(ValueError, match="controle"):
+        RestConnector(
+            name="orders",
+            base_url="https://example.test/orders",
+            pagination=False,
+            incremental=False,
+            state_key="tenant\norders",
+        )
+
+
 def test_state_key_participates_in_deterministic_ingestion_identity(tmp_path):
     state = JsonFileStateStore(tmp_path / "identity-state.json")
     first = RestConnector(
