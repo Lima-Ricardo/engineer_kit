@@ -12,7 +12,10 @@ from engineer_kit.connectors.pagination import (
     resolve_pagination,
 )
 from engineer_kit.connectors.rest import RestConnector
+from engineer_kit.http.auth import BearerAuth
+from engineer_kit.http.client import HttpClient
 from engineer_kit.orchestration.pipeline import _source_config_identity
+from engineer_kit.security.secrets import StaticSecretProvider
 from engineer_kit.ui.app import create_app
 from engineer_kit.ui.run_manager import RunState
 
@@ -122,6 +125,35 @@ def test_retry_source_identity_does_not_depend_on_secret_value():
         incremental=False,
     )
     assert _source_config_identity(first) == _source_config_identity(rotated)
+
+
+def test_retry_source_identity_tracks_logical_bearer_principal_not_token_value():
+    provider_a = StaticSecretProvider({"TENANT_A_TOKEN": "token-v1"})
+    provider_a_rotated = StaticSecretProvider({"TENANT_A_TOKEN": "token-v2"})
+    provider_b = StaticSecretProvider({"TENANT_B_TOKEN": "token-v1"})
+
+    tenant_a = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        http_client=HttpClient(auth=BearerAuth(provider_a, "TENANT_A_TOKEN")),
+        incremental=False,
+    )
+    tenant_a_rotated = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        http_client=HttpClient(auth=BearerAuth(provider_a_rotated, "TENANT_A_TOKEN")),
+        incremental=False,
+    )
+    tenant_b = RestConnector(
+        name="orders",
+        base_url="https://example.test/orders",
+        http_client=HttpClient(auth=BearerAuth(provider_b, "TENANT_B_TOKEN")),
+        incremental=False,
+    )
+
+    identity_a = _source_config_identity(tenant_a)
+    assert _source_config_identity(tenant_a_rotated) == identity_a
+    assert _source_config_identity(tenant_b) != identity_a
 
 
 def test_run_state_bounds_single_log_line_memory():
