@@ -72,15 +72,15 @@ def resolve_dedup_keys(
 ) -> tuple[str, ...] | None:
     """Compatibility alias for the pre-separation key normalizer.
 
-    New code should call :func:`resolve_primary_key`. ``False``/``None`` keep
-    the historical disabled meaning; ``True`` remains invalid because it does
-    not carry identity.
+    New identity-aware code should call :func:`resolve_primary_key`. ``None``
+    means no key. Boolean values are rejected because neither ``True`` nor
+    ``False`` describes record identity.
     """
-    if value is None or value is False:
+    if value is None:
         return None
-    if value is True:
+    if isinstance(value, bool):
         raise TypeError(
-            "dedup=True nao declara identidade. Use primary_key=<...> e dedup=True."
+            "dedup booleano nao declara identidade. Use primary_key=<...> separadamente."
         )
     return resolve_primary_key(value)
 
