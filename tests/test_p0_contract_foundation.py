@@ -199,9 +199,7 @@ def test_probe_fetches_one_page_without_advancing_checkpoint(tmp_path):
     assert not state_path.exists()
 
 
-def test_duckdb_checkpoint_compare_and_set_rejects_stale_concurrent_writer():
-    conn = duckdb.connect()
-    store = DuckDBStateStore(conn)
+def _assert_stale_writer_is_rejected(store):
     first = IncrementalStrategy("orders", store, initial_start=date(2024, 1, 1))
     second = IncrementalStrategy("orders", store, initial_start=date(2024, 1, 1))
 
@@ -213,6 +211,17 @@ def test_duckdb_checkpoint_compare_and_set_rejects_stale_concurrent_writer():
         second.commit(second_window, max_data_date=date(2024, 1, 25))
 
     assert store.get_watermark("orders").last_data_date == date(2024, 1, 20)
+
+
+def test_duckdb_checkpoint_compare_and_set_rejects_stale_concurrent_writer():
+    _assert_stale_writer_is_rejected(DuckDBStateStore(duckdb.connect()))
+
+
+def test_json_checkpoint_compare_and_set_rejects_stale_concurrent_writer(tmp_path):
+    store = JsonFileStateStore(tmp_path / "state.json")
+    _assert_stale_writer_is_rejected(store)
+    if store.supports_atomic_compare_and_set:
+        assert (tmp_path / ".state.json.lock").exists()
 
 
 def test_state_key_can_namespace_same_logical_connector(tmp_path):
