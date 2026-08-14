@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from abc import abstractmethod
 from datetime import date
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
@@ -88,7 +89,8 @@ class APIConnector(Connector):
         max_pages: int = DEFAULT_MAX_PAGES,
         allow_cross_origin_pagination: bool = False,
         record_transform: Callable[[dict], dict] | None = None,
-        dedup: str | Sequence[str] | bool | None = False,
+        primary_key: str | Sequence[str] | None = None,
+        dedup: bool | str | Sequence[str] | None = False,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -98,13 +100,39 @@ class APIConnector(Connector):
         if max_pages <= 0:
             raise ValueError("max_pages deve ser maior que zero.")
 
+        # Temporary compatibility for the unreleased profiling branch: callers
+        # that used ``dedup='id'`` or ``dedup=['tenant_id', 'id']`` are migrated
+        # to the new orthogonal contract. New code must declare identity with
+        # ``primary_key=...`` and policy with ``dedup=True/False``.
+        if dedup is None:
+            resolved_dedup = False
+        elif isinstance(dedup, bool):
+            resolved_dedup = dedup
+        elif primary_key is None and isinstance(dedup, (str, list, tuple)):
+            warnings.warn(
+                "dedup=<primary key> esta obsoleto; use primary_key=<...>, dedup=True.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            primary_key = dedup
+            resolved_dedup = True
+        else:
+            raise TypeError("dedup deve ser booleano; declare a identidade em primary_key.")
+
+        resolved_primary_key = resolve_dedup_keys(primary_key)
+        if resolved_dedup and resolved_primary_key is None:
+            raise ValueError(
+                "dedup=True exige primary_key. Defina primary_key='id' ou uma chave composta."
+            )
+
         self.name = name
         self._http = http_client
         self._pagination = pagination
         self._method = method
         self._date_field = date_field
         self._record_transform = record_transform
-        self._dedup_keys = resolve_dedup_keys(dedup)
+        self._primary_key = resolved_primary_key
+        self._dedup_enabled = resolved_dedup
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
         self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
@@ -140,14 +168,19 @@ class APIConnector(Connector):
         return self._max_pages
 
     @property
+    def primary_key(self) -> tuple[str, ...] | None:
+        """Declared simple/composite identity, independent from dedup policy."""
+        return self._primary_key
+
+    @property
     def dedup_enabled(self) -> bool:
-        """Whether extraction suppresses repeated declared-PK records."""
-        return self._dedup_keys is not None
+        """Whether extraction suppresses repeated primary-key records."""
+        return self._dedup_enabled
 
     @property
     def dedup_keys(self) -> tuple[str, ...] | None:
-        """Declared simple/composite primary key used by deduplication."""
-        return self._dedup_keys
+        """Compatibility alias for the key used by active deduplication."""
+        return self._primary_key if self._dedup_enabled else None
 
     @property
     def checkpoint_enabled(self) -> bool:
@@ -217,7 +250,7 @@ class APIConnector(Connector):
             date_field=self._date_field,
             batch_size=resolved_batch_size,
             record_transform=self._record_transform,
-            dedup=self._dedup_keys,
+            dedup=self._primary_key if self._dedup_enabled else None,
         )
 
     def profile(
@@ -234,7 +267,7 @@ class APIConnector(Connector):
         No metric selector means a complete profile. Explicit selectors such as
         ``profile("duplicates", "nulls", "missing")`` activate only the
         required aggregators. ``key`` evaluates duplicates by a candidate PK;
-        when omitted, a configured ``dedup`` PK is reused automatically.
+        when omitted, a configured ``primary_key`` is reused automatically.
         Profiling never writes a destination and never commits a checkpoint.
         """
         plan = resolve_profile_metrics(metrics)
@@ -247,7 +280,7 @@ class APIConnector(Connector):
                 scope=scope,
                 limit=limit,
                 fields=fields,
-                key=key if key is not None else self._dedup_keys,
+                key=key if key is not None else self._primary_key,
             )
         finally:
             close = getattr(records, "close", None)
