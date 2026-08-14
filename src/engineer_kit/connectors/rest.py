@@ -93,7 +93,8 @@ class RestConnector(APIConnector):
         records_path: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         records: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         select: list[str] | tuple[str, ...] | str | dict[str, str] | None = None,
-        dedup: str | Sequence[str] | bool | None = False,
+        primary_key: str | Sequence[str] | None = None,
+        dedup: bool | str | Sequence[str] | None = False,
         http_client: Optional[HttpClient] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
@@ -211,14 +212,15 @@ class RestConnector(APIConnector):
             max_pages=max_pages,
             allow_cross_origin_pagination=allow_cross_origin_pagination,
             record_transform=self._project_record if self._select else None,
+            primary_key=primary_key,
             dedup=dedup,
         )
-        if self._select and self.dedup_keys:
+        if self._select and self.primary_key:
             emitted = {item.alias for item in self._select}
-            missing_keys = [key for key in self.dedup_keys if key not in emitted]
+            missing_keys = [key for key in self.primary_key if key not in emitted]
             if missing_keys:
                 raise ValueError(
-                    "dedup deve referenciar colunas emitidas depois de select. "
+                    "primary_key deve referenciar colunas emitidas depois de select. "
                     f"PK(s) ausente(s): {', '.join(missing_keys)}."
                 )
 
@@ -444,7 +446,8 @@ class RestConnector(APIConnector):
                 {"path": item.path, "alias": item.alias}
                 for item in (self._select or ())
             ],
-            "dedup": list(self.dedup_keys) if self.dedup_keys else False,
+            "primary_key": list(self.primary_key) if self.primary_key else None,
+            "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,
