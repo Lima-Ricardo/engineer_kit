@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional, Union
 
@@ -19,11 +19,12 @@ class IncrementalMode(str, Enum):
 class IncrementalWindow:
     """Resolved extraction interval plus the checkpoint it was derived from.
 
-    ``start`` preserves the exact checkpoint boundary for observability. A
-    checkpoint-derived boundary is exclusive by default, so ``request_start``
-    advances one day for date-granularity APIs and avoids reloading the last
-    successfully committed date on every run. The initial configured start is
-    inclusive.
+    ``start`` preserves the checkpoint boundary used for the next request.
+    Date-granularity checkpoints are intentionally inclusive: advancing the
+    request to the next day can lose records that arrive later on the same
+    calendar date after a successful run. Re-reading the boundary is the
+    correctness-first choice; destination retry identity and explicit dedup
+    policies handle replay where needed.
     """
 
     start: Optional[date]
@@ -33,9 +34,7 @@ class IncrementalWindow:
 
     @property
     def request_start(self) -> date | None:
-        if self.start is None:
-            return None
-        return self.start if self.start_inclusive else self.start + timedelta(days=1)
+        return self.start
 
 
 class IncrementalStrategy:
@@ -84,7 +83,7 @@ class IncrementalStrategy:
             start=start,
             end=resolved_end,
             watermark_before=watermark,
-            start_inclusive=False,
+            start_inclusive=True,
         )
 
     def commit(
