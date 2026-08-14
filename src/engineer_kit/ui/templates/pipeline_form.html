@@ -51,9 +51,9 @@
                 <div class="field-hint">Default: <code>25.000</code> registros. Limita a quantidade entregue ao consumidor por vez. É independente do tamanho da página da API e do write batch do destino.</div>
             </div>
             <div class="field">
-                <label>Deduplicação de linhas emitidas</label>
-                <label><input type="checkbox" name="dedup" value="on" {{ "checked" if config and config.connector.dedup else "" }}> dedup=True</label>
-                <div class="field-hint">Desligada por padrão. Quando ativa, remove duplicatas exatas depois do <code>select</code>, usando fingerprints em armazenamento temporário em disco.</div>
+                <label>PK para deduplicação</label>
+                <input type="text" name="dedup_key" value="{{ config.connector.dedup | join(',') if config and config.connector.dedup else '' }}" placeholder="customer_id ou tenant_id,customer_id">
+                <div class="field-hint">Opcional. Declare a coluna (ou chave composta) que identifica o registro. Quando a PK reaparece, o registro inteiro seguinte é descartado; a primeira ocorrência vence. Use <strong>Data Profile</strong> para validar missing/null/duplicatas antes de ativar.</div>
             </div>
         </div>
     </fieldset>
@@ -151,7 +151,7 @@ function updateTransform(){document.getElementById('dbt_select_wrapper').style.d
 document.getElementById('pagination_type').addEventListener('change',updatePaginationFields);
 document.getElementById('incremental_mode').addEventListener('change',updateDateField);
 document.getElementById('transform_type').addEventListener('change',updateTransform);
-document.getElementById('add-column').addEventListener('click',function(){const row=document.createElement('div');row.className='field-row column-row';row.innerHTML='<div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="string"></div>';document.getElementById('columns-container').appendChild(row);});
+document.getElementById('add-column').addEventListener('click',function(){const row=document.createElement('div');row.className='field-row column-row';row.innerHTML='<div class="field"><input type="text" name="column_name" placeholder="nome_da_coluna"></div><div class="field"><input type="text" name="column_dtype" value="string" placeholder="string"></div>';document.getElementById('columns-container').appendChild(row);});
 updatePaginationFields();updateDateField();updateTransform();
 </script>
 {% endblock %}
