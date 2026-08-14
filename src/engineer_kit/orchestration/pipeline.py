@@ -448,7 +448,9 @@ def _identity_value(value: Any, *, key: str | None = None) -> Any:
             str(nested_key): _identity_value(nested, key=str(nested_key))
             for nested_key, nested in sorted(value.items(), key=lambda item: str(item[0]))
         }
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, set):
+        return sorted((_identity_value(item) for item in value), key=repr)
+    if isinstance(value, (list, tuple)):
         return [_identity_value(item) for item in value]
     values = getattr(value, "__dict__", None)
     if isinstance(values, dict):
@@ -466,43 +468,55 @@ def _identity_value(value: Any, *, key: str | None = None) -> Any:
 def _source_config_identity(connector: APIConnector) -> str:
     """Return a stable, non-secret fingerprint of the logical source config.
 
-    Official REST connectors expose enough stable structural data through
-    ``explain()`` plus their resolved request configuration. Third-party
-    connectors degrade conservatively to class + name rather than serializing
-    arbitrary object state or credentials.
+    An optional ``retry_identity`` hook lets third-party connectors provide a
+    stronger identity without exposing credentials. Official API connectors are
+    fingerprinted from construction-time request/extraction attributes only;
+    runtime discovery such as resolved records paths or AutoPagination state is
+    deliberately excluded.
     """
+    explicit = getattr(connector, "retry_identity", None)
+    if callable(explicit):
+        explicit = explicit()
+    if isinstance(explicit, str) and explicit:
+        return hashlib.sha256(explicit.encode("utf-8")).hexdigest()
+
     payload: dict[str, Any] = {
         "class": f"{type(connector).__module__}.{type(connector).__qualname__}",
         "name": connector.name,
     }
-    explain = getattr(connector, "explain", None)
-    if callable(explain):
-        try:
-            described = explain()
-        except Exception:
-            described = None
-        if isinstance(described, dict):
-            payload["explain"] = _identity_value(described)
-
-    for attribute, label in (
+    stable_attributes = (
+        ("_base_url", "base_url"),
+        ("_method", "method"),
         ("_static_params", "params"),
+        ("_records_path", "records"),
+        ("_select", "select"),
         ("_date_params", "date_params"),
         ("_date_field", "date_field"),
         ("_pagination", "pagination_config"),
-    ):
-        if hasattr(connector, attribute):
-            value = getattr(connector, attribute)
-            if label == "pagination_config":
-                values = getattr(value, "__dict__", {})
-                value = {
-                    "class": f"{type(value).__module__}.{type(value).__qualname__}",
-                    "config": {
-                        key: nested
-                        for key, nested in values.items()
-                        if key not in _RUNTIME_PAGINATION_FIELDS
-                    },
-                }
-            payload[label] = _identity_value(value)
+        ("_primary_key", "primary_key"),
+        ("_dedup_enabled", "dedup"),
+        ("_resolved_incremental_mode", "incremental_mode"),
+        ("_resolved_initial_start", "initial_start"),
+        ("_incremental_filter_mode", "incremental_filter"),
+        ("_allow_cross_origin_pagination", "allow_cross_origin_pagination"),
+        ("_max_pages", "max_pages"),
+        ("_record_transform", "record_transform"),
+    )
+    for attribute, label in stable_attributes:
+        if not hasattr(connector, attribute):
+            continue
+        value = getattr(connector, attribute)
+        if label == "pagination_config":
+            values = getattr(value, "__dict__", {})
+            value = {
+                "class": f"{type(value).__module__}.{type(value).__qualname__}",
+                "config": {
+                    key: nested
+                    for key, nested in values.items()
+                    if key not in _RUNTIME_PAGINATION_FIELDS
+                },
+            }
+        payload[label] = _identity_value(value)
 
     serialized = json.dumps(
         payload,
