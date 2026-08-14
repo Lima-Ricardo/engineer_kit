@@ -89,7 +89,7 @@ Paths aceitam navegação por objetos e índices explícitos, por exemplo `items
 
 ### `primary_key` e `dedup`
 
-A identidade e a política de deduplicação são independentes. É possível mapear uma PK sem remover registros:
+Identidade e política de deduplicação são independentes. A PK pode ser mapeada sem remover registros:
 
 ```yaml
 connector:
@@ -98,9 +98,9 @@ connector:
   dedup: false
 ```
 
-Isso permite que `profile()` use a identidade configurada para avaliar completude, nulls/missing e duplicatas antes de a deduplicação ser ativada.
+Isso permite que `profile()` use a identidade configurada para analisar completude, null/missing e duplicatas antes de ativar a deduplicação.
 
-Para ativar a deduplicação:
+Para ativar:
 
 ```yaml
 connector:
@@ -109,7 +109,7 @@ connector:
   dedup: true
 ```
 
-Chave composta:
+Identidade composta:
 
 ```yaml
 connector:
@@ -120,15 +120,17 @@ connector:
   dedup: true
 ```
 
-`dedup` é estritamente booleano e `false` é sempre o default. `dedup: true` sem `primary_key` é recusado. Strings como `"false"` e formas antigas como `dedup: customer_id` ou `dedup: [customer_id]` também são recusadas no YAML para evitar dois contratos concorrentes.
+`dedup` é estritamente booleano e `false` é sempre o default. `dedup: true` sem `primary_key` é recusado. Strings como `"false"` e formas intermediárias como `dedup: customer_id` ou `dedup: [customer_id]` também são recusadas no YAML para existir um único contrato declarativo inequívoco.
 
-Quando a deduplicação está ativa e uma PK válida reaparece, a primeira ocorrência vence e **o registro inteiro posterior é removido**, mesmo que outros campos tenham valores diferentes. Valores ausentes, `null`, blank, arrays ou objetos em qualquer componente da PK fazem a ingestão falhar explicitamente em vez de colapsar registros sem identidade.
+`primary_key` aceita somente string, lista de strings ou `null`; booleanos como `primary_key: true` e `primary_key: false` são inválidos. Isso impede que a identidade seja confundida com a antiga ideia de ligar/desligar deduplicação.
 
-A identidade é avaliada **depois de `select`**. Portanto, quando existe projeção, os campos de `primary_key` devem ser aliases efetivamente emitidos pelo `select`.
+Quando a deduplicação está ativa e uma PK válida reaparece, a primeira ocorrência vence e **o registro inteiro seguinte é removido**, mesmo que outros campos sejam diferentes. Valores ausentes, `null`, blank, arrays ou objetos em qualquer componente da PK fazem a ingestão falhar explicitamente em vez de colapsar registros sem identidade utilizável.
+
+A identidade é avaliada **depois de `select`**. Portanto connectors projetados devem usar em `primary_key` aliases efetivamente emitidos pelo `select`.
 
 O runtime guarda somente fingerprints SHA-256 da PK em SQLite temporário e remove o arquivo ao final. Isso evita um conjunto sem limite em RAM; o uso de disco cresce com a quantidade de identidades únicas observadas.
 
-Use `profile()` para avaliar uma chave candidata antes de persistir ou ativar a política:
+Use `profile()` para avaliar uma chave candidata antes de persistir a identidade ou ativar a política:
 
 ```bash
 engineer-kit profile-config pipelines/orders.yaml \
@@ -136,7 +138,7 @@ engineer-kit profile-config pipelines/orders.yaml \
   --key tenant_id,order_id
 ```
 
-Depois que `primary_key` estiver configurada, `--key` pode ser omitido e o profile reutiliza a identidade declarada, mesmo com `dedup: false`.
+Quando `primary_key` já está configurada, `--key` pode ser omitido e o profiling reutiliza a identidade declarada mesmo com `dedup: false`.
 
 ### `params`
 
@@ -315,9 +317,9 @@ engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,missing,n
 engineer-kit profile-config pipelines/orders.yaml --scope full
 ```
 
-Quando `--key` é omitido, uma `connector.primary_key` já configurada é reutilizada automaticamente para a métrica `duplicates`, independentemente de `dedup`. Sem `--key` e sem `primary_key`, duplicatas são avaliadas pela linha completa.
+Quando `--key` é omitido, uma `connector.primary_key` configurada é reutilizada automaticamente para a métrica `duplicates`, independentemente de `dedup`. Sem `--key` e sem `primary_key`, duplicatas são avaliadas pela linha completa.
 
-O comando usa um `StateStore` de inspeção que nunca aceita writes; portanto o profile não avança o checkpoint configurado. O Local Lab expõe a mesma operação na tela **Data Profile**, inclusive para testar uma PK candidata antes de persistir a identidade ou ativar dedup.
+O comando usa um `StateStore` de inspeção que nunca aceita writes; portanto o profile não avança o checkpoint configurado. O Local Lab expõe a mesma operação na tela **Data Profile**, inclusive para testar uma PK candidata antes de persistir a identidade ou ativar a deduplicação.
 
 ## Validação e segurança do arquivo
 
