@@ -7,6 +7,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Any, Iterable, Iterator, Sequence
 
 from engineer_kit.connectors.dedup import (
@@ -50,10 +51,6 @@ class UnknownProfileMetricError(ValueError):
 
 
 def resolve_profile_metrics(metrics: Sequence[str]) -> tuple[str, ...]:
-    """Expand presets and return a stable metric plan.
-
-    No explicit selector means the complete profile (``all``).
-    """
     requested = tuple(metrics) if metrics else ("all",)
     resolved: set[str] = set()
     for raw in requested:
@@ -183,7 +180,6 @@ class _FieldAccumulator:
 
 
 def _walk_json(value: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
-    """Yield observed JSON paths while retaining only aggregate state."""
     if prefix:
         yield prefix, value
     if isinstance(value, dict):
@@ -203,13 +199,7 @@ def profile_records(
     fields: Sequence[str] | None = None,
     key: str | Sequence[str] | None = None,
 ) -> ProfileReport:
-    """Profile a record stream without materializing the source dataset.
-
-    When ``key`` is provided, duplicate analysis is performed against that
-    candidate simple/composite primary key. Invalid key rows are counted rather
-    than aborting the profile so the report can explain why the key is unsafe.
-    Without ``key``, duplicate analysis compares complete rows.
-    """
+    """Profile a record stream without materializing the source dataset."""
     plan_tuple = resolve_profile_metrics(metrics)
     plan = set(plan_tuple)
     normalized_scope = scope.strip().lower()
@@ -219,14 +209,23 @@ def profile_records(
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError("profile limit deve ser um inteiro maior que zero.")
+    if normalized_scope == "full" and limit is not None:
+        raise ValueError(
+            "profile scope='full' nao aceita limit; use scope='sample' para analise limitada."
+        )
     if normalized_scope == "sample" and limit is None:
         limit = 10_000
 
-    field_filter = set(fields or ()) or None
+    requested_fields = tuple(dict.fromkeys(str(value) for value in (fields or ())))
+    field_filter = set(requested_fields) or None
     field_plan = bool(
         plan & {"nulls", "missing", "empty", "types", "cardinality", "schema"}
     )
-    accumulators: dict[str, _FieldAccumulator] = {}
+    accumulators: dict[str, _FieldAccumulator] = (
+        {path: _FieldAccumulator(path=path) for path in requested_fields}
+        if field_plan
+        else {}
+    )
     records_analyzed = 0
     duplicate_keys = resolve_primary_key(key) if key is not None else None
     duplicate_tracker: ExactKeyDeduplicator | ExactRowDeduplicator | None = None
@@ -238,10 +237,12 @@ def profile_records(
         )
     duplicate_rows = 0
 
+    stream: Iterable[dict[str, Any]] = records
+    if limit is not None:
+        stream = islice(records, limit)
+
     try:
-        for record in records:
-            if limit is not None and records_analyzed >= limit:
-                break
+        for record in stream:
             records_analyzed += 1
             if duplicate_tracker is not None:
                 seen = duplicate_tracker.add(record)
@@ -250,9 +251,6 @@ def profile_records(
             if not field_plan:
                 continue
 
-            # Bounded by the number of observed paths in one record, not by the
-            # number of source records. This keeps missing-data accounting
-            # streaming-safe even for hundreds of millions of rows.
             seen_paths_this_record: set[str] = set()
             for path, value in _walk_json(record):
                 if field_filter is not None and path not in field_filter:
