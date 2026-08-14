@@ -76,6 +76,12 @@ def test_declarative_dedup_must_be_boolean():
         pipeline_config_from_dict(_config_dict(dedup=["customer_id"]))
 
 
+def test_declarative_primary_key_rejects_boolean_empty_and_non_string_members():
+    for primary_key in (True, "", [], ["id", 123]):
+        with pytest.raises(PipelineConfigError, match="connector.primary_key invalido"):
+            pipeline_config_from_dict(_config_dict(primary_key=primary_key))
+
+
 def test_configured_primary_key_is_available_to_profile_with_dedup_disabled():
     config = pipeline_config_from_dict(
         _config_dict(primary_key=["customer_id"], dedup=False)
