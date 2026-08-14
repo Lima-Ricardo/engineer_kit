@@ -35,10 +35,18 @@ def _validate_header_value(value: str) -> str:
 
 
 class AuthStrategy(ABC):
-    """Contrato: recebe os kwargs de requests.request() e devolve a versao autenticada."""
+    """Contrato de autenticacao aplicado a uma requisicao HTTP.
+
+    ``identity()`` descreve somente a configuracao logica da autenticacao e
+    nunca materializa o valor secreto. Isso permite que retries/checkpoints
+    diferenciem principals configurados sem transformar tokens em metadata.
+    """
 
     @abstractmethod
     def apply(self, request_kwargs: dict[str, Any]) -> dict[str, Any]: ...
+
+    def identity(self) -> dict[str, Any]:
+        return {"type": f"{type(self).__module__}.{type(self).__qualname__}"}
 
 
 class NoAuth(AuthStrategy):
@@ -46,6 +54,9 @@ class NoAuth(AuthStrategy):
 
     def apply(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
         return request_kwargs
+
+    def identity(self) -> dict[str, Any]:
+        return {"type": "none"}
 
 
 class BearerAuth(AuthStrategy):
@@ -60,6 +71,9 @@ class BearerAuth(AuthStrategy):
         headers = dict(request_kwargs.get("headers") or {})
         headers["Authorization"] = f"Bearer {token}"
         return {**request_kwargs, "headers": headers}
+
+    def identity(self) -> dict[str, Any]:
+        return {"type": "bearer", "secret_key": self._secret_key}
 
 
 class ApiKeyAuth(AuthStrategy):
@@ -93,3 +107,11 @@ class ApiKeyAuth(AuthStrategy):
         params = dict(request_kwargs.get("params") or {})
         params[self._param_name] = value
         return {**request_kwargs, "params": params}
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "type": "api_key",
+            "secret_key": self._secret_key,
+            "param_name": self._param_name,
+            "location": self._location,
+        }
