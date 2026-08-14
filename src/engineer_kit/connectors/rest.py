@@ -93,6 +93,7 @@ class RestConnector(APIConnector):
         records_path: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         records: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         select: list[str] | tuple[str, ...] | str | dict[str, str] | None = None,
+        dedup: bool = False,
         http_client: Optional[HttpClient] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
@@ -110,7 +111,9 @@ class RestConnector(APIConnector):
         self._base_url = base_url
         self._static_params = {**(static_params or {}), **(params or {})}
         self._records_path = records if records is not None else records_path
-        self._resolved_records_path = self._records_path if isinstance(self._records_path, str) else None
+        self._resolved_records_path = (
+            self._records_path if isinstance(self._records_path, str) else None
+        )
         self._select = resolve_select(select)
         self._date_params = self._date_params_from(date_params)
         self._state_key = resolved_state_key
@@ -212,6 +215,7 @@ class RestConnector(APIConnector):
             max_pages=max_pages,
             allow_cross_origin_pagination=allow_cross_origin_pagination,
             record_transform=self._project_record if self._select else None,
+            dedup=dedup,
         )
 
     @staticmethod
@@ -280,10 +284,16 @@ class RestConnector(APIConnector):
     def resolved_records_path(self) -> str | None:
         return self._resolved_records_path
 
-    def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
+    def build_request(
+        self,
+        window: IncrementalWindow,
+        page_params: dict[str, Any],
+    ) -> dict[str, Any]:
         payload = {**self._static_params, **page_params}
         if self._date_params.start and window.start:
-            payload[self._date_params.start] = window.start.strftime(self._date_params.date_format)
+            payload[self._date_params.start] = window.start.strftime(
+                self._date_params.date_format
+            )
         if self._date_params.end and window.end:
             payload[self._date_params.end] = window.end.strftime(self._date_params.date_format)
         return (
@@ -330,7 +340,12 @@ class RestConnector(APIConnector):
         limit: int = 25,
     ) -> ProbeResult:
         """Fetch exactly one page for diagnostics without advancing state."""
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 1000:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > 1000
+        ):
             raise ValueError("probe limit deve ser um inteiro entre 1 e 1000.")
 
         window = self._incremental.resolve_window(end)
@@ -419,6 +434,7 @@ class RestConnector(APIConnector):
                 {"path": item.path, "alias": item.alias}
                 for item in (self._select or ())
             ],
+            "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,
