@@ -164,11 +164,11 @@ The return value is `ProfileReport v1`. The same object supports Python logic, t
 
 ```python
 text = report.to_text()
-html = report.to_html()
+html = report.to_html(language="en")
 quality = report.quality
 ```
 
-The profiler keeps `missing`, `null`, and empty values distinct. It can also observe JSON paths, native source types, cardinality, and duplicates. A metric that was not computed remains distinct from a computed zero.
+The standalone HTML is self-contained and lets readers switch between PT-BR/EN and Light/Dark in the report itself. The profiler keeps `missing`, `null`, and empty values distinct. It can also observe JSON paths, native source types, cardinality, and duplicates. A metric that was not computed remains distinct from a computed zero.
 
 Profiling is **aggregate-only**: source values are not stored in the report. Presence, missing/null/empty counts, and type counters use state proportional to the number of observed fields, not source row count. Cardinality is exact while small, then switches to an approximate estimator with an explicit relative-error bound. Exact duplicate/PK detection requires state proportional to unique identities, so it uses SHA-256 fingerprints in temporary SQLite storage rather than unbounded RAM.
 

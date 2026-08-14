@@ -62,6 +62,10 @@ def test_local_lab_profile_renders_same_profile_report_and_candidate_pk(tmp_path
     assert page.status_code == 200
     assert "Data Profile" in page.text
     assert 'value="id"' in page.text
+    assert 'data-lang="pt-BR"' in page.text
+    assert 'data-lang="en"' in page.text
+    assert 'data-theme-choice="light"' in page.text
+    assert 'data-theme-choice="dark"' in page.text
 
     response = client.post(
         "/pipelines/orders/profile",
@@ -78,6 +82,9 @@ def test_local_lab_profile_renders_same_profile_report_and_candidate_pk(tmp_path
     assert "Duplicatas" in response.text
     assert "PK: id" in response.text
     assert "email" in response.text
+    assert 'id="local-profile-search"' in response.text
+    assert 'data-profile-filter="issues"' in response.text
+    assert 'data-profile-field="email"' in response.text
 
 
 def test_local_lab_form_persists_primary_key_and_dedup_policy_separately(tmp_path):

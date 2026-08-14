@@ -164,11 +164,11 @@ O retorno é um `ProfileReport v1`. O mesmo objeto alimenta código Python, rela
 
 ```python
 text = report.to_text()
-html = report.to_html()
+html = report.to_html(language="pt-BR")
 quality = report.quality
 ```
 
-O profiler diferencia `missing`, `null` e valores vazios. Também observa paths JSON, tipos nativos, cardinalidade e duplicatas quando essas métricas são solicitadas. Métrica não calculada permanece distinta de resultado zero.
+O HTML standalone é autocontido, começa em inglês por padrão e permite alternar entre PT-BR/EN e Light/Dark no próprio relatório. O profiler diferencia `missing`, `null` e valores vazios. Também observa paths JSON, tipos nativos, cardinalidade e duplicatas quando essas métricas são solicitadas. Métrica não calculada permanece distinta de resultado zero.
 
 O profiling é **aggregate-only**: valores reais não entram no relatório. Para fontes grandes, contagens, presença, missing/null/empty e tipos usam estado proporcional ao número de campos observados, não ao número total de linhas. Cardinalidade permanece exata enquanto pequena e muda para estimativa aproximada com erro declarado quando cresce. Detecção exata de duplicatas/PKs exige estado proporcional às identidades únicas, portanto usa fingerprints SHA-256 em SQLite temporário em disco em vez de RAM sem limite.
 

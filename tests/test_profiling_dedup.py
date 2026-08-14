@@ -316,8 +316,35 @@ def test_profile_report_terminal_and_html_are_aggregate_only_and_escape_paths():
     assert "DATA QUALITY" in text
     assert secret not in text
     assert secret not in html
-    assert "<script>" not in html
+    assert 'data-field="<script>"' not in html
     assert "&lt;script&gt;" in html
+
+
+def test_profile_html_is_self_contained_themed_bilingual_and_keeps_text_compatible():
+    report = profile_records([{"id": 1}, {"name": None}], "quality", "cardinality")
+    text_before = report.to_text()
+
+    html = report.to_html(language="pt-BR")
+
+    assert '<html lang="pt-BR">' in html
+    assert "--bg:#1e1e1e" in html
+    assert 'data-theme-choice="light"' in html
+    assert 'data-theme-choice="dark"' in html
+    assert 'data-lang="pt-BR"' in html
+    assert 'data-lang="en"' in html
+    assert "ek-language" in html
+    assert "ek-theme" in html
+    assert "data-profile" not in html  # standalone does not copy Local Lab/sidebar markup
+    assert "<link" not in html
+    assert "src=" not in html
+    assert report.to_text() == text_before
+
+
+def test_profile_html_rejects_unknown_initial_language():
+    report = profile_records([{"id": 1}], "count")
+
+    with pytest.raises(ValueError, match="language"):
+        report.to_html(language="auto")
 
 
 def test_disk_deduplicator_deletes_temporary_store_on_close():

@@ -113,4 +113,6 @@ def test_quality_summary_preserves_not_computed_semantics():
     assert report.quality.fields_with_missing is None
     assert report.quality.fields_with_nulls is None
     assert report.quality.fields_with_empty is None
-    assert "Fields with missing</strong><span>—" in report.to_html()
+    html = report.to_html()
+    assert "data-i18n='fields_missing'" in html
+    assert "<span>—</span>" in html

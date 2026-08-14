@@ -4,9 +4,9 @@
 <div class="page-heading">
     <div>
         <h1>Data Profile</h1>
-        <p class="subtitle">{{ config.name }} · análise agregada antes da Bronze</p>
+        <p class="subtitle"><span>{{ config.name }}</span> · <span data-profile-i18n="subtitle">análise agregada antes da Bronze</span></p>
     </div>
-    <a href="/pipelines/{{ config.name }}" class="btn">Voltar ao pipeline</a>
+    <a href="/pipelines/{{ config.name }}" class="btn" data-profile-i18n="back">Voltar ao pipeline</a>
 </div>
 
 <div class="architecture-note">
@@ -14,7 +14,7 @@
 </div>
 
 <form method="post" action="/pipelines/{{ config.name }}/profile" class="card">
-    <h3>Escopo</h3>
+    <h3 data-profile-i18n="scope">Escopo</h3>
     <div class="field-row">
         <div class="field">
             <label>Scope</label>
@@ -24,17 +24,17 @@
             </select>
         </div>
         <div class="field">
-            <label>Limite do sample</label>
+            <label data-profile-i18n="sample_limit">Limite do sample</label>
             <input type="number" name="limit" min="1" max="1000000" value="{{ limit }}">
         </div>
         <div class="field">
-            <label>PK candidata para duplicatas</label>
+            <label data-profile-i18n="candidate_pk">PK candidata para duplicatas</label>
             <input type="text" name="candidate_key" value="{{ candidate_key }}" placeholder="customer_id ou tenant_id,customer_id">
             <div class="field-hint">Opcional. Com PK, <code>duplicates</code> compara a identidade do registro; sem PK configurada/candidata, compara a linha completa.</div>
         </div>
     </div>
 
-    <h3>Métricas</h3>
+    <h3 data-profile-i18n="metrics">Métricas</h3>
     <p class="field-hint">Sem seleção = perfil completo. Selecione apenas o que quer calcular para reduzir trabalho.</p>
     <div class="grid-2">
         {% for metric in metrics %}
@@ -44,7 +44,7 @@
         </label>
         {% endfor %}
     </div>
-    <button type="submit" class="btn btn-primary">Executar profile</button>
+    <button type="submit" class="btn btn-primary" data-profile-i18n="run">Executar profile</button>
 </form>
 
 {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
@@ -54,9 +54,9 @@
 <p class="subtitle">scope={{ report.scope }} · {{ "{:,}".format(report.records_analyzed) }} registros analisados · {{ report.requested_metrics | join(', ') }}</p>
 
 {% set q = report.quality %}
-<div class="grid-2">
-    <div class="card"><h3>Registros analisados</h3><strong>{{ "{:,}".format(report.records_analyzed) }}</strong></div>
-    <div class="card"><h3>Campos observados</h3><strong>{{ report.fields | length }}</strong></div>
+<div class="grid-2 profile-kpis">
+    <div class="card"><h3 data-profile-i18n="records_analyzed">Registros analisados</h3><strong>{{ "{:,}".format(report.records_analyzed) }}</strong></div>
+    <div class="card"><h3 data-profile-i18n="fields">Campos observados</h3><strong>{{ report.fields | length }}</strong></div>
     {% if report.duplicates %}
     <div class="card"><h3>Modo de duplicidade</h3><strong>{{ "PK: " ~ (report.duplicates.key_fields | join(', ')) if report.duplicates.key_fields else "linha completa" }}</strong></div>
     <div class="card"><h3>Únicos</h3><strong>{{ "{:,}".format(report.duplicates.unique_rows) }}</strong></div>
@@ -69,13 +69,15 @@
     <div class="card"><h3>Campos com tipos mistos</h3><strong>{{ "não calculado" if q.mixed_type_fields is none else q.mixed_type_fields }}</strong></div>
 </div>
 
-<h2>Data Quality / Fields</h2>
+<h2 data-profile-i18n="field_details">Data Quality / Campos</h2>
 {% if report.fields %}
+<div class="profile-filter-bar"><input id="local-profile-search" type="search" data-profile-placeholder="search" placeholder="Buscar campos"><div class="filter-buttons"><button class="btn btn-sm active" type="button" data-profile-filter="all" data-profile-i18n="all_fields">Todos os campos</button><button class="btn btn-sm" type="button" data-profile-filter="issues" data-profile-i18n="issues">Problemas</button></div></div>
 <table>
     <thead><tr><th>Campo</th><th>Present</th><th>Missing</th><th>Null</th><th>Empty</th><th>Unique</th><th>Tipos</th></tr></thead>
     <tbody>
     {% for path, field in report.fields.items() %}
-        <tr>
+        {% set issue = (field.missing or 0) > 0 or (field.nulls or 0) > 0 or (field.empty or 0) > 0 or (field.types and field.types | length > 1) %}
+        <tr data-profile-field="{{ path }}" data-profile-issue="{{ 'true' if issue else 'false' }}">
             <td><code>{{ path }}</code></td>
             <td>{{ "{:,}".format(field.records_present) }}</td>
             <td>{{ "—" if field.missing is none else "{:,}".format(field.missing) }}</td>
@@ -94,4 +96,9 @@
 <div class="card"><ul>{% for warning in report.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>
 {% endif %}
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(() => { const P={"pt-BR":{subtitle:"análise agregada antes da Bronze",back:"Voltar ao pipeline",scope:"Escopo",sample_limit:"Limite do sample",candidate_pk:"PK candidata para duplicatas",metrics:"Métricas",run:"Executar profile",records_analyzed:"Registros analisados",fields:"Campos observados",field_details:"Data Quality / Campos",search:"Buscar campos",all_fields:"Todos os campos",issues:"Problemas"},en:{subtitle:"aggregated analysis before Bronze",back:"Back to pipeline",scope:"Scope",sample_limit:"Sample limit",candidate_pk:"Candidate PK for duplicates",metrics:"Metrics",run:"Run profile",records_analyzed:"Records analyzed",fields:"Observed fields",field_details:"Data Quality / Fields",search:"Search fields",all_fields:"All fields",issues:"Issues"}};let filter="all";const translate=lang=>{document.querySelectorAll("[data-profile-i18n]").forEach(e=>{const value=P[lang][e.dataset.profileI18n];if(value)e.textContent=value});document.querySelectorAll("[data-profile-placeholder]").forEach(e=>e.placeholder=P[lang][e.dataset.profilePlaceholder])};document.addEventListener("ek:language",e=>translate(e.detail.lang));translate(localStorage.getItem("ek-language")||"pt-BR");const search=document.getElementById("local-profile-search");if(!search)return;const apply=()=>{const term=search.value.toLocaleLowerCase();document.querySelectorAll("[data-profile-field]").forEach(row=>row.hidden=!row.dataset.profileField.toLocaleLowerCase().includes(term)||(filter==="issues"&&row.dataset.profileIssue!=="true"))};search.addEventListener("input",apply);document.querySelectorAll("[data-profile-filter]").forEach(button=>button.addEventListener("click",()=>{filter=button.dataset.profileFilter;document.querySelectorAll("[data-profile-filter]").forEach(x=>x.classList.toggle("active",x===button));apply()})) })();
+</script>
 {% endblock %}
