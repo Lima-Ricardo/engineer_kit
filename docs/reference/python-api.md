@@ -27,6 +27,7 @@ RestConnector(
     select=None,
     params=None,
     state_key=None,
+    primary_key=None,
     dedup=False,
     method="GET",
 )
@@ -41,9 +42,32 @@ Seletores simples aceitos:
 - `select`: lista/string de campos ou mapping `{path: alias}`;
 - `params`: parâmetros estáticos da request;
 - `state_key`: namespace explícito do checkpoint; por default usa o nome do connector;
-- `dedup`: `False` por padrão; passe uma PK simples (`"customer_id"`) ou composta (`["tenant_id", "order_id"]`) para remover registros completos cuja identidade já apareceu.
+- `primary_key`: identidade simples (`"customer_id"`) ou composta (`["tenant_id", "order_id"]`) do registro emitido;
+- `dedup`: booleano, `False` por padrão. Com `True`, remove registros inteiros cuja `primary_key` já apareceu.
 
-`dedup=True` é recusado porque não declara identidade. A primeira ocorrência de uma PK vence. Chave ausente, `null`, blank ou não escalar é erro de ingestão. A deduplicação acontece depois de `select`; quando há projeção, as chaves de dedup devem usar os aliases emitidos.
+`primary_key` e `dedup` são conceitos independentes. Uma PK pode ser declarada com `dedup=False` para profiling, qualidade e metadata de identidade sem remover nenhuma linha:
+
+```python
+connector = RestConnector(
+    base_url=url,
+    primary_key="customer_id",
+    dedup=False,
+)
+```
+
+Para ativar deduplicação:
+
+```python
+connector = RestConnector(
+    base_url=url,
+    primary_key="customer_id",
+    dedup=True,
+)
+```
+
+`dedup=True` sem `primary_key` é recusado. A primeira ocorrência da PK vence; quando a mesma PK reaparece, o **registro inteiro posterior** é removido, mesmo se outras colunas forem diferentes. Chave ausente, `null`, blank ou não escalar é erro de ingestão. A identidade é avaliada depois de `select`; quando há projeção, `primary_key` deve usar os aliases emitidos.
+
+A forma intermediária `dedup="customer_id"` / `dedup=[...]`, introduzida apenas na branch de desenvolvimento do profiling, ainda é migrada programaticamente com `DeprecationWarning`, mas não é o contrato recomendado. YAML novo exige `primary_key` separado e `dedup` booleano.
 
 Paths declarativos aceitam objetos, índices de arrays e chaves entre aspas, por exemplo `items[0].sku` e `payload["odd.key"].value`. Wildcards não são usados para evitar mudança implícita de cardinalidade. Colisões de aliases são recusadas e exigem alias explícito.
 
@@ -98,7 +122,7 @@ report = connector.profile(
 
 #### Validando uma PK candidata
 
-Esse é um dos usos principais do profiling. Antes de configurar dedup, teste a identidade candidata:
+Esse é um dos usos principais do profiling. Antes de persistir a identidade ou ativar dedup, teste a chave candidata:
 
 ```python
 report = connector.profile(
@@ -122,18 +146,19 @@ report = connector.profile(
 )
 ```
 
-O profile não assume que o nome `id` torna um campo PK. Ele mede o contrato observado: completude da chave, valores inválidos e violações de unicidade. A decisão de declarar essa identidade em `dedup=` continua com o usuário.
+O profile não assume que o nome `id` torna um campo PK. Ele mede o contrato observado: completude da chave, valores inválidos e violações de unicidade. O usuário continua decidindo se aquela identidade deve ser declarada como `primary_key` e se dedup deve ser ativado.
 
-Se o connector já foi criado com:
+Se o connector já possui:
 
 ```python
 connector = RestConnector(
     base_url=url,
-    dedup=["customer_id"],
+    primary_key=["customer_id"],
+    dedup=False,
 )
 ```
 
-então `connector.profile("duplicates")` reutiliza essa PK automaticamente. Sem `key=` e sem dedup configurado, a métrica `duplicates` compara registros completos.
+então `connector.profile("duplicates")` reutiliza essa PK automaticamente, mesmo com dedup desligado. Sem `key=` e sem `primary_key`, a métrica `duplicates` compara registros completos.
 
 O retorno é um `ProfileReport v1`. O mesmo objeto alimenta código Python, relatório terminal e HTML:
 
@@ -153,7 +178,7 @@ Por padrão no Python, `scope="full"` percorre a fonte configurada inteira. Para
 report = connector.profile(scope="sample", limit=10_000)
 ```
 
-`profile()` **não grava Destination/Bronze e não confirma checkpoint**. Quando o connector possui `dedup=[...]`, o profiler observa o conjunto antes da remoção e reutiliza a PK configurada para a análise de duplicatas.
+`profile()` **não grava Destination/Bronze e não confirma checkpoint**. Quando existe `primary_key`, o profiler a reutiliza para a análise de duplicatas independentemente do valor de `dedup`.
 
 A CLI usa um default mais conservador:
 
@@ -165,7 +190,7 @@ engineer-kit profile-config pipeline.yaml --scope full
 engineer-kit profile-config pipeline.yaml --html profile.html
 ```
 
-No Local Lab, a tela **Data Profile** usa o mesmo `ProfileReport`; começa em sample de 10.000 registros, permite informar uma PK candidata e exige seleção explícita de `full` para percorrer toda a fonte.
+No Local Lab, a tela **Data Profile** usa o mesmo `ProfileReport`; começa em sample de 10.000 registros, permite informar uma PK candidata e exige seleção explícita de `full` para percorrer toda a fonte. O formulário do pipeline mantém **Primary key / identidade** e **Deduplicação por PK** como controles separados.
 
 ### `collect()`
 
@@ -173,7 +198,7 @@ No Local Lab, a tela **Data Profile** usa o mesmo `ProfileReport`; começa em sa
 records = connector.collect()
 ```
 
-Materializa a extração completa e confirma o checkpoint somente depois da coleta terminar com sucesso. Indicado para conjuntos pequenos. Com `dedup=["customer_id"]`, a primeira ocorrência de cada PK é mantida e os registros completos posteriores com a mesma chave são removidos.
+Materializa a extração completa e confirma o checkpoint somente depois da coleta terminar com sucesso. Indicado para conjuntos pequenos. Com `primary_key=["customer_id"]` e `dedup=True`, a primeira ocorrência da PK é mantida e os registros completos posteriores com a mesma chave são removidos. Com a mesma PK e `dedup=False`, nenhum registro é removido.
 
 ### `stream()`
 
@@ -182,7 +207,7 @@ for batch in connector.stream():
     ...
 ```
 
-Entrega batches limitados e confirma o checkpoint somente depois do consumo completo. A mesma regra de PK configurada em `dedup` se aplica ao stream e, consequentemente, à ingestão gerenciada que consome a mesma `ExtractionSession`.
+Entrega batches limitados e confirma o checkpoint somente depois do consumo completo. Quando `dedup=True`, a mesma `primary_key` se aplica ao stream e, consequentemente, à ingestão gerenciada que consome a mesma `ExtractionSession`.
 
 ### `to()`
 
@@ -215,7 +240,7 @@ O projeto dbt é descoberto a partir do diretório atual e ancestrais. `project_
 plan = connector.explain()
 ```
 
-Retorna um resumo seguro da resolução do conector, sem executar outra chamada HTTP e sem retornar o valor de autenticação. O resumo inclui `state_key`, a lista de PKs em `dedup` quando ativa e os pares path/alias de `select`.
+Retorna um resumo seguro da resolução do conector, sem executar outra chamada HTTP e sem retornar o valor de autenticação. O resumo expõe `primary_key` e `dedup` separadamente, além de `state_key` e dos pares path/alias de `select`.
 
 ## Paginação avançada
 
@@ -254,7 +279,7 @@ for batch in run:
 run.commit()
 ```
 
-A sessão é single-pass e recusa commit parcial. Quando o connector possui uma PK em `dedup`, a sessão aplica a mesma deduplicação streaming antes de emitir registros/batches.
+A sessão é single-pass e recusa commit parcial. Quando `dedup=True`, o connector entrega à sessão a `primary_key` configurada e aplica deduplicação streaming antes de emitir registros/batches.
 
 ## `capability_manifest()`
 
@@ -264,7 +289,7 @@ from engineer_kit import capability_manifest
 manifest = capability_manifest()
 ```
 
-Retorna metadata serializável sobre métodos REST, autenticação, paginação, incremental, dedup por PK, profiling, destinations registrados, state stores, run logs e comandos dbt. O objetivo é permitir que CLI/UI descubram capabilities sem manter listas duplicadas; a execução continua definida pelos contratos tipados do core.
+Retorna metadata serializável sobre métodos REST, autenticação, paginação, incremental, `primary_key`, política booleana de dedup, profiling, destinations registrados, state stores, run logs e comandos dbt. O objetivo é permitir que CLI/UI descubram capabilities sem manter listas duplicadas; a execução continua definida pelos contratos tipados do core.
 
 ## Contratos estáveis
 
