@@ -9,7 +9,7 @@ description = "Intent-driven, streaming-first REST ingestion with profiling, dat
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Ricardo Alex De Lima" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 keywords = ["data-engineering", "api-ingestion", "etl", "elt", "rest-api", "profiling", "data-quality", "primary-key", "deduplication", "incremental", "duckdb", "parquet", "delta-lake", "databricks", "microsoft-fabric"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -21,6 +21,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

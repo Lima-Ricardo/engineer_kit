@@ -7,10 +7,58 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  verify-ci:
+    name: require green CI for release SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Wait for successful main CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 70); do
+            RUN_JSON=$(gh run list \
+              --workflow ci.yml \
+              --commit "$GITHUB_SHA" \
+              --event push \
+              --limit 1 \
+              --json databaseId,status,conclusion,headSha)
+            COUNT=$(printf '%s' "$RUN_JSON" | jq 'length')
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No main CI run for $GITHUB_SHA yet; waiting..."
+              sleep 30
+              continue
+            fi
+            STATUS=$(printf '%s' "$RUN_JSON" | jq -r '.[0].status')
+            CONCLUSION=$(printf '%s' "$RUN_JSON" | jq -r '.[0].conclusion // ""')
+            HEAD_SHA=$(printf '%s' "$RUN_JSON" | jq -r '.[0].headSha')
+            test "$HEAD_SHA" = "$GITHUB_SHA" || {
+              echo "Resolved CI run does not match release SHA."
+              exit 1
+            }
+            if [ "$STATUS" = "completed" ]; then
+              test "$CONCLUSION" = "success" || {
+                echo "CI for release SHA completed with conclusion=$CONCLUSION"
+                exit 1
+              }
+              echo "CI is green for $GITHUB_SHA."
+              exit 0
+            fi
+            echo "CI status=$STATUS; waiting..."
+            sleep 30
+          done
+          echo "Timed out waiting for CI on $GITHUB_SHA."
+          exit 1
+
   build:
     name: build and validate distributions
+    needs: verify-ci
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
