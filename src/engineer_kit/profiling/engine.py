@@ -335,9 +335,12 @@ def profile_records(
             if isinstance(duplicate_tracker, ExactKeyDeduplicator)
             else 0
         )
+        unique_rows = records_analyzed - duplicate_rows
+        if duplicate_keys is not None:
+            unique_rows -= invalid_key_rows
         duplicates = DuplicateProfile(
             duplicate_rows=duplicate_rows,
-            unique_rows=records_analyzed - duplicate_rows,
+            unique_rows=unique_rows,
             key_fields=duplicate_keys,
             invalid_key_rows=invalid_key_rows,
         )
