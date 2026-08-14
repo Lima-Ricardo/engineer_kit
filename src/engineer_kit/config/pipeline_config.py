@@ -12,6 +12,7 @@ import copy
 import logging
 import os
 import re
+import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -87,6 +88,7 @@ _CONNECTOR_KEYS = {
     "params",
     "static_params",
     "state_key",
+    "primary_key",
     "dedup",
     "extraction_batch_size",
     "max_pages",
@@ -280,7 +282,8 @@ class ConnectorConfig:
     select: list[str] | str | dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
     state_key: Optional[str] = None
-    dedup: list[str] | str | bool | None = False
+    primary_key: list[str] | str | None = None
+    dedup: bool | list[str] | str | None = False
     # 0.2 aliases retained for existing Python configs and the current Local Lab.
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
@@ -288,11 +291,38 @@ class ConnectorConfig:
     max_pages: int = DEFAULT_MAX_PAGES
 
     def __post_init__(self) -> None:
+        # Programmatic compatibility for the unreleased intermediate contract
+        # where dedup itself carried the PK. Declarative YAML is stricter and
+        # requires primary_key + boolean dedup.
+        if not isinstance(self.dedup, bool) and self.dedup is not None:
+            if self.primary_key is not None:
+                raise PipelineConfigError(
+                    "connector.dedup deve ser booleano quando primary_key esta definido."
+                )
+            try:
+                legacy_keys = resolve_dedup_keys(self.dedup)
+            except (TypeError, ValueError) as exc:
+                raise PipelineConfigError(f"connector.dedup invalido: {exc}") from exc
+            warnings.warn(
+                "ConnectorConfig(dedup=<PK>) esta obsoleto; use primary_key=<PK>, dedup=True.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.primary_key = list(legacy_keys) if legacy_keys else None
+            self.dedup = True
+        elif self.dedup is None:
+            self.dedup = False
+
         try:
-            keys = resolve_dedup_keys(self.dedup)
+            keys = resolve_dedup_keys(self.primary_key)
         except (TypeError, ValueError) as exc:
-            raise PipelineConfigError(f"connector.dedup invalido: {exc}") from exc
-        self.dedup = list(keys) if keys else False
+            raise PipelineConfigError(f"connector.primary_key invalido: {exc}") from exc
+        self.primary_key = list(keys) if keys else None
+
+        if self.dedup and not self.primary_key:
+            raise PipelineConfigError(
+                "connector.dedup=true exige connector.primary_key."
+            )
 
     def resolved_records(self) -> str | None:
         if self.records and self.records_path and self.records != self.records_path:
@@ -625,7 +655,11 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         select=connector_data.get("select"),
         params=connector_data.get("params") or {},
         state_key=connector_data.get("state_key"),
-        dedup=connector_data.get("dedup", False),
+        primary_key=connector_data.get("primary_key"),
+        dedup=_strict_bool(
+            connector_data.get("dedup", False),
+            path="connector.dedup",
+        ),
         records_path=connector_data.get("records_path"),
         static_params=connector_data.get("static_params") or {},
         extraction_batch_size=connector_data.get(
@@ -672,6 +706,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "select": config.connector.select,
             "params": config.connector.params,
             "state_key": config.connector.state_key,
+            "primary_key": config.connector.primary_key,
             "dedup": config.connector.dedup,
             "records_path": config.connector.records_path,
             "static_params": config.connector.static_params,
@@ -829,6 +864,7 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             params=connector_params or None,
             records=config.connector.resolved_records(),
             select=config.connector.select,
+            primary_key=config.connector.primary_key,
             dedup=config.connector.dedup,
             extraction_batch_size=config.connector.extraction_batch_size,
             max_pages=config.connector.max_pages,
