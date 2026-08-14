@@ -12,6 +12,7 @@ import requests
 
 from engineer_kit.connectors.base import Connector
 from engineer_kit.connectors.date_field import DateFieldSpec
+from engineer_kit.connectors.dedup import resolve_dedup_keys
 from engineer_kit.connectors.extraction import (
     DEFAULT_EXTRACTION_BATCH_SIZE,
     ExtractionSession,
@@ -87,7 +88,7 @@ class APIConnector(Connector):
         max_pages: int = DEFAULT_MAX_PAGES,
         allow_cross_origin_pagination: bool = False,
         record_transform: Callable[[dict], dict] | None = None,
-        dedup: bool = False,
+        dedup: str | Sequence[str] | bool | None = False,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -96,8 +97,6 @@ class APIConnector(Connector):
             )
         if max_pages <= 0:
             raise ValueError("max_pages deve ser maior que zero.")
-        if not isinstance(dedup, bool):
-            raise TypeError("dedup deve ser booleano.")
 
         self.name = name
         self._http = http_client
@@ -105,7 +104,7 @@ class APIConnector(Connector):
         self._method = method
         self._date_field = date_field
         self._record_transform = record_transform
-        self._dedup = dedup
+        self._dedup_keys = resolve_dedup_keys(dedup)
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
         self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
@@ -142,8 +141,13 @@ class APIConnector(Connector):
 
     @property
     def dedup_enabled(self) -> bool:
-        """Whether extraction suppresses exact duplicate output rows."""
-        return self._dedup
+        """Whether extraction suppresses repeated declared-PK records."""
+        return self._dedup_keys is not None
+
+    @property
+    def dedup_keys(self) -> tuple[str, ...] | None:
+        """Declared simple/composite primary key used by deduplication."""
+        return self._dedup_keys
 
     @property
     def checkpoint_enabled(self) -> bool:
@@ -213,7 +217,7 @@ class APIConnector(Connector):
             date_field=self._date_field,
             batch_size=resolved_batch_size,
             record_transform=self._record_transform,
-            dedup=self._dedup,
+            dedup=self._dedup_keys,
         )
 
     def profile(
@@ -223,14 +227,15 @@ class APIConnector(Connector):
         scope: str = "full",
         limit: int | None = None,
         fields: Sequence[str] | None = None,
+        key: str | Sequence[str] | None = None,
     ) -> ProfileReport:
         """Return aggregate profiling/data-quality metrics without persistence.
 
         No metric selector means a complete profile. Explicit selectors such as
         ``profile("duplicates", "nulls", "missing")`` activate only the
-        required aggregators. Profiling never writes a destination and never
-        commits a checkpoint. It deliberately observes rows before ``dedup=True``
-        filtering so duplicate quality problems remain visible.
+        required aggregators. ``key`` evaluates duplicates by a candidate PK;
+        when omitted, a configured ``dedup`` PK is reused automatically.
+        Profiling never writes a destination and never commits a checkpoint.
         """
         plan = resolve_profile_metrics(metrics)
         window = self._incremental.resolve_window(end)
@@ -242,6 +247,7 @@ class APIConnector(Connector):
                 scope=scope,
                 limit=limit,
                 fields=fields,
+                key=key if key is not None else self._dedup_keys,
             )
         finally:
             close = getattr(records, "close", None)
