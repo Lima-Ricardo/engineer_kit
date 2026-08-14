@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Iterator, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 import requests
 
@@ -93,7 +93,7 @@ class RestConnector(APIConnector):
         records_path: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         records: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         select: list[str] | tuple[str, ...] | str | dict[str, str] | None = None,
-        dedup: bool = False,
+        dedup: str | Sequence[str] | bool | None = False,
         http_client: Optional[HttpClient] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
@@ -213,6 +213,14 @@ class RestConnector(APIConnector):
             record_transform=self._project_record if self._select else None,
             dedup=dedup,
         )
+        if self._select and self.dedup_keys:
+            emitted = {item.alias for item in self._select}
+            missing_keys = [key for key in self.dedup_keys if key not in emitted]
+            if missing_keys:
+                raise ValueError(
+                    "dedup deve referenciar colunas emitidas depois de select. "
+                    f"PK(s) ausente(s): {', '.join(missing_keys)}."
+                )
 
     @staticmethod
     def _date_params_from(value: DateParams | dict[str, Any] | None) -> DateParams:
@@ -436,7 +444,7 @@ class RestConnector(APIConnector):
                 {"path": item.path, "alias": item.alias}
                 for item in (self._select or ())
             ],
-            "dedup": self.dedup_enabled,
+            "dedup": list(self.dedup_keys) if self.dedup_keys else False,
             "incremental": type(self._incremental).__name__,
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,
