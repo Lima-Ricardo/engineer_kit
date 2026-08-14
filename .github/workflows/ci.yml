@@ -60,6 +60,27 @@ jobs:
                   raise AssertionError(f'{attribute} should require its optional extra')
           PY
 
+  windows-file-safety:
+    name: Windows file state and audit safety
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install core test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip check
+      - name: Exercise Windows locks and scheduler propagation
+        run: python -m pytest -q tests/test_file_adapters.py tests/test_scheduler_reliability.py
+
   test:
     name: pytest / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
