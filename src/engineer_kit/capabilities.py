@@ -93,7 +93,7 @@ def capability_manifest() -> dict[str, Any]:
             "preview": True,
         },
         "destinations": destinations,
-        "state_stores": list(registered.get("state", [])),
+        "state_stores": list(registered.get("state_store", [])),
         "run_logs": list(registered.get("run_log", [])),
         "transforms": {
             "none": {},
