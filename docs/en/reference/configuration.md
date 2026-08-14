@@ -13,7 +13,7 @@ connector:
   base_url: https://api.example.com/orders
 ```
 
-`GET`, `auto` pagination, and conservative record-list discovery are the defaults. No `StateStore` is created unless incremental ingestion is enabled.
+`GET`, `auto` pagination, `dedup: false`, and conservative record-list discovery are the defaults. No `StateStore` is created unless incremental ingestion is enabled.
 
 ## Complete structure
 
@@ -47,6 +47,7 @@ Logical pipeline identifier. For compatibility it is also the default checkpoint
 | `select` | list/string/mapping | null | projected fields; mappings support `path: alias` |
 | `params` | mapping | `{}` | fixed API parameters |
 | `state_key` | string/null | `name` | explicit checkpoint namespace |
+| `dedup` | bool | `false` | remove exact duplicate emitted rows |
 | `extraction_batch_size` | int | `25000` | records delivered per extraction batch |
 | `max_pages` | int | core limit | defensive pagination bound |
 | `auth` | object | none | authentication strategy |
@@ -84,6 +85,22 @@ select:
 ```
 
 Paths support object traversal and explicit indexes, for example `items[0].sku` and `payload["odd.key"].value`. Wildcards are intentionally unsupported because selectors must not change row cardinality implicitly. If two paths normalize to the same output alias, validation fails and explicit aliases are required.
+
+### `dedup`
+
+Deduplication is opt-in:
+
+```yaml
+connector:
+  base_url: https://api.example.com/orders
+  dedup: true
+```
+
+`false` is always the default. YAML requires an actual boolean; strings such as `"false"` are rejected to avoid surprising truthiness/coercion.
+
+When enabled, deduplication runs **after `select`**, so identity is based on the row actually emitted to `collect()`, `stream()`, and managed ingestion. The runtime stores only SHA-256 fingerprints in a temporary SQLite database and deletes it when the pass finishes. This avoids an unbounded in-memory set, although disk usage grows with the number of unique rows observed.
+
+`profile()` intentionally observes rows before this removal, so Data Quality still reports duplicate problems present in the source/projection.
 
 ### `params`
 
@@ -250,6 +267,18 @@ transform:
 ```
 
 The short form `transform: dbt` is also accepted.
+
+## Profiling a configuration
+
+The same YAML can be inspected without loading Bronze:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipelines/orders.yaml --scope full
+```
+
+The command uses an inspection state backend that refuses writes, so profiling cannot advance the configured checkpoint. Local Lab exposes the same operation through the **Data Profile** screen.
 
 ## File validation and safety
 
