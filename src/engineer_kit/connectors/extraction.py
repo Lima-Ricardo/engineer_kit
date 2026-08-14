@@ -11,9 +11,10 @@ independent from API pagination and from destination write batching.
 from __future__ import annotations
 
 from datetime import date
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Sequence
 
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
+from engineer_kit.connectors.dedup import ExactKeyDeduplicator, resolve_primary_key
 from engineer_kit.connectors.incremental import IncrementalStrategy, IncrementalWindow
 from engineer_kit.storage.state_store import Watermark
 
@@ -43,7 +44,11 @@ class ExtractionSession:
 
     ``record_transform`` is applied only after incremental date tracking. This
     allows ergonomic projections to hide fields from the caller without hiding
-    a watermark field from checkpoint logic.
+    a watermark field from checkpoint logic. At this low-level boundary,
+    ``dedup`` receives the already-resolved primary-key fields only when the
+    higher-level connector policy enabled deduplication. ``False``/``None`` keep
+    deduplication disabled for 0.2 compatibility. The complete duplicate record
+    is removed; the key column itself is never mutated.
     """
 
     def __init__(
@@ -55,6 +60,7 @@ class ExtractionSession:
         date_field: Optional[DateFieldSpec] = None,
         batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         record_transform: Callable[[dict], dict] | None = None,
+        dedup: str | Sequence[str] | bool | None = False,
     ) -> None:
         self.window = window
         self.batch_size = validate_extraction_batch_size(batch_size)
@@ -62,6 +68,9 @@ class ExtractionSession:
         self._incremental = incremental
         self._date_field = date_field
         self._record_transform = record_transform
+        self._dedup_keys = (
+            None if dedup is False or dedup is None else resolve_primary_key(dedup)
+        )
         self._started = False
         self._exhausted = False
         self._aborted = False
@@ -83,6 +92,16 @@ class ExtractionSession:
     def aborted(self) -> bool:
         """Whether this session was explicitly aborted."""
         return self._aborted
+
+    @property
+    def dedup_enabled(self) -> bool:
+        """Whether duplicate PK records are filtered in this session."""
+        return self._dedup_keys is not None
+
+    @property
+    def dedup_keys(self) -> tuple[str, ...] | None:
+        """Declared simple/composite PK used by deduplication."""
+        return self._dedup_keys
 
     @property
     def max_data_date_seen(self) -> date | None:
@@ -107,15 +126,24 @@ class ExtractionSession:
         """
         self._ensure_can_start()
         self._started = True
+        deduplicator = (
+            ExactKeyDeduplicator(self._dedup_keys)
+            if self._dedup_keys is not None
+            else None
+        )
         try:
             for record in self._records:
                 self._track_max_data_date(record)
-                yield self._record_transform(record) if self._record_transform else record
+                output = self._record_transform(record) if self._record_transform else record
+                if deduplicator is not None and deduplicator.add(output) is False:
+                    continue
+                yield output
             self._exhausted = True
         finally:
+            if deduplicator is not None:
+                deduplicator.close()
             # If a consumer stops early or closes the generator, _exhausted stays
             # false and commit() refuses to advance the checkpoint.
-            pass
 
     def iter_batches(self, size: int | None = None) -> Iterator[list[dict]]:
         """Consume the extraction in bounded in-memory batches.

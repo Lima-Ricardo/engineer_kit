@@ -119,6 +119,69 @@ def run_config(path: Path) -> None:
         raise typer.Exit(code=1)
 
 
+@app.command("profile-config")
+def profile_config(
+    path: Path,
+    metrics: str = typer.Option(
+        "",
+        "--metrics",
+        "-m",
+        help="Metricas separadas por virgula. Vazio executa o perfil completo.",
+    ),
+    key: str = typer.Option(
+        "",
+        "--key",
+        help=(
+            "PK candidata para a metrica duplicates. Use virgula para chave composta. "
+            "Se omitida, reutiliza connector.primary_key quando configurado."
+        ),
+    ),
+    scope: str = typer.Option(
+        "sample",
+        help="Escopo: sample (padrao seguro no CLI) ou full.",
+    ),
+    limit: int = typer.Option(
+        10_000,
+        min=1,
+        help="Maximo de registros no modo sample.",
+    ),
+    html: Path | None = typer.Option(
+        None,
+        "--html",
+        help="Tambem grava o mesmo ProfileReport como HTML standalone.",
+    ),
+) -> None:
+    """Perfila uma fonte YAML sem carregar Bronze nem avancar checkpoint."""
+    from engineer_kit.config.pipeline_config import load_pipeline_config
+    from engineer_kit.profiling.config import connector_from_config
+
+    normalized_scope = scope.strip().lower()
+    if normalized_scope not in {"sample", "full"}:
+        raise typer.BadParameter("scope deve ser 'sample' ou 'full'.", param_hint="--scope")
+    selectors = tuple(item.strip() for item in metrics.split(",") if item.strip())
+    candidate_key = [item.strip() for item in key.split(",") if item.strip()] or None
+    resolved_limit = limit if normalized_scope == "sample" else None
+
+    try:
+        config = load_pipeline_config(path)
+        connector = connector_from_config(config)
+        report = connector.profile(
+            *selectors,
+            scope=normalized_scope,
+            limit=resolved_limit,
+            key=candidate_key,
+        )
+    except Exception as exc:
+        typer.echo(f"Falha ao gerar data profile: {exc}")
+        raise typer.Exit(code=1) from None
+
+    typer.echo(report.to_text(), nl=False)
+    if html is not None:
+        html.parent.mkdir(parents=True, exist_ok=True)
+        html.write_text(report.to_html(), encoding="utf-8")
+        typer.echo(f"HTML: {html}")
+
+
 @app.command("adapters")
 def adapters_command() -> None:
     """Lista os adapters declarativos registrados no processo atual."""

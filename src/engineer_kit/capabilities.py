@@ -15,6 +15,8 @@ from engineer_kit.adapters.registry import available_adapters
 from engineer_kit.config.pipeline_config import CURRENT_PIPELINE_CONFIG_VERSION
 from engineer_kit.connectors.api_connector import VALID_HTTP_METHODS
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
+from engineer_kit.profiling.engine import PROFILE_METRICS, PROFILE_PRESETS
+from engineer_kit.profiling.model import PROFILE_REPORT_VERSION
 
 _BUILTIN_DESTINATIONS: dict[str, dict[str, Any]] = {
     "duckdb": {
@@ -86,11 +88,39 @@ def capability_manifest() -> dict[str, Any]:
                 "params",
                 "pagination",
                 "incremental",
+                "primary_key",
+                "dedup",
             ],
             "auth": ["none", "bearer", "api_key"],
             "pagination": list(STANDARD_PAGINATION_TYPES),
             "incremental": ["none", "ingestion_date", "data_date"],
             "preview": True,
+            "primary_key": {
+                "supported": True,
+                "required_for_dedup": True,
+                "key_shapes": ["single", "composite"],
+                "profile_candidate_analysis": True,
+            },
+            "dedup": {
+                "supported": True,
+                "type": "boolean",
+                "default": False,
+                "identity": "primary_key",
+                "scope": "complete_emitted_record",
+                "keep": "first",
+                "invalid_key": "error",
+            },
+            "profiling": {
+                "supported": True,
+                "report_version": PROFILE_REPORT_VERSION,
+                "metrics": sorted(PROFILE_METRICS),
+                "presets": sorted(PROFILE_PRESETS),
+                "default": "all",
+                "scopes": ["full", "sample"],
+                "duplicate_key_analysis": True,
+                "checkpoint_commit": False,
+                "destination_write": False,
+            },
         },
         "destinations": destinations,
         "state_stores": list(registered.get("state_store", [])),

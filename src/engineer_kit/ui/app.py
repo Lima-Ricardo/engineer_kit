@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from engineer_kit.config.pipeline_config import (
     AuthConfig,
@@ -37,6 +38,9 @@ from engineer_kit.config.pipeline_config import (
 from engineer_kit.connectors.api_connector import DEFAULT_MAX_PAGES
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
+from engineer_kit.profiling.config import connector_from_config
+from engineer_kit.profiling.engine import PROFILE_METRICS
+from engineer_kit.security.redaction import redact_text
 from engineer_kit.ui.run_manager import RunManager
 from engineer_kit.ui.security import (
     SecurityHeadersMiddleware,
@@ -46,6 +50,8 @@ from engineer_kit.ui.security import (
 
 BASE_DIR = Path(__file__).parent
 PREVIEW_ROW_LIMIT = 200
+PROFILE_SAMPLE_LIMIT = 10_000
+PROFILE_MAX_SAMPLE_LIMIT = 1_000_000
 
 
 def _workspace_child(workspace: Path, value: str) -> Path:
@@ -216,6 +222,116 @@ def create_app(
             },
         )
 
+    def _profile_context(
+        config: PipelineConfig,
+        *,
+        report=None,
+        error: str | None = None,
+        selected_metrics: list[str] | tuple[str, ...] = (),
+        scope: str = "sample",
+        limit: int = PROFILE_SAMPLE_LIMIT,
+        candidate_key: str = "",
+    ) -> dict:
+        return {
+            "config": config,
+            "metrics": sorted(PROFILE_METRICS),
+            "selected_metrics": tuple(selected_metrics),
+            "scope": scope,
+            "limit": limit,
+            "candidate_key": candidate_key,
+            "report": report,
+            "error": error,
+        }
+
+    @app.get("/pipelines/{name}/profile", response_class=HTMLResponse)
+    def profile_form(request: Request, name: str, _: None = Depends(check_auth)):
+        config = _load_or_404(name)
+        configured_key = ",".join(config.connector.primary_key or [])
+        return templates.TemplateResponse(
+            request,
+            "profile_report.html",
+            _profile_context(config, candidate_key=configured_key),
+        )
+
+    @app.post("/pipelines/{name}/profile", response_class=HTMLResponse)
+    async def profile_run(request: Request, name: str, _: None = Depends(check_auth)):
+        enforce_same_origin(request)
+        config = _load_or_404(name)
+        form = await request.form()
+        selected = tuple(form.getlist("metric")) if hasattr(form, "getlist") else ()
+        scope = str(form.get("scope") or "sample").strip().lower()
+        candidate_key = str(form.get("candidate_key") or "").strip()
+        key = [item.strip() for item in candidate_key.split(",") if item.strip()] or None
+        if scope not in {"sample", "full"}:
+            return templates.TemplateResponse(
+                request,
+                "profile_report.html",
+                _profile_context(
+                    config,
+                    error="Scope deve ser sample ou full.",
+                    candidate_key=candidate_key,
+                ),
+                status_code=400,
+            )
+        try:
+            requested_limit = int(form.get("limit") or PROFILE_SAMPLE_LIMIT)
+            if requested_limit <= 0 or requested_limit > PROFILE_MAX_SAMPLE_LIMIT:
+                raise ValueError
+        except (TypeError, ValueError):
+            return templates.TemplateResponse(
+                request,
+                "profile_report.html",
+                _profile_context(
+                    config,
+                    error=(
+                        f"Limite do sample deve estar entre 1 e "
+                        f"{PROFILE_MAX_SAMPLE_LIMIT:,}."
+                    ),
+                    selected_metrics=selected,
+                    scope=scope,
+                    candidate_key=candidate_key,
+                ),
+                status_code=400,
+            )
+
+        resolved_limit = requested_limit if scope == "sample" else None
+        try:
+            connector = connector_from_config(config)
+            report = await run_in_threadpool(
+                connector.profile,
+                *selected,
+                scope=scope,
+                limit=resolved_limit,
+                key=key,
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request,
+                "profile_report.html",
+                _profile_context(
+                    config,
+                    error=redact_text(exc),
+                    selected_metrics=selected,
+                    scope=scope,
+                    limit=requested_limit,
+                    candidate_key=candidate_key,
+                ),
+                status_code=502,
+            )
+
+        return templates.TemplateResponse(
+            request,
+            "profile_report.html",
+            _profile_context(
+                config,
+                report=report,
+                selected_metrics=selected,
+                scope=scope,
+                limit=requested_limit,
+                candidate_key=candidate_key,
+            ),
+        )
+
     @app.post("/pipelines/{name}/run")
     def trigger_run(request: Request, name: str, _: None = Depends(check_auth)):
         enforce_same_origin(request)
@@ -328,7 +444,10 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         path = pipelines_dir / f"{safe_name}.yaml"
         if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Pipeline '{safe_name}' nao encontrado.")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Pipeline '{safe_name}' nao encontrado.",
+            )
         try:
             return load_pipeline_config(path)
         except PipelineConfigError as exc:
@@ -395,7 +514,9 @@ def create_app(
         elif pagination_type == "link_header":
             pagination_params = {"header_name": form.get("header_name") or "Link"}
         elif pagination_type == "next_url":
-            pagination_params = {"next_url_field": form.get("next_url_field") or "next"}
+            pagination_params = {
+                "next_url_field": form.get("next_url_field") or "next"
+            }
 
         columns = []
         col_names = form.getlist("column_name") if hasattr(form, "getlist") else []
@@ -409,6 +530,12 @@ def create_app(
                     )
                 )
 
+        primary_key_text = str(form.get("primary_key") or "").strip()
+        primary_key = [
+            item.strip() for item in primary_key_text.split(",") if item.strip()
+        ] or None
+        dedup = (form.get("dedup") or "off") == "on"
+
         connector = ConnectorConfig(
             base_url=base_url,
             method=form.get("method", "GET"),
@@ -418,7 +545,10 @@ def create_app(
                 param_name=form.get("auth_param_name") or "api_key",
                 location=form.get("auth_location") or "query",
             ),
-            pagination=PaginationConfig(type=pagination_type, params=pagination_params),
+            pagination=PaginationConfig(
+                type=pagination_type,
+                params=pagination_params,
+            ),
             incremental=IncrementalConfig(
                 mode=form.get("incremental_mode", "data_date"),
                 initial_start=form.get("initial_start") or None,
@@ -430,6 +560,8 @@ def create_app(
                 format=form.get("date_param_format") or "%Y-%m-%d",
             ),
             records_path=form.get("records_path") or None,
+            primary_key=primary_key,
+            dedup=dedup,
             extraction_batch_size=int(
                 form.get("extraction_batch_size") or DEFAULT_EXTRACTION_BATCH_SIZE
             ),

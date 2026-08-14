@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Iterator, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 import requests
 
@@ -93,6 +93,8 @@ class RestConnector(APIConnector):
         records_path: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         records: Optional[Union[Callable[[Any], list[dict]], str]] = None,
         select: list[str] | tuple[str, ...] | str | dict[str, str] | None = None,
+        primary_key: str | Sequence[str] | None = None,
+        dedup: bool | str | Sequence[str] | None = False,
         http_client: Optional[HttpClient] = None,
         extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
@@ -110,7 +112,9 @@ class RestConnector(APIConnector):
         self._base_url = base_url
         self._static_params = {**(static_params or {}), **(params or {})}
         self._records_path = records if records is not None else records_path
-        self._resolved_records_path = self._records_path if isinstance(self._records_path, str) else None
+        self._resolved_records_path = (
+            self._records_path if isinstance(self._records_path, str) else None
+        )
         self._select = resolve_select(select)
         self._date_params = self._date_params_from(date_params)
         self._state_key = resolved_state_key
@@ -176,10 +180,6 @@ class RestConnector(APIConnector):
         else:
             runtime_incremental = None
 
-        # Legacy/typed construction may provide StateStore plus mode/date_field
-        # without an explicit ``incremental=`` selector. Resolve that strategy
-        # here so the new state namespace is honored consistently instead of
-        # letting APIConnector fall back to connector.name.
         if runtime_incremental is None and state_store is not None:
             if mode is IncrementalMode.DATA_DATE and field is None:
                 raise MissingDateFieldError(
@@ -212,7 +212,17 @@ class RestConnector(APIConnector):
             max_pages=max_pages,
             allow_cross_origin_pagination=allow_cross_origin_pagination,
             record_transform=self._project_record if self._select else None,
+            primary_key=primary_key,
+            dedup=dedup,
         )
+        if self._select and self.primary_key:
+            emitted = {item.alias for item in self._select}
+            missing_keys = [key for key in self.primary_key if key not in emitted]
+            if missing_keys:
+                raise ValueError(
+                    "primary_key deve referenciar colunas emitidas depois de select. "
+                    f"PK(s) ausente(s): {', '.join(missing_keys)}."
+                )
 
     @staticmethod
     def _date_params_from(value: DateParams | dict[str, Any] | None) -> DateParams:
@@ -280,10 +290,16 @@ class RestConnector(APIConnector):
     def resolved_records_path(self) -> str | None:
         return self._resolved_records_path
 
-    def build_request(self, window: IncrementalWindow, page_params: dict[str, Any]) -> dict[str, Any]:
+    def build_request(
+        self,
+        window: IncrementalWindow,
+        page_params: dict[str, Any],
+    ) -> dict[str, Any]:
         payload = {**self._static_params, **page_params}
         if self._date_params.start and window.start:
-            payload[self._date_params.start] = window.start.strftime(self._date_params.date_format)
+            payload[self._date_params.start] = window.start.strftime(
+                self._date_params.date_format
+            )
         if self._date_params.end and window.end:
             payload[self._date_params.end] = window.end.strftime(self._date_params.date_format)
         return (
@@ -297,6 +313,15 @@ class RestConnector(APIConnector):
         items = self._extract_items(raw)
         return ParsedPage(
             records=[stringify(item) for item in items],
+            raw=raw,
+            headers=dict(response.headers),
+        )
+
+    def parse_profile_response(self, response: requests.Response) -> ParsedPage:
+        """Preserve native JSON values for schema and type profiling."""
+        raw = response.json()
+        return ParsedPage(
+            records=self._extract_items(raw),
             raw=raw,
             headers=dict(response.headers),
         )
@@ -330,7 +355,12 @@ class RestConnector(APIConnector):
         limit: int = 25,
     ) -> ProbeResult:
         """Fetch exactly one page for diagnostics without advancing state."""
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 1000:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > 1000
+        ):
             raise ValueError("probe limit deve ser um inteiro entre 1 e 1000.")
 
         window = self._incremental.resolve_window(end)
@@ -342,9 +372,6 @@ class RestConnector(APIConnector):
         page = self.parse_response(response)
 
         if isinstance(self._pagination, AutoPagination):
-            # Detection uses the already-fetched page and deliberately does not
-            # follow the next request. The resolved strategy can then be reused
-            # by the real extraction without a second discovery request.
             self._pagination.next_params(page, page_params)
 
         records = page.records[:limit]
@@ -419,6 +446,8 @@ class RestConnector(APIConnector):
                 {"path": item.path, "alias": item.alias}
                 for item in (self._select or ())
             ],
+            "primary_key": list(self.primary_key) if self.primary_key else None,
+            "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import warnings
 from abc import abstractmethod
 from datetime import date
-from typing import Any, Callable, Iterator, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, Union
 from urllib.parse import urlsplit
 
 import requests
 
 from engineer_kit.connectors.base import Connector
 from engineer_kit.connectors.date_field import DateFieldSpec
+from engineer_kit.connectors.dedup import resolve_primary_key
 from engineer_kit.connectors.extraction import (
     DEFAULT_EXTRACTION_BATCH_SIZE,
     ExtractionSession,
@@ -25,6 +27,8 @@ from engineer_kit.connectors.incremental import (
 )
 from engineer_kit.connectors.pagination import NEXT_URL_KEY, PaginationStrategy, ParsedPage
 from engineer_kit.http.client import HttpClient
+from engineer_kit.profiling.engine import profile_records, resolve_profile_metrics
+from engineer_kit.profiling.model import ProfileReport
 from engineer_kit.storage.state_store import StateStore, Watermark
 
 VALID_HTTP_METHODS = ("GET", "POST")
@@ -85,6 +89,8 @@ class APIConnector(Connector):
         max_pages: int = DEFAULT_MAX_PAGES,
         allow_cross_origin_pagination: bool = False,
         record_transform: Callable[[dict], dict] | None = None,
+        primary_key: str | Sequence[str] | None = None,
+        dedup: bool | str | Sequence[str] | None = False,
     ) -> None:
         method = method.upper()
         if method not in VALID_HTTP_METHODS:
@@ -94,12 +100,39 @@ class APIConnector(Connector):
         if max_pages <= 0:
             raise ValueError("max_pages deve ser maior que zero.")
 
+        # Temporary compatibility for the unreleased profiling branch: callers
+        # that used ``dedup='id'`` or ``dedup=['tenant_id', 'id']`` are migrated
+        # to the new orthogonal contract. New code must declare identity with
+        # ``primary_key=...`` and policy with ``dedup=True/False``.
+        if dedup is None:
+            resolved_dedup = False
+        elif isinstance(dedup, bool):
+            resolved_dedup = dedup
+        elif primary_key is None and isinstance(dedup, (str, list, tuple)):
+            warnings.warn(
+                "dedup=<primary key> esta obsoleto; use primary_key=<...>, dedup=True.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            primary_key = dedup
+            resolved_dedup = True
+        else:
+            raise TypeError("dedup deve ser booleano; declare a identidade em primary_key.")
+
+        resolved_primary_key = resolve_primary_key(primary_key)
+        if resolved_dedup and resolved_primary_key is None:
+            raise ValueError(
+                "dedup=True exige primary_key. Defina primary_key='id' ou uma chave composta."
+            )
+
         self.name = name
         self._http = http_client
         self._pagination = pagination
         self._method = method
         self._date_field = date_field
         self._record_transform = record_transform
+        self._primary_key = resolved_primary_key
+        self._dedup_enabled = resolved_dedup
         self._extraction_batch_size = validate_extraction_batch_size(extraction_batch_size)
         self._max_pages = max_pages
         self._allow_cross_origin_pagination = bool(allow_cross_origin_pagination)
@@ -135,6 +168,21 @@ class APIConnector(Connector):
         return self._max_pages
 
     @property
+    def primary_key(self) -> tuple[str, ...] | None:
+        """Declared simple/composite identity, independent from dedup policy."""
+        return self._primary_key
+
+    @property
+    def dedup_enabled(self) -> bool:
+        """Whether extraction suppresses repeated primary-key records."""
+        return self._dedup_enabled
+
+    @property
+    def dedup_keys(self) -> tuple[str, ...] | None:
+        """Compatibility alias for the key used by active deduplication."""
+        return self._primary_key if self._dedup_enabled else None
+
+    @property
     def checkpoint_enabled(self) -> bool:
         """Whether successful extraction advances persistent incremental state.
 
@@ -165,7 +213,17 @@ class APIConnector(Connector):
 
     @abstractmethod
     def parse_response(self, response: requests.Response) -> ParsedPage:
-        """Extract records, raw response and headers."""
+        """Extract normalized records, raw response and headers."""
+
+    def parse_profile_response(self, response: requests.Response) -> ParsedPage:
+        """Parse records for profiling.
+
+        Connectors whose ingestion parser normalizes values may override this
+        hook to preserve native source types for profiling. By default profiling
+        uses the regular parsed page, which keeps third-party connectors fully
+        compatible.
+        """
+        return self.parse_response(response)
 
     def extract_incremental(
         self,
@@ -192,14 +250,59 @@ class APIConnector(Connector):
             date_field=self._date_field,
             batch_size=resolved_batch_size,
             record_transform=self._record_transform,
+            dedup=self._primary_key if self._dedup_enabled else None,
         )
 
-    def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
-        """Return the legacy lazy record stream.
+    def profile(
+        self,
+        *metrics: str,
+        end: Union[date, str] = "today",
+        scope: str = "full",
+        limit: int | None = None,
+        fields: Sequence[str] | None = None,
+        key: str | Sequence[str] | None = None,
+    ) -> ProfileReport:
+        """Return aggregate profiling/data-quality metrics without persistence.
 
-        New code should prefer ``extract_incremental()`` and normal session
-        iteration so bounded batches are the default user experience.
+        No metric selector means a complete profile. Explicit selectors such as
+        ``profile("duplicates", "nulls", "missing")`` activate only the
+        required aggregators. ``key`` evaluates duplicates by a candidate PK;
+        when omitted, a configured ``primary_key`` is reused automatically.
+        Profiling never writes a destination and never commits a checkpoint.
         """
+        plan = resolve_profile_metrics(metrics)
+        window = self._incremental.resolve_window(end)
+        records = self._iter_profile_records(window)
+        try:
+            return profile_records(
+                records,
+                *plan,
+                scope=scope,
+                limit=limit,
+                fields=fields,
+                key=key if key is not None else self._primary_key,
+            )
+        finally:
+            close = getattr(records, "close", None)
+            if callable(close):
+                close()
+
+    def _iter_profile_records(
+        self,
+        window: IncrementalWindow,
+    ) -> Iterator[dict[str, Any]]:
+        pages = self._iter_pages(window, self.parse_profile_response)
+        try:
+            for page in pages:
+                for record in page.records:
+                    yield self._record_transform(record) if self._record_transform else record
+        finally:
+            close = getattr(pages, "close", None)
+            if callable(close):
+                close()
+
+    def extract(self, end: Union[date, str] = "today") -> Iterator[dict[str, Any]]:
+        """Return the legacy lazy record stream."""
         session = self.extract_incremental(end)
         self._legacy_session = session
         return session.iter_records()
@@ -211,12 +314,28 @@ class APIConnector(Connector):
             # contain cursor/token values.
             return f"url:{next_url}"
         try:
-            serialized = json.dumps(page_params, sort_keys=True, default=str, separators=(",", ":"))
+            serialized = json.dumps(
+                page_params,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
         except (TypeError, ValueError):
-            serialized = repr(sorted((str(k), type(v).__name__) for k, v in page_params.items()))
+            serialized = repr(
+                sorted((str(key), type(value).__name__) for key, value in page_params.items())
+            )
         return f"params:{serialized}"
 
     def _iter_records(self, window: IncrementalWindow) -> Iterator[dict[str, Any]]:
+        for page in self._iter_pages(window, self.parse_response):
+            yield from page.records
+
+    def _iter_pages(
+        self,
+        window: IncrementalWindow,
+        parser: Callable[[requests.Response], ParsedPage],
+    ) -> Iterator[ParsedPage]:
+        """Yield pages through one shared pagination/safety state machine."""
         page_params = self._pagination.initial_params()
         next_url: Optional[str] = None
         seen_requests: set[str] = set()
@@ -260,9 +379,8 @@ class APIConnector(Connector):
 
             response = self._http.request(self._method, **request_kwargs)
             pages_requested += 1
-            page = self.parse_response(response)
-
-            yield from page.records
+            page = parser(response)
+            yield page
 
             next_params = self._pagination.next_params(page, page_params)
             if next_params is None:

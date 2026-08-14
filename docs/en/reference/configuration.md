@@ -13,7 +13,7 @@ connector:
   base_url: https://api.example.com/orders
 ```
 
-`GET`, `auto` pagination, and conservative record-list discovery are the defaults. No `StateStore` is created unless incremental ingestion is enabled.
+`GET`, `auto` pagination, `dedup: false`, and conservative record-list discovery are the defaults. No `StateStore` is created unless incremental ingestion is enabled.
 
 ## Complete structure
 
@@ -47,6 +47,8 @@ Logical pipeline identifier. For compatibility it is also the default checkpoint
 | `select` | list/string/mapping | null | projected fields; mappings support `path: alias` |
 | `params` | mapping | `{}` | fixed API parameters |
 | `state_key` | string/null | `name` | explicit checkpoint namespace |
+| `primary_key` | string/list/null | null | simple or composite identity of the emitted record |
+| `dedup` | bool | `false` | enable deduplication using `primary_key` |
 | `extraction_batch_size` | int | `25000` | records delivered per extraction batch |
 | `max_pages` | int | core limit | defensive pagination bound |
 | `auth` | object | none | authentication strategy |
@@ -84,6 +86,59 @@ select:
 ```
 
 Paths support object traversal and explicit indexes, for example `items[0].sku` and `payload["odd.key"].value`. Wildcards are intentionally unsupported because selectors must not change row cardinality implicitly. If two paths normalize to the same output alias, validation fails and explicit aliases are required.
+
+### `primary_key` and `dedup`
+
+Identity and deduplication policy are independent. A PK may be mapped without removing records:
+
+```yaml
+connector:
+  base_url: https://api.example.com/customers
+  primary_key: customer_id
+  dedup: false
+```
+
+This allows `profile()` to use the configured identity for completeness, null/missing, and duplicate analysis before deduplication is enabled.
+
+Enable deduplication explicitly:
+
+```yaml
+connector:
+  base_url: https://api.example.com/customers
+  primary_key: customer_id
+  dedup: true
+```
+
+Composite identity:
+
+```yaml
+connector:
+  base_url: https://api.example.com/orders
+  primary_key:
+    - tenant_id
+    - order_id
+  dedup: true
+```
+
+`dedup` is strictly boolean and `false` is always the default. `dedup: true` without `primary_key` is rejected. Strings such as `"false"` and intermediate forms such as `dedup: customer_id` or `dedup: [customer_id]` are also rejected in YAML so there is one unambiguous declarative contract.
+
+`primary_key` accepts only a string, a list of strings, or `null`; booleans such as `primary_key: true` and `primary_key: false` are invalid. This prevents dataset identity from being confused with the former idea of switching deduplication on or off.
+
+When deduplication is enabled and a valid PK repeats, the first occurrence wins and **the complete later record is removed**, even if other fields differ. Missing, `null`, blank, array, or object values in any PK component fail ingestion explicitly instead of collapsing records without usable identity.
+
+Identity is evaluated **after `select`**. Therefore projected connectors must reference aliases actually emitted by `select` in `primary_key`.
+
+The runtime stores only SHA-256 fingerprints of the PK in a temporary SQLite database and deletes the file at the end. This avoids an unbounded in-memory set; disk usage grows with the number of unique identities observed.
+
+Use `profile()` to evaluate a candidate key before persisting it or enabling the policy:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml \
+  --metrics duplicates,missing,nulls \
+  --key tenant_id,order_id
+```
+
+Once `primary_key` is configured, `--key` may be omitted and profiling reuses the declared identity even with `dedup: false`.
 
 ### `params`
 
@@ -250,6 +305,21 @@ transform:
 ```
 
 The short form `transform: dbt` is also accepted.
+
+## Profiling a configuration
+
+The same YAML can be inspected without loading Bronze:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,missing,nulls --key customer_id
+engineer-kit profile-config pipelines/orders.yaml --scope full
+```
+
+When `--key` is omitted, a configured `connector.primary_key` is reused automatically for the `duplicates` metric independently of `dedup`. Without `--key` and without `primary_key`, duplicates are evaluated by complete-row identity.
+
+The command uses an inspection state backend that refuses writes, so profiling cannot advance the configured checkpoint. Local Lab exposes the same operation through the **Data Profile** screen, including candidate-PK testing before persisting identity or enabling deduplication.
 
 ## File validation and safety
 
