@@ -47,7 +47,7 @@ Identificador lógico do pipeline. Por compatibilidade ele também é a chave pa
 | `select` | list/string/mapping | null | campos projetados; mapping permite `path: alias` |
 | `params` | mapping | `{}` | parâmetros fixos da API |
 | `state_key` | string/null | `name` | namespace explícito do checkpoint |
-| `dedup` | bool | `false` | remove duplicatas exatas das linhas emitidas |
+| `dedup` | string/list/false | `false` | PK simples ou composta usada para deduplicar registros completos |
 | `extraction_batch_size` | int | `25000` | registros por batch entregue |
 | `max_pages` | int | limite do core | limite defensivo de páginas |
 | `auth` | object | none | estratégia de autenticação |
@@ -88,19 +88,37 @@ Paths aceitam navegação por objetos e índices explícitos, por exemplo `items
 
 ### `dedup`
 
-A deduplicação é opt-in:
+A deduplicação é opt-in e sempre declara a identidade do registro. Chave simples:
+
+```yaml
+connector:
+  base_url: https://api.example.com/customers
+  dedup: customer_id
+```
+
+Chave composta:
 
 ```yaml
 connector:
   base_url: https://api.example.com/orders
-  dedup: true
+  dedup:
+    - tenant_id
+    - order_id
 ```
 
-`false` é sempre o default. O YAML exige um booleano real; strings como `"false"` são recusadas para evitar coerção surpreendente.
+`false` é sempre o default. `dedup: true` é recusado porque não informa qual coluna representa a identidade. Ao configurar uma PK, valores ausentes, `null`, blank, arrays ou objetos nessa chave fazem a ingestão falhar explicitamente em vez de colapsar registros sem identidade.
 
-Quando ativa, a deduplicação acontece **depois de `select`**, portanto considera a linha efetivamente emitida para `collect()`, `stream()` e a carga gerenciada. O runtime guarda somente fingerprints SHA-256 em SQLite temporário e remove o arquivo ao final. Isso evita um conjunto de hashes sem limite em RAM, embora o uso de disco cresça com a quantidade de linhas únicas observadas.
+Quando uma PK válida reaparece, a primeira ocorrência vence e **o registro inteiro seguinte é removido**. A deduplicação acontece depois de `select`; portanto, quando existe projeção, os campos de `dedup` devem ser aliases efetivamente emitidos pelo `select`.
 
-O `profile()` continua observando os registros antes dessa remoção, de modo que o relatório de Data Quality ainda mostre as duplicatas existentes na fonte/projeção.
+O runtime guarda somente fingerprints SHA-256 da PK em SQLite temporário e remove o arquivo ao final. Isso evita um conjunto sem limite em RAM; o uso de disco cresce com a quantidade de identidades únicas observadas.
+
+Use `profile()` antes de ativar dedup para avaliar uma PK candidata. O profiling pode contar duplicatas da chave e registros com chave inválida sem gravar Bronze nem avançar checkpoint:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml \
+  --metrics duplicates,missing,nulls \
+  --key tenant_id,order_id
+```
 
 ### `params`
 
@@ -275,10 +293,13 @@ O mesmo YAML pode ser inspecionado sem carregar Bronze:
 ```bash
 engineer-kit profile-config pipelines/orders.yaml
 engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,missing,nulls --key customer_id
 engineer-kit profile-config pipelines/orders.yaml --scope full
 ```
 
-O comando usa um `StateStore` de inspeção que nunca aceita writes; portanto o profile não avança o checkpoint configurado. O Local Lab expõe a mesma operação na tela **Data Profile**.
+Quando `--key` é omitido, uma PK já configurada em `connector.dedup` é reutilizada automaticamente para a métrica `duplicates`. Sem `--key` e sem dedup configurado, duplicatas são avaliadas pela linha completa.
+
+O comando usa um `StateStore` de inspeção que nunca aceita writes; portanto o profile não avança o checkpoint configurado. O Local Lab expõe a mesma operação na tela **Data Profile**, inclusive para testar uma PK candidata antes de persistir `dedup`.
 
 ## Validação e segurança do arquivo
 
