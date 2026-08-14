@@ -121,7 +121,17 @@ class RestConnector(APIConnector):
         runtime_incremental: IncrementalStrategy | None
         auto_state = False
 
-        if isinstance(incremental, IncrementalStrategy):
+        if isinstance(incremental, NoIncrementalStrategy):
+            runtime_incremental = incremental
+        elif isinstance(incremental, IncrementalStrategy):
+            strategy_state_key = validate_state_key(incremental.state_key)
+            if state_key is not None and resolved_state_key != strategy_state_key:
+                raise ValueError(
+                    "state_key diverge da IncrementalStrategy explicita. "
+                    "Use a chave da strategy ou remova state_key da facade."
+                )
+            resolved_state_key = strategy_state_key
+            self._state_key = strategy_state_key
             runtime_incremental = incremental
         elif isinstance(incremental, str):
             field, mode = incremental, IncrementalMode.DATA_DATE
