@@ -6,6 +6,8 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
 ### Added
 
 - Paridade declarativa com a superfície intent-driven: YAML aceita `records`, `select`, `params`, paginação curta e incremental opcional.
