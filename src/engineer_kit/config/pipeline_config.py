@@ -44,31 +44,89 @@ CURRENT_PIPELINE_CONFIG_VERSION = 1
 MAX_PIPELINE_CONFIG_BYTES = 1024 * 1024
 _SECRET_REF_RE = re.compile(r"^\$\{SECRET:([A-Za-z0-9_.-]+)\}$")
 _SENSITIVE_OPTION_KEYS = {
-    "password", "passwd", "token", "access_token", "refresh_token", "api_key", "apikey",
-    "secret", "client_secret", "aws_access_key_id", "aws_secret_access_key",
-    "aws_session_token", "account_key", "sas_token", "connection_string",
+    "password",
+    "passwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "account_key",
+    "sas_token",
+    "connection_string",
 }
 
 _ROOT_KEYS = {
-    "version", "name", "connector", "columns", "destination", "state", "state_store",
-    "transform", "secrets", "run_log",
+    "version",
+    "name",
+    "connector",
+    "columns",
+    "destination",
+    "state",
+    "state_store",
+    "transform",
+    "secrets",
+    "run_log",
 }
 _CONNECTOR_KEYS = {
-    "base_url", "method", "auth", "pagination", "incremental", "date_params", "records",
-    "records_path", "select", "params", "static_params", "state_key", "extraction_batch_size",
+    "base_url",
+    "method",
+    "auth",
+    "pagination",
+    "incremental",
+    "date_params",
+    "records",
+    "records_path",
+    "select",
+    "params",
+    "static_params",
+    "state_key",
+    "dedup",
+    "extraction_batch_size",
     "max_pages",
 }
 _AUTH_KEYS = {"type", "secret_key", "param_name", "location"}
 _PAGINATION_KEYS = {
-    "type", "params", "cursor_param", "cursor_field", "cursor", "cursor_path", "param",
-    "page_param", "page_size_param", "page_size", "start_page", "size", "size_param",
-    "offset_param", "limit_param", "limit", "start_offset", "next_url_field", "field", "path",
-    "header_name", "header",
+    "type",
+    "params",
+    "cursor_param",
+    "cursor_field",
+    "cursor",
+    "cursor_path",
+    "param",
+    "page_param",
+    "page_size_param",
+    "page_size",
+    "start_page",
+    "size",
+    "size_param",
+    "offset_param",
+    "limit_param",
+    "limit",
+    "start_offset",
+    "next_url_field",
+    "field",
+    "path",
+    "header_name",
+    "header",
 }
 _INCREMENTAL_KEYS = {"enabled", "mode", "initial_start", "date_field", "field"}
 _DATE_PARAM_KEYS = {"start", "end", "format"}
 _COLUMN_KEYS = {"name", "dtype"}
-_DESTINATION_KEYS = {"type", "path", "schema", "batch_size", "write_mode", "partition_by", "options"}
+_DESTINATION_KEYS = {
+    "type",
+    "path",
+    "schema",
+    "batch_size",
+    "write_mode",
+    "partition_by",
+    "options",
+}
 _STATE_KEYS = {"type", "path", "options"}
 _RUN_LOG_KEYS = {"enabled", "type", "path", "options"}
 _SECRETS_KEYS = {"type", "path", "allow_inline_values"}
@@ -115,9 +173,13 @@ class SecretsConfig:
             return EnvSecretProvider()
         if self.type == "file":
             if not self.path:
-                raise PipelineConfigError("secrets.path e obrigatorio quando secrets.type == 'file'.")
+                raise PipelineConfigError(
+                    "secrets.path e obrigatorio quando secrets.type == 'file'."
+                )
             return FileSecretProvider(self.path)
-        raise PipelineConfigError(f"secrets.type '{self.type}' desconhecido (use 'env' ou 'file').")
+        raise PipelineConfigError(
+            f"secrets.type '{self.type}' desconhecido (use 'env' ou 'file')."
+        )
 
 
 @dataclass
@@ -132,11 +194,15 @@ class AuthConfig:
             return NoAuth()
         if self.type == "bearer":
             if not self.secret_key:
-                raise PipelineConfigError("auth.secret_key e obrigatorio quando auth.type == 'bearer'.")
+                raise PipelineConfigError(
+                    "auth.secret_key e obrigatorio quando auth.type == 'bearer'."
+                )
             return BearerAuth(secret_provider, self.secret_key)
         if self.type == "api_key":
             if not self.secret_key:
-                raise PipelineConfigError("auth.secret_key e obrigatorio quando auth.type == 'api_key'.")
+                raise PipelineConfigError(
+                    "auth.secret_key e obrigatorio quando auth.type == 'api_key'."
+                )
             return ApiKeyAuth(
                 secret_provider,
                 self.secret_key,
@@ -174,7 +240,8 @@ class IncrementalConfig:
             return IncrementalMode(self.mode)
         except ValueError as exc:
             raise PipelineConfigError(
-                f"incremental.mode '{self.mode}' desconhecido (use 'data_date' ou 'ingestion_date')."
+                f"incremental.mode '{self.mode}' desconhecido "
+                "(use 'data_date' ou 'ingestion_date')."
             ) from exc
 
     def resolve_initial_start(self) -> Optional[date]:
@@ -212,11 +279,16 @@ class ConnectorConfig:
     select: list[str] | str | dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
     state_key: Optional[str] = None
+    dedup: bool = False
     # 0.2 aliases retained for existing Python configs and the current Local Lab.
     records_path: Optional[str] = None
     static_params: dict[str, Any] = field(default_factory=dict)
     extraction_batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE
     max_pages: int = DEFAULT_MAX_PAGES
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dedup, bool):
+            raise PipelineConfigError("connector.dedup deve ser booleano.")
 
     def resolved_records(self) -> str | None:
         if self.records and self.records_path and self.records != self.records_path:
@@ -328,7 +400,11 @@ def _validate_shape(data: dict[str, Any]) -> None:
     if isinstance(incremental, dict):
         _validate_keys(incremental, _INCREMENTAL_KEYS, "connector.incremental")
     if "date_params" in connector:
-        _validate_keys(connector.get("date_params") or {}, _DATE_PARAM_KEYS, "connector.date_params")
+        _validate_keys(
+            connector.get("date_params") or {},
+            _DATE_PARAM_KEYS,
+            "connector.date_params",
+        )
 
     columns = data.get("columns", [])
     if not isinstance(columns, list):
@@ -362,7 +438,9 @@ def _pagination_from_value(value: Any) -> PaginationConfig:
         return PaginationConfig(type=value)
     if isinstance(value, dict):
         params = dict(value.get("params") or {})
-        params.update({key: nested for key, nested in value.items() if key not in {"type", "params"}})
+        params.update(
+            {key: nested for key, nested in value.items() if key not in {"type", "params"}}
+        )
         return PaginationConfig(type=str(value.get("type", "auto")), params=params)
     raise PipelineConfigError("connector.pagination deve ser string, bool ou objeto.")
 
@@ -385,10 +463,20 @@ def _incremental_from_value(value: Any, *, present: bool) -> IncrementalConfig:
         return IncrementalConfig(
             enabled=enabled,
             mode=mode,
-            initial_start=str(value["initial_start"]) if value.get("initial_start") else None,
+            initial_start=(
+                str(value["initial_start"]) if value.get("initial_start") else None
+            ),
             date_field=date_field,
         )
     raise PipelineConfigError("connector.incremental deve ser bool, string ou objeto.")
+
+
+def _strict_bool(value: Any, *, path: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise PipelineConfigError(f"{path} deve ser booleano (true/false).")
 
 
 def _transform_from_value(value: Any) -> TransformConfig:
@@ -415,7 +503,12 @@ def _is_secret_ref(value: Any) -> bool:
     return isinstance(value, str) and _SECRET_REF_RE.fullmatch(value) is not None
 
 
-def _validate_sensitive_mapping(value: Any, *, path: str, allow_inline_values: bool) -> None:
+def _validate_sensitive_mapping(
+    value: Any,
+    *,
+    path: str,
+    allow_inline_values: bool,
+) -> None:
     if allow_inline_values or not isinstance(value, dict):
         return
     for key, nested in value.items():
@@ -476,7 +569,10 @@ def _resolve_secret_refs(value: Any, provider: SecretProvider) -> Any:
         match = _SECRET_REF_RE.fullmatch(value)
         return provider.get(match.group(1)) if match else value
     if isinstance(value, dict):
-        return {key: _resolve_secret_refs(nested, provider) for key, nested in value.items()}
+        return {
+            key: _resolve_secret_refs(nested, provider)
+            for key, nested in value.items()
+        }
     if isinstance(value, list):
         return [_resolve_secret_refs(nested, provider) for nested in value]
     if isinstance(value, tuple):
@@ -494,7 +590,9 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         connector_data = data["connector"]
         base_url = connector_data["base_url"]
     except KeyError as exc:
-        raise PipelineConfigError(f"Campo obrigatorio faltando na configuracao: {exc}") from exc
+        raise PipelineConfigError(
+            f"Campo obrigatorio faltando na configuracao: {exc}"
+        ) from exc
 
     try:
         version = int(data.get("version", CURRENT_PIPELINE_CONFIG_VERSION))
@@ -502,7 +600,8 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         raise PipelineConfigError("version deve ser um inteiro.") from exc
     if version != CURRENT_PIPELINE_CONFIG_VERSION:
         raise PipelineConfigError(
-            f"config version {version} nao suportada; use version={CURRENT_PIPELINE_CONFIG_VERSION}."
+            f"config version {version} nao suportada; "
+            f"use version={CURRENT_PIPELINE_CONFIG_VERSION}."
         )
 
     secrets = SecretsConfig(**(data.get("secrets", {}) or {}))
@@ -522,10 +621,16 @@ def pipeline_config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         select=connector_data.get("select"),
         params=connector_data.get("params") or {},
         state_key=connector_data.get("state_key"),
+        dedup=_strict_bool(
+            connector_data.get("dedup"),
+            path="connector.dedup",
+            default=False,
+        ),
         records_path=connector_data.get("records_path"),
         static_params=connector_data.get("static_params") or {},
         extraction_batch_size=connector_data.get(
-            "extraction_batch_size", DEFAULT_EXTRACTION_BATCH_SIZE
+            "extraction_batch_size",
+            DEFAULT_EXTRACTION_BATCH_SIZE,
         ),
         max_pages=connector_data.get("max_pages", DEFAULT_MAX_PAGES),
     )
@@ -567,6 +672,7 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "select": config.connector.select,
             "params": config.connector.params,
             "state_key": config.connector.state_key,
+            "dedup": config.connector.dedup,
             "records_path": config.connector.records_path,
             "static_params": config.connector.static_params,
             "extraction_batch_size": config.connector.extraction_batch_size,
@@ -591,7 +697,9 @@ def load_pipeline_config(path: Union[str, Path]) -> PipelineConfig:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise PipelineConfigError(f"Configuracao YAML deve usar UTF-8: '{path}'.") from exc
+        raise PipelineConfigError(
+            f"Configuracao YAML deve usar UTF-8: '{path}'."
+        ) from exc
 
     # Instantiate our SafeLoader subclass directly rather than calling
     # yaml.load(). This preserves SafeLoader's restricted constructors while
@@ -600,7 +708,9 @@ def load_pipeline_config(path: Union[str, Path]) -> PipelineConfig:
     try:
         data = loader.get_single_data()
     except yaml.YAMLError as exc:
-        raise PipelineConfigError(f"Configuracao YAML invalida em '{path}': {exc}") from exc
+        raise PipelineConfigError(
+            f"Configuracao YAML invalida em '{path}': {exc}"
+        ) from exc
     finally:
         loader.dispose()
 
@@ -613,7 +723,11 @@ def save_pipeline_config(config: PipelineConfig, path: Union[str, Path]) -> None
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
-        yaml.safe_dump(pipeline_config_to_dict(config), sort_keys=False, allow_unicode=True),
+        yaml.safe_dump(
+            pipeline_config_to_dict(config),
+            sort_keys=False,
+            allow_unicode=True,
+        ),
         encoding="utf-8",
     )
     if os.name != "nt":
@@ -651,12 +765,24 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
     try:
         secret_provider = config.secrets.build()
         destination_config = copy.deepcopy(config.destination)
-        destination_config.options = _resolve_secret_refs(destination_config.options, secret_provider)
+        destination_config.options = _resolve_secret_refs(
+            destination_config.options,
+            secret_provider,
+        )
         state_config = copy.deepcopy(config.state)
-        state_config.options = _resolve_secret_refs(state_config.options, secret_provider)
+        state_config.options = _resolve_secret_refs(
+            state_config.options,
+            secret_provider,
+        )
         run_log_config = copy.deepcopy(run_log)
-        run_log_config.options = _resolve_secret_refs(run_log_config.options, secret_provider)
-        connector_params = _resolve_secret_refs(config.connector.resolved_params(), secret_provider)
+        run_log_config.options = _resolve_secret_refs(
+            run_log_config.options,
+            secret_provider,
+        )
+        connector_params = _resolve_secret_refs(
+            config.connector.resolved_params(),
+            secret_provider,
+        )
 
         context = AdapterContext(
             pipeline_name=config.name,
@@ -703,11 +829,15 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
             params=connector_params or None,
             records=config.connector.resolved_records(),
             select=config.connector.select,
+            dedup=config.connector.dedup,
             extraction_batch_size=config.connector.extraction_batch_size,
             max_pages=config.connector.max_pages,
         )
         schema = EndpointSchema(
-            columns=[ColumnSpec(column.name, dtype=column.dtype) for column in config.columns]
+            columns=[
+                ColumnSpec(column.name, dtype=column.dtype)
+                for column in config.columns
+            ]
         )
         return Pipeline(
             connector=connector,
@@ -721,7 +851,9 @@ def build_pipeline(config: PipelineConfig, runtime: Any = None) -> Pipeline:
     except AdapterNotFoundError as exc:
         raise PipelineConfigError(str(exc)) from exc
     except ModuleNotFoundError as exc:
-        raise PipelineConfigError(_dependency_hint(exc, config.destination.type)) from None
+        raise PipelineConfigError(
+            _dependency_hint(exc, config.destination.type)
+        ) from None
     except ValueError as exc:
         raise PipelineConfigError(str(exc)) from exc
 
