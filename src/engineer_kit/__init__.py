@@ -57,6 +57,7 @@ from engineer_kit.http.client import (
     DEFAULT_MAX_RESPONSE_BYTES,
     HttpClient,
     HttpRequestError,
+    InsecureTlsError,
     InsecureUrlError,
     ResponseTooLargeError,
     UnsafeRedirectError,
@@ -100,8 +101,6 @@ from engineer_kit.transform.scaffold import generate_sources_yml, generate_stagi
 try:
     __version__ = package_version("engineer_kit")
 except PackageNotFoundError:
-    # Source trees that are imported without installation have no distribution
-    # metadata. Release/package builds always resolve the version from pyproject.
     __version__ = "0+unknown"
 
 _CONFIG_EXPORTS = {
@@ -193,7 +192,7 @@ __all__ = [
     "PaginationStrategy", "ParsedPage", "NoPagination", "PageNumberPagination", "OffsetPagination",
     "CursorPagination", "LinkHeaderPagination", "NextUrlPagination", "STANDARD_PAGINATION_TYPES",
     "NEXT_URL_KEY", "IncrementalMode", "IncrementalStrategy", "IncrementalWindow", "HttpClient",
-    "HttpRequestError", "InsecureUrlError", "UnsafeUrlError", "UnsafeRedirectError",
+    "HttpRequestError", "InsecureUrlError", "InsecureTlsError", "UnsafeUrlError", "UnsafeRedirectError",
     "ResponseTooLargeError", "DEFAULT_MAX_RESPONSE_BYTES", "DEFAULT_MAX_REDIRECTS", "AuthStrategy",
     "NoAuth", "BearerAuth", "ApiKeyAuth", "InvalidAuthValueError", "SecretProvider",
     "EnvSecretProvider", "StaticSecretProvider", "FileSecretProvider", "SecretNotFoundError",
