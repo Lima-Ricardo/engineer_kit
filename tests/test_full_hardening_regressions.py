@@ -1,6 +1,7 @@
 import base64
 from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -84,6 +85,23 @@ def test_direct_page_strategy_preserves_legacy_short_page_stop():
     params = strategy.initial_params()
     short_page = ParsedPage(records=[{"id": 1}], raw=None)
     assert strategy.next_params(short_page, params) is None
+
+
+def test_empty_rest_response_is_an_empty_page_without_json_decode():
+    connector = RestConnector(
+        name="empty",
+        base_url="https://example.test/items",
+        incremental=False,
+    )
+    response = SimpleNamespace(
+        status_code=204,
+        content=b"",
+        headers={},
+        json=lambda: pytest.fail("json() should not be called for an empty response"),
+    )
+    page = connector.parse_response(response)
+    assert page.records == []
+    assert page.raw == []
 
 
 def test_retry_source_identity_changes_with_source_or_filter_config():
