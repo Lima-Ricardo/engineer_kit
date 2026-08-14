@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, Union
 
@@ -17,11 +17,25 @@ class IncrementalMode(str, Enum):
 
 @dataclass(frozen=True)
 class IncrementalWindow:
-    """Resolved extraction interval plus the checkpoint it was derived from."""
+    """Resolved extraction interval plus the checkpoint it was derived from.
+
+    ``start`` preserves the exact checkpoint boundary for observability. A
+    checkpoint-derived boundary is exclusive by default, so ``request_start``
+    advances one day for date-granularity APIs and avoids reloading the last
+    successfully committed date on every run. The initial configured start is
+    inclusive.
+    """
 
     start: Optional[date]
     end: date
     watermark_before: Watermark | None = None
+    start_inclusive: bool = True
+
+    @property
+    def request_start(self) -> date | None:
+        if self.start is None:
+            return None
+        return self.start if self.start_inclusive else self.start + timedelta(days=1)
 
 
 class IncrementalStrategy:
@@ -43,6 +57,10 @@ class IncrementalStrategy:
     def state_key(self) -> str:
         return self._connector_name
 
+    @property
+    def mode(self) -> IncrementalMode:
+        return self._mode
+
     def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
         resolved_end = date.today() if end == "today" else end
         if not isinstance(resolved_end, date):
@@ -54,6 +72,7 @@ class IncrementalStrategy:
                 start=self._initial_start,
                 end=resolved_end,
                 watermark_before=None,
+                start_inclusive=True,
             )
 
         start = (
@@ -65,6 +84,7 @@ class IncrementalStrategy:
             start=start,
             end=resolved_end,
             watermark_before=watermark,
+            start_inclusive=False,
         )
 
     def commit(
@@ -87,20 +107,29 @@ class IncrementalStrategy:
 
 
 class NoIncrementalStrategy(IncrementalStrategy):
-    """No-op checkpoint strategy used by the zero-configuration happy path.
-
-    It preserves the same ExtractionSession contract without creating files or
-    requiring a StateStore when incrementality was not requested.
-    """
+    """No-op checkpoint strategy used by the zero-configuration happy path."""
 
     def __init__(self) -> None:
         pass
+
+    @property
+    def state_key(self) -> str:
+        return "<disabled>"
+
+    @property
+    def mode(self) -> IncrementalMode:
+        return IncrementalMode.INGESTION_DATE
 
     def resolve_window(self, end: Union[date, str] = "today") -> IncrementalWindow:
         resolved_end = date.today() if end == "today" else end
         if not isinstance(resolved_end, date):
             raise TypeError("end deve ser date ou 'today'.")
-        return IncrementalWindow(start=None, end=resolved_end, watermark_before=None)
+        return IncrementalWindow(
+            start=None,
+            end=resolved_end,
+            watermark_before=None,
+            start_inclusive=True,
+        )
 
     def commit(
         self,

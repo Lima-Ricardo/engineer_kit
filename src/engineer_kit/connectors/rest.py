@@ -15,7 +15,7 @@ from engineer_kit.connectors.api_connector import (
     APIConnector,
     MissingDateFieldError,
 )
-from engineer_kit.connectors.date_field import DateFieldSpec
+from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import (
     IncrementalMode,
@@ -54,12 +54,7 @@ class DateParams:
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """Bounded read-only inspection of one API page.
-
-    A probe never writes a destination and never commits a checkpoint. It is
-    intended to be the shared primitive behind CLI/UI Test Connection and
-    Response Preview experiences.
-    """
+    """Bounded read-only inspection of one API page."""
 
     records: list[dict[str, Any]]
     raw: Any
@@ -137,6 +132,7 @@ class RestConnector(APIConnector):
             resolved_state_key = strategy_state_key
             self._state_key = strategy_state_key
             runtime_incremental = incremental
+            mode = incremental.mode
         elif isinstance(incremental, str):
             field, mode = incremental, IncrementalMode.DATA_DATE
             auto_state = state_store is None
@@ -192,6 +188,27 @@ class RestConnector(APIConnector):
                 mode=mode,
                 initial_start=start,
             )
+
+        if (
+            not isinstance(runtime_incremental, NoIncrementalStrategy)
+            and mode is IncrementalMode.DATA_DATE
+            and field is None
+        ):
+            raise MissingDateFieldError("incremental DATA_DATE exige date_field.")
+
+        self._client_side_incremental_filter = False
+        if not isinstance(runtime_incremental, NoIncrementalStrategy) and not self._date_params.start:
+            if mode is IncrementalMode.DATA_DATE and field is not None:
+                # Preserve the ergonomic incremental='updated_at' path without
+                # pretending the API was filtered: scan the source and enforce
+                # the checkpoint window locally. This is correct but may be more
+                # expensive than configuring date_params.start.
+                self._client_side_incremental_filter = True
+            else:
+                raise ValueError(
+                    "incremental INGESTION_DATE exige date_params.start para que o checkpoint "
+                    "filtre a fonte. Configure o parametro de inicio ou desative incremental."
+                )
 
         self._auto_state = auto_state
         self._resolved_incremental_mode = mode
@@ -254,16 +271,13 @@ class RestConnector(APIConnector):
 
     @property
     def needs_auto_state(self) -> bool:
-        """Whether managed mode may replace the automatically chosen local state."""
         return self._auto_state
 
     @property
     def state_key(self) -> str:
-        """Stable key used for incremental state; defaults to ``name`` for compatibility."""
         return self._state_key
 
     def _bind_auto_state_store(self, state_store: StateStore) -> None:
-        """Let a managed destination replace only the automatically chosen local state."""
         if not self._auto_state:
             return
         self._incremental = IncrementalStrategy(
@@ -275,7 +289,6 @@ class RestConnector(APIConnector):
 
     @property
     def selected_fields(self) -> tuple[str, ...] | None:
-        """Projected output names kept compatible with the 0.2 public property."""
         return tuple(item.alias for item in self._select) if self._select else None
 
     @property
@@ -296,8 +309,9 @@ class RestConnector(APIConnector):
         page_params: dict[str, Any],
     ) -> dict[str, Any]:
         payload = {**self._static_params, **page_params}
-        if self._date_params.start and window.start:
-            payload[self._date_params.start] = window.start.strftime(
+        request_start = window.request_start
+        if self._date_params.start and request_start:
+            payload[self._date_params.start] = request_start.strftime(
                 self._date_params.date_format
             )
         if self._date_params.end and window.end:
@@ -318,13 +332,25 @@ class RestConnector(APIConnector):
         )
 
     def parse_profile_response(self, response: requests.Response) -> ParsedPage:
-        """Preserve native JSON values for schema and type profiling."""
         raw = response.json()
         return ParsedPage(
             records=self._extract_items(raw),
             raw=raw,
             headers=dict(response.headers),
         )
+
+    def _include_record(self, record: dict[str, Any], window: IncrementalWindow) -> bool:
+        if not self._client_side_incremental_filter:
+            return True
+        if self._date_field is None:
+            return True
+        seen = extract_date_value(record, self._date_field)
+        if seen is None:
+            raise MissingDateFieldError(
+                "registro sem date_field valido durante filtro incremental client-side."
+            )
+        start = window.request_start
+        return (start is None or seen >= start) and seen <= window.end
 
     def _project_record(self, record: dict[str, Any]) -> dict[str, Any]:
         return project(record, self._select)
@@ -354,7 +380,6 @@ class RestConnector(APIConnector):
         *,
         limit: int = 25,
     ) -> ProbeResult:
-        """Fetch exactly one page for diagnostics without advancing state."""
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -363,6 +388,7 @@ class RestConnector(APIConnector):
         ):
             raise ValueError("probe limit deve ser um inteiro entre 1 e 1000.")
 
+        self._pagination.reset()
         window = self._incremental.resolve_window(end)
         page_params = self._pagination.initial_params()
         request_kwargs = self.build_request(window, page_params)
@@ -374,7 +400,9 @@ class RestConnector(APIConnector):
         if isinstance(self._pagination, AutoPagination):
             self._pagination.next_params(page, page_params)
 
-        records = page.records[:limit]
+        records = [record for record in page.records if self._include_record(record, window)][
+            :limit
+        ]
         if self._select:
             records = [self._project_record(record) for record in records]
 
@@ -402,7 +430,6 @@ class RestConnector(APIConnector):
         *,
         limit: int = 25,
     ) -> ProbeResult:
-        """Alias for :meth:`probe` used by interactive clients."""
         return self.probe(end=end, limit=limit)
 
     def collect(self, end: Union[date, str] = "today") -> list[dict[str, Any]]:
@@ -449,6 +476,9 @@ class RestConnector(APIConnector):
             "primary_key": list(self.primary_key) if self.primary_key else None,
             "dedup": self.dedup_enabled,
             "incremental": type(self._incremental).__name__,
+            "incremental_filter": (
+                "client-side" if self._client_side_incremental_filter else "source-param-or-disabled"
+            ),
             "state": "destination-auto" if self._auto_state else "explicit-or-disabled",
             "state_key": self._state_key,
             "batch_size": self.extraction_batch_size,
