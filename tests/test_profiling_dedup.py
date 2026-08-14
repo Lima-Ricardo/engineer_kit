@@ -90,6 +90,7 @@ def test_profile_candidate_pk_reports_duplicate_keys_even_when_rows_differ():
     assert report.duplicates is not None
     assert report.duplicates.key_fields == ("id",)
     assert report.duplicates.duplicate_rows == 1
+    assert report.duplicates.unique_rows == 2
     assert report.duplicates.invalid_key_rows == 0
     assert report.duplicates.key_complete is True
     assert report.duplicates.key_unique is False
@@ -185,6 +186,14 @@ def test_dedup_occurs_after_select_on_the_emitted_dataset():
     ]
 
 
+def test_dedup_key_must_reference_an_emitted_alias_after_select():
+    with pytest.raises(ValueError, match="colunas emitidas"):
+        _connector(
+            dedup=["id"],
+            select={"id": "customer_id", "active": "active"},
+        )
+
+
 def test_dedup_supports_composite_primary_keys():
     tracker = ExactKeyDeduplicator(["tenant_id", "customer_id"])
     try:
@@ -215,6 +224,13 @@ def test_profile_counts_invalid_candidate_pk_rows_instead_of_aborting():
     assert report.duplicates is not None
     assert report.duplicates.duplicate_rows == 1
     assert report.duplicates.invalid_key_rows == 2
+    assert report.duplicates.unique_rows == 1
+    assert (
+        report.duplicates.unique_rows
+        + report.duplicates.duplicate_rows
+        + report.duplicates.invalid_key_rows
+        == report.records_analyzed
+    )
     assert report.quality.invalid_key_rows == 2
 
 
