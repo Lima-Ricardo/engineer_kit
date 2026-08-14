@@ -41,7 +41,9 @@ Friendly selectors:
 - `select`: a list/string of fields or a `{path: alias}` mapping;
 - `params`: static request parameters;
 - `state_key`: explicit checkpoint namespace; defaults to the connector name;
-- `dedup`: defaults to `False`. With `True`, exact duplicate emitted rows are removed after `select`, using disk-backed temporary fingerprints instead of an unbounded in-memory set.
+- `dedup`: defaults to `False`; pass a simple PK (`"customer_id"`) or composite PK (`["tenant_id", "order_id"]`) to remove complete records whose identity has already occurred.
+
+`dedup=True` is rejected because it does not declare identity. The first occurrence of a PK wins. Missing, `null`, blank, or non-scalar key values fail ingestion explicitly. Deduplication runs after `select`; with projection enabled, dedup keys must name emitted aliases.
 
 Declarative paths support objects, explicit array indexes, and quoted keys, for example `items[0].sku` and `payload["odd.key"].value`. Wildcards are intentionally unsupported so selectors cannot change row cardinality implicitly. Alias collisions fail fast and require explicit aliases.
 
@@ -94,6 +96,45 @@ report = connector.profile(
 )
 ```
 
+#### Validating a candidate primary key
+
+This is a core profiling use case. Before enabling deduplication, inspect the candidate identity:
+
+```python
+report = connector.profile(
+    "duplicates",
+    "missing",
+    "nulls",
+    key="customer_id",
+)
+
+print(report.duplicates.key_fields)
+print(report.duplicates.duplicate_rows)
+print(report.duplicates.invalid_key_rows)
+```
+
+Composite key:
+
+```python
+report = connector.profile(
+    "duplicates",
+    key=["tenant_id", "order_id"],
+)
+```
+
+Profiling does not assume that a field named `id` is automatically a valid PK. It measures the observed contract: key completeness, invalid key values, and uniqueness violations. The user still decides whether that business identity should be declared in `dedup=`.
+
+If the connector is already configured with:
+
+```python
+connector = RestConnector(
+    base_url=url,
+    dedup=["customer_id"],
+)
+```
+
+then `connector.profile("duplicates")` reuses that PK automatically. With no `key=` and no configured dedup key, the `duplicates` metric compares complete rows.
+
 The return value is `ProfileReport v1`. The same object supports Python logic, terminal output, and standalone HTML:
 
 ```python
@@ -104,7 +145,7 @@ quality = report.quality
 
 The profiler keeps `missing`, `null`, and empty values distinct. It can also observe JSON paths, native source types, cardinality, and duplicates. A metric that was not computed remains distinct from a computed zero.
 
-Profiling is **aggregate-only**: source values are not stored in the report. Presence, missing/null/empty counts, and type counters use state proportional to the number of observed fields, not source row count. Cardinality is exact while small, then switches to an approximate estimator with an explicit relative-error bound. Exact duplicate detection necessarily needs state proportional to unique rows, so it uses SHA-256 fingerprints in temporary SQLite storage rather than unbounded RAM.
+Profiling is **aggregate-only**: source values are not stored in the report. Presence, missing/null/empty counts, and type counters use state proportional to the number of observed fields, not source row count. Cardinality is exact while small, then switches to an approximate estimator with an explicit relative-error bound. Exact duplicate/PK detection requires state proportional to unique identities, so it uses SHA-256 fingerprints in temporary SQLite storage rather than unbounded RAM.
 
 Python defaults to `scope="full"`:
 
@@ -112,18 +153,19 @@ Python defaults to `scope="full"`:
 report = connector.profile(scope="sample", limit=10_000)
 ```
 
-`profile()` **never writes a destination/Bronze table and never commits a checkpoint**. When `dedup=True`, profiling still observes the rows before deduplication so duplicate quality issues remain visible.
+`profile()` **never writes a destination/Bronze table and never commits a checkpoint**. When a connector has `dedup=[...]`, profiling observes rows before removal and reuses the configured PK for duplicate analysis.
 
 The CLI intentionally uses a safer sample default:
 
 ```bash
 engineer-kit profile-config pipeline.yaml
 engineer-kit profile-config pipeline.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipeline.yaml --metrics duplicates,missing,nulls --key customer_id
 engineer-kit profile-config pipeline.yaml --scope full
 engineer-kit profile-config pipeline.yaml --html profile.html
 ```
 
-Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. The UI starts with a 10,000-row sample and requires an explicit `full` selection before scanning the entire configured source.
+Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. The UI starts with a 10,000-row sample, accepts a candidate PK, and requires an explicit `full` selection before scanning the entire configured source.
 
 ### `collect()`
 
@@ -131,7 +173,7 @@ Local Lab exposes the same `ProfileReport` through its **Data Profile** screen. 
 records = connector.collect()
 ```
 
-Materializes the complete extraction and commits the checkpoint only after collection finishes successfully. Use it for small datasets. With `dedup=True`, exact duplicates are suppressed before records are returned.
+Materializes the complete extraction and commits the checkpoint only after collection finishes successfully. Use it for small datasets. With `dedup=["customer_id"]`, the first occurrence of each PK is retained and later complete records with the same key are suppressed.
 
 ### `stream()`
 
@@ -140,7 +182,7 @@ for batch in connector.stream():
     ...
 ```
 
-Yields bounded batches and commits only after complete consumption. `dedup=True` applies to the stream and therefore to managed ingestion that consumes the same `ExtractionSession`.
+Yields bounded batches and commits only after complete consumption. The same configured PK deduplication applies to the stream and therefore to managed ingestion that consumes the same `ExtractionSession`.
 
 ### `to()`
 
@@ -173,7 +215,7 @@ The dbt project is discovered from the current directory and its ancestors. `pro
 plan = connector.explain()
 ```
 
-Returns a safe summary of connector resolution without issuing another HTTP request or exposing the authentication value. The summary includes `state_key`, `dedup`, and `select` path/alias pairs.
+Returns a safe summary of connector resolution without issuing another HTTP request or exposing the authentication value. The summary includes `state_key`, the configured `dedup` PK list when enabled, and `select` path/alias pairs.
 
 ## Advanced pagination
 
@@ -212,7 +254,7 @@ for batch in run:
 run.commit()
 ```
 
-Sessions are single-pass and reject partial checkpoint commits. Connectors created with `dedup=True` apply the same streaming deduplication before records/batches are emitted.
+Sessions are single-pass and reject partial checkpoint commits. Connectors configured with a `dedup` PK apply the same streaming deduplication before records/batches are emitted.
 
 ## `capability_manifest()`
 
@@ -222,7 +264,7 @@ from engineer_kit import capability_manifest
 manifest = capability_manifest()
 ```
 
-Returns serializable metadata describing REST methods, authentication, pagination, incrementality, deduplication, profiling, registered destinations, state stores, run logs, and dbt commands. It is designed for CLI/UI capability discovery without duplicating option lists; typed core contracts remain the execution source of truth.
+Returns serializable metadata describing REST methods, authentication, pagination, incrementality, PK-based deduplication, profiling, registered destinations, state stores, run logs, and dbt commands. It is designed for CLI/UI capability discovery without duplicating option lists; typed core contracts remain the execution source of truth.
 
 ## Stable contracts
 
