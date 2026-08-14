@@ -44,10 +44,17 @@
             <input type="text" name="records_path" value="{{ config.connector.records_path if config and config.connector.records_path else '' }}" placeholder="results">
             <div class="field-hint">Deixe vazio quando a resposta da API já for uma lista.</div>
         </div>
-        <div class="field">
-            <label>Extraction batch size</label>
-            <input type="number" min="1" name="extraction_batch_size" value="{{ config.connector.extraction_batch_size if config else 25000 }}" required>
-            <div class="field-hint">Default: <code>25.000</code> registros. Limita a quantidade entregue ao consumidor por vez. É independente do tamanho da página da API e do write batch do destino.</div>
+        <div class="field-row">
+            <div class="field">
+                <label>Extraction batch size</label>
+                <input type="number" min="1" name="extraction_batch_size" value="{{ config.connector.extraction_batch_size if config else 25000 }}" required>
+                <div class="field-hint">Default: <code>25.000</code> registros. Limita a quantidade entregue ao consumidor por vez. É independente do tamanho da página da API e do write batch do destino.</div>
+            </div>
+            <div class="field">
+                <label>Deduplicação de linhas emitidas</label>
+                <label><input type="checkbox" name="dedup" value="on" {{ "checked" if config and config.connector.dedup else "" }}> dedup=True</label>
+                <div class="field-hint">Desligada por padrão. Quando ativa, remove duplicatas exatas depois do <code>select</code>, usando fingerprints em armazenamento temporário em disco.</div>
+            </div>
         </div>
     </fieldset>
 
