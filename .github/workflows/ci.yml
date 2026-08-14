@@ -82,7 +82,42 @@ jobs:
           python -m pip install -e '.[dev,ui,parquet,delta]'
           python -m pip check
       - name: Run tests with coverage
-        run: python -m pytest -q -m 'not stress' --cov=engineer_kit --cov-report=term-missing
+        id: pytest
+        continue-on-error: true
+        run: python -m pytest -q -m 'not stress' --cov=engineer_kit --cov-report=term-missing --junitxml=pytest-results.xml
+      - name: Annotate pytest failures
+        if: steps.pytest.outcome == 'failure'
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse('pytest-results.xml').getroot()
+          failures = []
+          for case in root.iter('testcase'):
+              problem = case.find('failure') or case.find('error')
+              if problem is None:
+                  continue
+              name = f"{case.get('classname', '')}::{case.get('name', '')}".strip(':')
+              message = (problem.get('message') or problem.text or 'pytest failure').strip()
+              first_line = message.splitlines()[0][:1500]
+              file_name = case.get('file')
+              line = case.get('line')
+              location = ''
+              if file_name:
+                  location = f" file={file_name}"
+                  if line and str(line).isdigit():
+                      location += f",line={int(line) + 1}"
+              print(f"::error{location} title=pytest::{name}: {first_line}")
+              failures.append(name)
+          if not failures:
+              print('::error title=pytest::pytest failed; inspect the job output')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## Pytest failures\n\n')
+              for name in failures:
+                  summary.write(f'- `{name}`\n')
+          PY
+          exit 1
 
   dbt-extra:
     name: dbt optional extra smoke and audit
