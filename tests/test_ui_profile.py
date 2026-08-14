@@ -22,7 +22,8 @@ def _saved_config(tmp_path):
                 "base_url": "https://example.test/orders",
                 "pagination": False,
                 "incremental": False,
-                "dedup": ["id"],
+                "primary_key": ["id"],
+                "dedup": False,
             },
             "run_log": False,
         }
@@ -79,7 +80,7 @@ def test_local_lab_profile_renders_same_profile_report_and_candidate_pk(tmp_path
     assert "email" in response.text
 
 
-def test_local_lab_form_persists_dedup_primary_key(tmp_path):
+def test_local_lab_form_persists_primary_key_and_dedup_policy_separately(tmp_path):
     client = TestClient(
         ui_app.create_app(workspace_dir=str(tmp_path), username="admin", password="admin")
     )
@@ -91,7 +92,8 @@ def test_local_lab_form_persists_dedup_primary_key(tmp_path):
             "method": "GET",
             "pagination_type": "none",
             "incremental_mode": "ingestion_date",
-            "dedup_key": "tenant_id,customer_id",
+            "primary_key": "tenant_id,customer_id",
+            "dedup": "on",
         },
         headers=AUTH_HEADER,
         follow_redirects=False,
@@ -101,4 +103,32 @@ def test_local_lab_form_persists_dedup_primary_key(tmp_path):
     from engineer_kit.config.pipeline_config import load_pipeline_config
 
     saved = load_pipeline_config(tmp_path / "pipelines" / "dedup_ui.yaml")
-    assert saved.connector.dedup == ["tenant_id", "customer_id"]
+    assert saved.connector.primary_key == ["tenant_id", "customer_id"]
+    assert saved.connector.dedup is True
+
+
+def test_local_lab_form_can_store_primary_key_with_dedup_disabled(tmp_path):
+    client = TestClient(
+        ui_app.create_app(workspace_dir=str(tmp_path), username="admin", password="admin")
+    )
+    response = client.post(
+        "/pipelines/save",
+        data={
+            "name": "identity_only",
+            "base_url": "https://example.test/items",
+            "method": "GET",
+            "pagination_type": "none",
+            "incremental_mode": "ingestion_date",
+            "primary_key": "customer_id",
+            "dedup": "off",
+        },
+        headers=AUTH_HEADER,
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    from engineer_kit.config.pipeline_config import load_pipeline_config
+
+    saved = load_pipeline_config(tmp_path / "pipelines" / "identity_only.yaml")
+    assert saved.connector.primary_key == ["customer_id"]
+    assert saved.connector.dedup is False
