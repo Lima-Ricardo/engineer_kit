@@ -10,7 +10,11 @@ from typing import Any, Callable, Iterator, Optional, Union
 
 import requests
 
-from engineer_kit.connectors.api_connector import APIConnector, DEFAULT_MAX_PAGES
+from engineer_kit.connectors.api_connector import (
+    DEFAULT_MAX_PAGES,
+    APIConnector,
+    MissingDateFieldError,
+)
 from engineer_kit.connectors.date_field import DateFieldSpec
 from engineer_kit.connectors.extraction import DEFAULT_EXTRACTION_BATCH_SIZE
 from engineer_kit.connectors.incremental import (
@@ -38,7 +42,7 @@ from engineer_kit.connectors.pagination import (
 from engineer_kit.http.auth import AuthStrategy
 from engineer_kit.http.auth_intent import resolve_auth
 from engineer_kit.http.client import HttpClient
-from engineer_kit.storage.state_store import StateStore
+from engineer_kit.storage.state_store import StateStore, validate_state_key
 
 
 @dataclass
@@ -102,7 +106,7 @@ class RestConnector(APIConnector):
             raise ValueError("Use records= ou records_path=, nao os dois.")
 
         resolved_name = name or infer_name(base_url)
-        resolved_state_key = state_key or resolved_name
+        resolved_state_key = validate_state_key(state_key or resolved_name)
         self._base_url = base_url
         self._static_params = {**(static_params or {}), **(params or {})}
         self._records_path = records if records is not None else records_path
@@ -161,6 +165,23 @@ class RestConnector(APIConnector):
             runtime_incremental = NoIncrementalStrategy()
         else:
             runtime_incremental = None
+
+        # Legacy/typed construction may provide StateStore plus mode/date_field
+        # without an explicit ``incremental=`` selector. Resolve that strategy
+        # here so the new state namespace is honored consistently instead of
+        # letting APIConnector fall back to connector.name.
+        if runtime_incremental is None and state_store is not None:
+            if mode is IncrementalMode.DATA_DATE and field is None:
+                raise MissingDateFieldError(
+                    "incremental_mode=DATA_DATE precisa de date_field. Use "
+                    "IncrementalMode.INGESTION_DATE quando o checkpoint for a data da execucao."
+                )
+            runtime_incremental = IncrementalStrategy(
+                resolved_state_key,
+                state_store,
+                mode=mode,
+                initial_start=start,
+            )
 
         self._auto_state = auto_state
         self._resolved_incremental_mode = mode
