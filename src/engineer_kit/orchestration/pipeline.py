@@ -168,10 +168,11 @@ class Pipeline:
                 window = getattr(connector, "current_window", None)
 
             # Deterministic retry identity is safe only when a persistent
-            # checkpoint transition exists. Non-incremental runs have no state
-            # boundary that can distinguish a retry from a new legitimate run,
-            # so they keep the ad-hoc run-scoped identity created above.
-            if window is not None and connector.checkpoint_enabled:
+            # checkpoint transition exists. Older third-party/duck-typed
+            # connectors predate ``checkpoint_enabled``; preserve their legacy
+            # incremental semantics by treating an observed window as stateful.
+            checkpoint_enabled = bool(getattr(connector, "checkpoint_enabled", True))
+            if window is not None and checkpoint_enabled:
                 context = LoadContext.for_window(
                     connector.name,
                     _window_start(window),
