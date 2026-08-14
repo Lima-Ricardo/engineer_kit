@@ -6,6 +6,19 @@ O formato segue a ideia de Keep a Changelog e o versionamento usa SemVer quando 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-14
+
+### Documentation
+
+- README principal e versão em inglês atualizados para refletir as capacidades públicas da linha `0.3.x`: `probe()`/`preview()`, profiling/Data Quality, PK candidata, `primary_key`, dedup por PK, checkpoint seguro e Local Lab.
+- Novas imagens da interface mostram o dashboard, o editor com identidade/deduplicação separadas e a tela Data Profile antes da Bronze.
+- README usa URLs absolutas para os assets de UI para que as imagens também renderizem na descrição longa do PyPI.
+
+### Packaging
+
+- Metadata do PyPI passa a destacar profiling, Data Quality, primary key e deduplicação na descrição e keywords.
+- Patch sem alteração de comportamento do runtime; a versão `0.3.1` existe para atualizar os artefatos/metadata imutáveis já publicados como `0.3.0`.
+
 ## [0.3.0] - 2026-08-14
 
 ### Added
