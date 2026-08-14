@@ -122,6 +122,8 @@ connector:
 
 `dedup` is strictly boolean and `false` is always the default. `dedup: true` without `primary_key` is rejected. Strings such as `"false"` and intermediate forms such as `dedup: customer_id` or `dedup: [customer_id]` are also rejected in YAML so there is one unambiguous declarative contract.
 
+`primary_key` accepts only a string, a list of strings, or `null`; booleans such as `primary_key: true` and `primary_key: false` are invalid. This prevents dataset identity from being confused with the former idea of switching deduplication on or off.
+
 When deduplication is enabled and a valid PK repeats, the first occurrence wins and **the complete later record is removed**, even if other fields differ. Missing, `null`, blank, array, or object values in any PK component fail ingestion explicitly instead of collapsing records without usable identity.
 
 Identity is evaluated **after `select`**. Therefore projected connectors must reference aliases actually emitted by `select` in `primary_key`.
