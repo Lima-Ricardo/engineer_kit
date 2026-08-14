@@ -15,6 +15,8 @@ from engineer_kit.adapters.registry import available_adapters
 from engineer_kit.config.pipeline_config import CURRENT_PIPELINE_CONFIG_VERSION
 from engineer_kit.connectors.api_connector import VALID_HTTP_METHODS
 from engineer_kit.connectors.pagination import STANDARD_PAGINATION_TYPES
+from engineer_kit.profiling.engine import PROFILE_METRICS, PROFILE_PRESETS
+from engineer_kit.profiling.model import PROFILE_REPORT_VERSION
 
 _BUILTIN_DESTINATIONS: dict[str, dict[str, Any]] = {
     "duckdb": {
@@ -86,11 +88,23 @@ def capability_manifest() -> dict[str, Any]:
                 "params",
                 "pagination",
                 "incremental",
+                "dedup",
             ],
             "auth": ["none", "bearer", "api_key"],
             "pagination": list(STANDARD_PAGINATION_TYPES),
             "incremental": ["none", "ingestion_date", "data_date"],
             "preview": True,
+            "dedup": {"supported": True, "default": False, "scope": "emitted_row"},
+            "profiling": {
+                "supported": True,
+                "report_version": PROFILE_REPORT_VERSION,
+                "metrics": sorted(PROFILE_METRICS),
+                "presets": sorted(PROFILE_PRESETS),
+                "default": "all",
+                "scopes": ["full", "sample"],
+                "checkpoint_commit": False,
+                "destination_write": False,
+            },
         },
         "destinations": destinations,
         "state_stores": list(registered.get("state_store", [])),
