@@ -13,7 +13,7 @@ connector:
   base_url: https://api.example.com/orders
 ```
 
-`GET`, paginação `auto` e detecção conservadora da lista de registros são os defaults. Nenhum `StateStore` é criado quando incremental não foi habilitado.
+`GET`, paginação `auto`, `dedup: false` e detecção conservadora da lista de registros são os defaults. Nenhum `StateStore` é criado quando incremental não foi habilitado.
 
 ## Estrutura completa
 
@@ -47,6 +47,7 @@ Identificador lógico do pipeline. Por compatibilidade ele também é a chave pa
 | `select` | list/string/mapping | null | campos projetados; mapping permite `path: alias` |
 | `params` | mapping | `{}` | parâmetros fixos da API |
 | `state_key` | string/null | `name` | namespace explícito do checkpoint |
+| `dedup` | bool | `false` | remove duplicatas exatas das linhas emitidas |
 | `extraction_batch_size` | int | `25000` | registros por batch entregue |
 | `max_pages` | int | limite do core | limite defensivo de páginas |
 | `auth` | object | none | estratégia de autenticação |
@@ -84,6 +85,22 @@ select:
 ```
 
 Paths aceitam navegação por objetos e índices explícitos, por exemplo `items[0].sku` e `payload["odd.key"].value`. Wildcards não são usados porque não é seguro alterar cardinalidade implicitamente. Se dois paths produzirem o mesmo alias normalizado, a configuração falha e exige aliases explícitos.
+
+### `dedup`
+
+A deduplicação é opt-in:
+
+```yaml
+connector:
+  base_url: https://api.example.com/orders
+  dedup: true
+```
+
+`false` é sempre o default. O YAML exige um booleano real; strings como `"false"` são recusadas para evitar coerção surpreendente.
+
+Quando ativa, a deduplicação acontece **depois de `select`**, portanto considera a linha efetivamente emitida para `collect()`, `stream()` e a carga gerenciada. O runtime guarda somente fingerprints SHA-256 em SQLite temporário e remove o arquivo ao final. Isso evita um conjunto de hashes sem limite em RAM, embora o uso de disco cresça com a quantidade de linhas únicas observadas.
+
+O `profile()` continua observando os registros antes dessa remoção, de modo que o relatório de Data Quality ainda mostre as duplicatas existentes na fonte/projeção.
 
 ### `params`
 
@@ -250,6 +267,18 @@ transform:
 ```
 
 A forma curta `transform: dbt` também é aceita.
+
+## Profiling a partir da configuração
+
+O mesmo YAML pode ser inspecionado sem carregar Bronze:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipelines/orders.yaml --scope full
+```
+
+O comando usa um `StateStore` de inspeção que nunca aceita writes; portanto o profile não avança o checkpoint configurado. O Local Lab expõe a mesma operação na tela **Data Profile**.
 
 ## Validação e segurança do arquivo
 
