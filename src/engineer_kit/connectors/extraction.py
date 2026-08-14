@@ -14,6 +14,7 @@ from datetime import date
 from typing import Callable, Iterator, Optional
 
 from engineer_kit.connectors.date_field import DateFieldSpec, extract_date_value
+from engineer_kit.connectors.dedup import ExactRowDeduplicator
 from engineer_kit.connectors.incremental import IncrementalStrategy, IncrementalWindow
 from engineer_kit.storage.state_store import Watermark
 
@@ -43,7 +44,9 @@ class ExtractionSession:
 
     ``record_transform`` is applied only after incremental date tracking. This
     allows ergonomic projections to hide fields from the caller without hiding
-    a watermark field from checkpoint logic.
+    a watermark field from checkpoint logic. When ``dedup`` is enabled, exact
+    duplicate output rows are suppressed after that transformation using a
+    temporary disk-backed fingerprint store.
     """
 
     def __init__(
@@ -55,13 +58,17 @@ class ExtractionSession:
         date_field: Optional[DateFieldSpec] = None,
         batch_size: int = DEFAULT_EXTRACTION_BATCH_SIZE,
         record_transform: Callable[[dict], dict] | None = None,
+        dedup: bool = False,
     ) -> None:
+        if not isinstance(dedup, bool):
+            raise TypeError("dedup deve ser booleano.")
         self.window = window
         self.batch_size = validate_extraction_batch_size(batch_size)
         self._records = records
         self._incremental = incremental
         self._date_field = date_field
         self._record_transform = record_transform
+        self._dedup = dedup
         self._started = False
         self._exhausted = False
         self._aborted = False
@@ -83,6 +90,11 @@ class ExtractionSession:
     def aborted(self) -> bool:
         """Whether this session was explicitly aborted."""
         return self._aborted
+
+    @property
+    def dedup_enabled(self) -> bool:
+        """Whether duplicate output rows are filtered in this session."""
+        return self._dedup
 
     @property
     def max_data_date_seen(self) -> date | None:
@@ -107,15 +119,20 @@ class ExtractionSession:
         """
         self._ensure_can_start()
         self._started = True
+        deduplicator = ExactRowDeduplicator() if self._dedup else None
         try:
             for record in self._records:
                 self._track_max_data_date(record)
-                yield self._record_transform(record) if self._record_transform else record
+                output = self._record_transform(record) if self._record_transform else record
+                if deduplicator is not None and not deduplicator.add(output):
+                    continue
+                yield output
             self._exhausted = True
         finally:
+            if deduplicator is not None:
+                deduplicator.close()
             # If a consumer stops early or closes the generator, _exhausted stays
             # false and commit() refuses to advance the checkpoint.
-            pass
 
     def iter_batches(self, size: int | None = None) -> Iterator[list[dict]]:
         """Consume the extraction in bounded in-memory batches.
