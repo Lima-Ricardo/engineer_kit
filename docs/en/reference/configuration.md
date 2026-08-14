@@ -47,7 +47,7 @@ Logical pipeline identifier. For compatibility it is also the default checkpoint
 | `select` | list/string/mapping | null | projected fields; mappings support `path: alias` |
 | `params` | mapping | `{}` | fixed API parameters |
 | `state_key` | string/null | `name` | explicit checkpoint namespace |
-| `dedup` | bool | `false` | remove exact duplicate emitted rows |
+| `dedup` | string/list/false | `false` | simple or composite PK used to deduplicate complete records |
 | `extraction_batch_size` | int | `25000` | records delivered per extraction batch |
 | `max_pages` | int | core limit | defensive pagination bound |
 | `auth` | object | none | authentication strategy |
@@ -88,19 +88,37 @@ Paths support object traversal and explicit indexes, for example `items[0].sku` 
 
 ### `dedup`
 
-Deduplication is opt-in:
+Deduplication is opt-in and always declares record identity. Single key:
+
+```yaml
+connector:
+  base_url: https://api.example.com/customers
+  dedup: customer_id
+```
+
+Composite key:
 
 ```yaml
 connector:
   base_url: https://api.example.com/orders
-  dedup: true
+  dedup:
+    - tenant_id
+    - order_id
 ```
 
-`false` is always the default. YAML requires an actual boolean; strings such as `"false"` are rejected to avoid surprising truthiness/coercion.
+`false` is always the default. `dedup: true` is rejected because it does not declare which column represents identity. Once a PK is configured, missing, `null`, blank, array, or object key values fail ingestion explicitly instead of collapsing records with no usable identity.
 
-When enabled, deduplication runs **after `select`**, so identity is based on the row actually emitted to `collect()`, `stream()`, and managed ingestion. The runtime stores only SHA-256 fingerprints in a temporary SQLite database and deletes it when the pass finishes. This avoids an unbounded in-memory set, although disk usage grows with the number of unique rows observed.
+When a valid PK repeats, the first occurrence wins and **the complete later record is removed**. Deduplication runs after `select`; when projection is enabled, every `dedup` field must therefore be an emitted alias.
 
-`profile()` intentionally observes rows before this removal, so Data Quality still reports duplicate problems present in the source/projection.
+The runtime stores only SHA-256 fingerprints of the PK in a temporary SQLite database and deletes the file when the pass finishes. This avoids an unbounded in-memory set; disk use grows with the number of unique identities observed.
+
+Use `profile()` before enabling dedup to evaluate a candidate PK. Profiling can count duplicate keys and invalid-key rows without writing Bronze or advancing a checkpoint:
+
+```bash
+engineer-kit profile-config pipelines/orders.yaml \
+  --metrics duplicates,missing,nulls \
+  --key tenant_id,order_id
+```
 
 ### `params`
 
@@ -275,10 +293,13 @@ The same YAML can be inspected without loading Bronze:
 ```bash
 engineer-kit profile-config pipelines/orders.yaml
 engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,nulls,missing
+engineer-kit profile-config pipelines/orders.yaml --metrics duplicates,missing,nulls --key customer_id
 engineer-kit profile-config pipelines/orders.yaml --scope full
 ```
 
-The command uses an inspection state backend that refuses writes, so profiling cannot advance the configured checkpoint. Local Lab exposes the same operation through the **Data Profile** screen.
+When `--key` is omitted, a PK already configured in `connector.dedup` is reused automatically for the `duplicates` metric. Without `--key` and without configured dedup, duplicates are evaluated by complete-row identity.
+
+The command uses an inspection state backend that refuses writes, so profiling cannot advance the configured checkpoint. Local Lab exposes the same operation through the **Data Profile** screen, including candidate-PK testing before persisting a dedup rule.
 
 ## File validation and safety
 
