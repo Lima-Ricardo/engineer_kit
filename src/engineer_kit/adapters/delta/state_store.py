@@ -8,9 +8,9 @@ import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 
 from engineer_kit.adapters.delta._paths import join_table_uri
-from engineer_kit.storage.identifiers import validate_identifier
 from engineer_kit.storage.state_store import StateStore, Watermark
 
+_STATE_KEY_MAX_CHARS = 512
 
 _STATE_SCHEMA = pa.schema(
     [
@@ -20,6 +20,29 @@ _STATE_SCHEMA = pa.schema(
         pa.field("cursor_value", pa.string()),
     ]
 )
+
+
+def _validate_state_key(value: str) -> str:
+    """Validate a state *value*, not a SQL identifier.
+
+    State namespaces may legitimately contain dots, dashes, slashes or tenant
+    prefixes. They are persisted as data and must not be constrained by the
+    destination's identifier grammar. Control characters and unbounded values
+    are rejected before reaching Arrow/Delta predicates.
+    """
+    key = str(value)
+    if not key or len(key) > _STATE_KEY_MAX_CHARS:
+        raise ValueError(
+            f"state_key deve conter entre 1 e {_STATE_KEY_MAX_CHARS} caracteres."
+        )
+    if any(ord(char) < 32 or ord(char) == 127 for char in key):
+        raise ValueError("state_key nao pode conter caracteres de controle.")
+    return key
+
+
+def _predicate_literal(value: str) -> str:
+    """Escape a validated data value for delta-rs predicate syntax."""
+    return value.replace("'", "''")
 
 
 class DeltaStateStore(StateStore):
@@ -43,7 +66,7 @@ class DeltaStateStore(StateStore):
         return self._table_uri
 
     def get_watermark(self, connector_name: str) -> Watermark | None:
-        connector = validate_identifier(connector_name, "connector_name")
+        connector = _validate_state_key(connector_name)
         options = self._storage_options or None
         if not DeltaTable.is_deltatable(self._table_uri, storage_options=options):
             return None
@@ -67,7 +90,7 @@ class DeltaStateStore(StateStore):
         )
 
     def set_watermark(self, connector_name: str, watermark: Watermark) -> None:
-        connector = validate_identifier(connector_name, "connector_name")
+        connector = _validate_state_key(connector_name)
         options = self._storage_options or None
         data = pa.Table.from_pylist(
             [
@@ -86,7 +109,7 @@ class DeltaStateStore(StateStore):
                 self._table_uri,
                 data,
                 mode="overwrite",
-                predicate=f"connector_name = '{connector}'",
+                predicate=f"connector_name = '{_predicate_literal(connector)}'",
                 storage_options=options,
             )
             return
